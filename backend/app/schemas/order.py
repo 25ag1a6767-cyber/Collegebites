@@ -101,7 +101,7 @@ class CheckoutRequest(BaseModel):
     pickup_slot_id: Optional[UUID] = None
     order_type: str = Field(default="pickup", pattern="^(pickup|dine_in|walk_in|kiosk|qr_table)$")
     order_channel: str = Field(default="web", pattern="^(web|mobile|qr|pos|kiosk)$")
-    payment_method: str = Field(default="razorpay", pattern="^(razorpay|cash|pay_at_pickup|card_pos|upi_pos)$")
+    payment_method: str = Field(default="razorpay", pattern="^(razorpay|stripe|cash|pay_at_pickup|card_pos|upi_pos)$")
     coupon_code: Optional[str] = None
     idempotency_key: Optional[str] = Field(default=None, max_length=120)
     guest_name: Optional[str] = Field(default=None, max_length=160)
@@ -180,6 +180,9 @@ class OrderOut(ORMModel):
     guest_access_token: Optional[str] = None
     razorpay_order_id: Optional[str] = None
     razorpay_key_id: Optional[str] = None
+    stripe_session_id: Optional[str] = None
+    stripe_checkout_url: Optional[str] = None
+    stripe_publishable_key: Optional[str] = None
     cancellation_policy_text: Optional[str] = None
     created_at: datetime
     confirmed_at: Optional[datetime]

@@ -8,9 +8,11 @@ from fastapi import HTTPException
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.core.redis_client import get_redis
 from app.core.security import generate_guest_access_token, mask_mobile, sha256_hex
 from app.integrations.razorpay_client import razorpay_gateway
+from app.integrations.stripe_client import stripe_gateway
 from app.models.college import Canteen, Counter, DiningTable, Kitchen, LocationQRCode
 from app.models.menu import FoodAddon, FoodItem, FoodItemAddon, FoodVariant
 from app.models.order import (
@@ -117,6 +119,8 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
         guest_access_token=raw_guest_token,
         razorpay_order_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "razorpay") else None,
         razorpay_key_id=razorpay_gateway.key_id if order.payment_method == "razorpay" else None,
+        stripe_session_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "stripe") else None,
+        stripe_publishable_key=stripe_gateway.publishable_key if order.payment_method == "stripe" else None,
         cancellation_policy_text=college.cancellation_policy_text,
         created_at=order.created_at,
         confirmed_at=order.confirmed_at,
@@ -445,8 +449,15 @@ def checkout_order(
         )
 
     # Create payment request
-    provider = "razorpay" if payload.payment_method == "razorpay" else "cash"
+    if payload.payment_method == "razorpay":
+        provider = "razorpay"
+    elif payload.payment_method == "stripe":
+        provider = "stripe"
+    else:
+        provider = "cash"
+
     provider_order_id = None
+    stripe_checkout_url = None
     if provider == "razorpay":
         rzp_order = razorpay_gateway.create_order(
             amount_inr=total_amount,
@@ -454,6 +465,17 @@ def checkout_order(
             notes={"order_number": order.order_number, "canteen": canteen.code},
         )
         provider_order_id = rzp_order["id"]
+    elif provider == "stripe":
+        guest_q = f"?guest_token={raw_guest_token}&" if raw_guest_token else "?"
+        base_web = settings.PUBLIC_BASE_URL.rstrip("/")
+        sess = stripe_gateway.create_checkout_session(
+            amount_inr=total_amount,
+            order_number=order.order_number,
+            success_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_cancelled=1",
+        )
+        provider_order_id = sess["id"]
+        stripe_checkout_url = sess.get("url")
 
     payment = Payment(
         order_id=order.id,
@@ -497,7 +519,9 @@ def checkout_order(
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
         .where(Order.id == order.id)
     )
-    return serialize_order(db, loaded, raw_guest_token=raw_guest_token)
+    out = serialize_order(db, loaded, raw_guest_token=raw_guest_token)
+    out.stripe_checkout_url = stripe_checkout_url
+    return out
 
 
 def transition_order_status(

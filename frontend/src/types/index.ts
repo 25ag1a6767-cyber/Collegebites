@@ -219,6 +219,9 @@ export interface Order {
   guest_access_token?: string | null;
   razorpay_order_id?: string | null;
   razorpay_key_id?: string | null;
+  stripe_session_id?: string | null;
+  stripe_checkout_url?: string | null;
+  stripe_publishable_key?: string | null;
   cancellation_policy_text?: string | null;
   created_at: string;
   confirmed_at?: string | null;

@@ -24,6 +24,8 @@ from app.schemas.payment import (
     RazorpayVerifyRequest,
     ReconcileRequest,
     ReconciliationOut,
+    StripeFailureRequest,
+    StripeVerifyRequest,
 )
 from app.services import payment_service
 
@@ -54,6 +56,32 @@ async def razorpay_webhook(
 ):
     raw_body = await request.body()
     return payment_service.handle_razorpay_webhook(db, raw_body, x_razorpay_signature)
+
+
+@router.post("/stripe/verify", response_model=OrderOut)
+def verify_stripe(
+    payload: StripeVerifyRequest,
+    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
+    db: Session = Depends(get_db),
+):
+    return payment_service.verify_stripe_checkout_payment(
+        db, payload, actor_user_id=principal.user.id if principal else None
+    )
+
+
+@router.post("/stripe/fail", response_model=OrderOut)
+def fail_stripe(payload: StripeFailureRequest, db: Session = Depends(get_db)):
+    return payment_service.record_stripe_failure(db, payload)
+
+
+@router.post("/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    stripe_signature: Optional[str] = Header(default=None, alias="Stripe-Signature"),
+    db: Session = Depends(get_db),
+):
+    raw_body = await request.body()
+    return payment_service.handle_stripe_webhook(db, raw_body, stripe_signature)
 
 
 @router.post("/counter/collect", response_model=OrderOut)

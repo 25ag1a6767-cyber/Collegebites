@@ -75,6 +75,8 @@ async function main() {
     await page.getByRole("button", { name: "Verify" }).click();
     await page.getByText("Mobile verified for guest checkout").waitFor();
 
+    await page.getByText("Stripe Checkout").waitFor();
+    await page.getByText("Razorpay Online").waitFor();
     await page.locator('input[type="checkbox"]').check();
     await page.getByRole("button", { name: /Pay ₹/i }).click();
     await page.getByRole("button", { name: /Complete & Verify Payment/i }).click();

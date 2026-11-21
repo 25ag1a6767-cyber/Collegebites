@@ -35,7 +35,7 @@ export default function CheckoutScreen() {
 
   const [couponInput, setCouponInput] = useState("");
   const [selectedSlotId, setSelectedSlotId] = useState<string>("");
-  const [payMethod, setPayMethod] = useState<"razorpay" | "cash_counter" | "pay_at_pickup">("razorpay");
+  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe" | "cash_counter" | "pay_at_pickup">("razorpay");
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [otpCode, setOtpCode] = useState("");
@@ -241,10 +241,11 @@ export default function CheckoutScreen() {
       {/* Payment Method */}
       <View style={styles.box}>
         <Text style={styles.sub}>Payment Method</Text>
-        <View style={{ flexDirection: "row", gap: 6 }}>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
           {[
             { id: "razorpay", label: "Razorpay" },
-            { id: "cash_counter", label: "Counter Cash" },
+            { id: "stripe", label: "Stripe Card" },
+            { id: "cash", label: "Counter Cash" },
             { id: "pay_at_pickup", label: "Pay at Pickup" },
           ].map((m) => (
             <Pressable

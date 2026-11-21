@@ -31,7 +31,8 @@ build/
 uploads/
 receipts_tmp/
 
-# IDE / OS
+# IDE / OS / Vercel
+.vercel
 .vscode/
 .idea/
 .DS_Store

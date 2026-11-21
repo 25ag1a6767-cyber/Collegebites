@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.integrations.expo_push_provider import EXPO_PUSH_URL, send_expo_push
 from app.integrations.sms_provider import send_sms_or_whatsapp
+from app.integrations.stripe_client import stripe_gateway
 from app.models.auth import OTPVerification
 from app.models.college import Canteen
 from app.models.inventory import InventoryItem
@@ -130,3 +131,101 @@ def test_expo_push_kitchen_ingredient_unavailable_and_favourites_list(client):
     assert fav_list.status_code == 200
     assert len(fav_list.json()) >= 1
     assert fav_list.json()[0]["id"] == menu_items[0]["id"]
+
+
+def test_stripe_checkout_verify_webhook_idempotency_and_failure(client):
+    import json
+
+    student_hdrs = login_as(client, "student@collegebites.edu", "Student@12345")["headers"]
+    canteens = client.get("/api/v1/canteens").json()
+    snacks = next(c for c in canteens if c["code"] == "MAIN")
+    items = client.get(f"/api/v1/menus/canteens/{snacks['id']}/items").json()
+    food = items[0]
+
+    assert (
+        client.post(
+            "/api/v1/carts/items",
+            json={"canteen_id": snacks["id"], "food_item_id": food["id"], "quantity": 1},
+            headers=student_hdrs,
+        ).status_code
+        == 200
+    )
+
+    co = client.post(
+        "/api/v1/orders/checkout",
+        json={"canteen_id": snacks["id"], "payment_method": "stripe", "accepted_policy": True},
+        headers=student_hdrs,
+    )
+    assert co.status_code == 201, co.text
+    ord_data = co.json()
+    assert ord_data["stripe_session_id"].startswith("cs_test_")
+    assert ord_data["pickup_token_code"] is None
+
+    # Invalid Stripe signature must be rejected
+    bad = client.post(
+        "/api/v1/payments/stripe/verify",
+        json={
+            "order_id": ord_data["id"],
+            "stripe_session_id": ord_data["stripe_session_id"],
+            "stripe_payment_intent_id": "pi_test_123",
+            "stripe_signature": "bad_sig_value",
+        },
+        headers=student_hdrs,
+    )
+    assert bad.status_code == 400
+
+    # Valid signature generates token + receipt
+    sig = stripe_gateway.compute_test_payment_signature(
+        stripe_session_id=ord_data["stripe_session_id"], stripe_payment_intent_id="pi_test_123"
+    )
+    ok = client.post(
+        "/api/v1/payments/stripe/verify",
+        json={
+            "order_id": ord_data["id"],
+            "stripe_session_id": ord_data["stripe_session_id"],
+            "stripe_payment_intent_id": "pi_test_123",
+            "stripe_signature": sig,
+            "payment_method": "card",
+        },
+        headers=student_hdrs,
+    )
+    assert ok.status_code == 200, ok.text
+    token_code = ok.json()["pickup_token_code"]
+    assert token_code is not None
+
+    # Duplicate Stripe webhook delivery must stay idempotent without duplicating token
+    wh_payload = json.dumps(
+        {
+            "id": f"evt_test_{ord_data['order_number']}",
+            "type": "checkout.session.completed",
+            "data": {"object": {"id": ord_data["stripe_session_id"], "payment_intent": "pi_test_123"}},
+        }
+    ).encode("utf-8")
+    wh_sig = stripe_gateway.compute_test_webhook_signature(raw_body=wh_payload)
+    w1 = client.post("/api/v1/payments/stripe/webhook", content=wh_payload, headers={"Stripe-Signature": wh_sig})
+    w2 = client.post("/api/v1/payments/stripe/webhook", content=wh_payload, headers={"Stripe-Signature": wh_sig})
+    assert w1.status_code == 200 and w2.status_code == 200
+    assert w2.json()["status"] == "already_processed"
+
+    # Separate order failure path
+    assert (
+        client.post(
+            "/api/v1/carts/items",
+            json={"canteen_id": snacks["id"], "food_item_id": food["id"], "quantity": 1},
+            headers=student_hdrs,
+        ).status_code
+        == 200
+    )
+    co2 = client.post(
+        "/api/v1/orders/checkout",
+        json={"canteen_id": snacks["id"], "payment_method": "stripe", "accepted_policy": True},
+        headers=student_hdrs,
+    )
+    assert co2.status_code == 201
+    f_res = client.post(
+        "/api/v1/payments/stripe/fail",
+        json={"order_id": co2.json()["id"], "reason": "Card declined"},
+        headers=student_hdrs,
+    )
+    assert f_res.status_code == 200
+    assert f_res.json()["status"] == "PAYMENT_FAILED"

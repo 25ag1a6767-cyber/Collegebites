@@ -71,6 +71,42 @@ export default function OrderDetailScreen() {
     );
   }
 
+  const verifyTestStripe = async () => {
+    if (!order.stripe_session_id) return;
+    setPaying(true);
+    setErrMsg("");
+    try {
+      const piId = `pi_mob_${Date.now()}`;
+      const secret = process.env.EXPO_PUBLIC_STRIPE_TEST_SECRET || "sk_test_collegebites_local";
+      const sig = hmacSha256Hex(secret, `${order.stripe_session_id}|${piId}`);
+      await mobileApi.post("/payments/stripe/verify", {
+        order_id: order.id,
+        stripe_session_id: order.stripe_session_id,
+        stripe_payment_intent_id: piId,
+        stripe_signature: sig,
+        payment_method: "card",
+      });
+      await refetch();
+    } catch (e: any) {
+      setErrMsg(e?.response?.data?.detail || "Stripe payment verification failed");
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  const failTestStripe = async () => {
+    setPaying(true);
+    try {
+      await mobileApi.post("/payments/stripe/fail", {
+        order_id: order.id,
+        reason: "Customer cancelled Stripe payment in mobile app",
+      });
+      await refetch();
+    } finally {
+      setPaying(false);
+    }
+  };
+
   const verifyTestRazorpay = async () => {
     if (!order.razorpay_order_id) return;
     setPaying(true);
@@ -162,6 +198,27 @@ export default function OrderDetailScreen() {
               </View>
             );
           })}
+        </View>
+      )}
+
+      {order.status === "PAYMENT_PENDING" && order.stripe_session_id && (
+        <View style={styles.payBox}>
+          <Text style={styles.secTitle}>Complete Stripe Payment (₹{order.total_amount})</Text>
+          {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{errMsg}</Text>}
+          {order.stripe_checkout_url ? (
+            <Pressable onPress={() => Linking.openURL(order.stripe_checkout_url)} style={[styles.payBtn, { backgroundColor: "#4f46e5" }]}>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Stripe Checkout</Text>
+            </Pressable>
+          ) : (
+            <Pressable disabled={paying} onPress={verifyTestStripe} style={[styles.payBtn, { backgroundColor: "#4f46e5" }]}>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>
+                {paying ? "Verifying..." : "Pay & Verify Stripe Card (Test Mode)"}
+              </Text>
+            </Pressable>
+          )}
+          <Pressable disabled={paying} onPress={failTestStripe} style={styles.cancelBtn}>
+            <Text style={{ color: "#0f172a", fontWeight: "700" }}>Simulate Payment Failure</Text>
+          </Pressable>
         </View>
       )}
 

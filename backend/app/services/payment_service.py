@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.redis_client import get_redis
 from app.integrations.razorpay_client import razorpay_gateway
+from app.integrations.stripe_client import stripe_gateway
 from app.models.order import Order, OrderItem, PickupSlot, SlotReservation
 from app.models.payment import (
     Payment,
@@ -23,6 +24,8 @@ from app.schemas.payment import (
     RazorpayFailureRequest,
     RazorpayVerifyRequest,
     ReconcileRequest,
+    StripeFailureRequest,
+    StripeVerifyRequest,
 )
 from app.services.audit_service import record_audit_log
 from app.services.order_service import serialize_order, transition_order_status
@@ -74,7 +77,7 @@ def _finalize_confirmed_payment(
         PaymentTransaction(
             payment_id=payment.id,
             order_id=order.id,
-            transaction_type="capture" if payment.provider == "razorpay" else "cash_collect",
+            transaction_type="capture" if payment.provider in ("razorpay", "stripe") else "cash_collect",
             amount=payment.amount,
             status="CONFIRMED",
             external_reference=payment_reference,
@@ -276,6 +279,140 @@ def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: 
 
 
 def record_razorpay_failure(db: Session, payload: RazorpayFailureRequest) -> OrderOut:
+    order = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == payload.order_id)
+        .with_for_update()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    payment = db.scalar(select(Payment).where(Payment.order_id == order.id).with_for_update())
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+    mark_payment_failed(db, order=order, payment=payment, reason=payload.reason)
+    db.expire_all()
+    loaded = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == order.id)
+    )
+    return serialize_order(db, loaded)
+
+
+def verify_stripe_checkout_payment(
+    db: Session, payload: StripeVerifyRequest, actor_user_id: Optional[UUID] = None
+) -> OrderOut:
+    order = db.scalar(select(Order).where(Order.id == payload.order_id).with_for_update())
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    payment = db.scalar(
+        select(Payment).where(Payment.order_id == order.id, Payment.provider == "stripe").with_for_update()
+    )
+    if not payment or payment.provider_order_id != payload.stripe_session_id:
+        raise HTTPException(status_code=400, detail="Stripe session reference does not match this order")
+
+    intent_id = payload.stripe_payment_intent_id or payload.stripe_session_id
+    if stripe_gateway.use_live_api:
+        session_obj = stripe_gateway.retrieve_checkout_session(payload.stripe_session_id)
+        if session_obj.get("payment_status") != "paid":
+            raise HTTPException(status_code=400, detail="Stripe checkout session is not marked as paid")
+        intent_id = session_obj.get("payment_intent") or intent_id
+    else:
+        if not payload.stripe_signature or not stripe_gateway.verify_test_payment_signature(
+            stripe_session_id=payload.stripe_session_id,
+            stripe_payment_intent_id=intent_id,
+            stripe_signature=payload.stripe_signature,
+        ):
+            db.add(
+                PaymentTransaction(
+                    payment_id=payment.id,
+                    order_id=order.id,
+                    transaction_type="authorize",
+                    amount=payment.amount,
+                    status="FAILED",
+                    external_reference=intent_id,
+                    raw_summary={"error": "stripe_signature_verification_failed"},
+                )
+            )
+            db.commit()
+            raise HTTPException(status_code=400, detail="Invalid Stripe payment signature")
+
+    return _finalize_confirmed_payment(
+        db,
+        order=order,
+        payment=payment,
+        provider_payment_id=intent_id,
+        payment_method=payload.payment_method or "card",
+        payment_reference=intent_id,
+        actor_user_id=actor_user_id or order.customer_id,
+        raw_summary={"method": payload.payment_method or "card", "stripe_session_id": payload.stripe_session_id},
+    )
+
+
+def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header: Optional[str]) -> dict[str, Any]:
+    if not stripe_signature_header or not stripe_gateway.verify_webhook_signature(
+        raw_body=raw_body, stripe_signature_header=stripe_signature_header
+    ):
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
+
+    payload = json.loads(raw_body.decode("utf-8"))
+    event_type = payload.get("type", "unknown")
+    event_id = payload.get("id") or f"evt_stripe_{event_type}"
+    obj = payload.get("data", {}).get("object", {})
+
+    existing_evt = db.scalar(
+        select(PaymentWebhookEvent).where(
+            PaymentWebhookEvent.provider == "stripe", PaymentWebhookEvent.event_id == event_id
+        )
+    )
+    if existing_evt and existing_evt.processed:
+        return {"status": "already_processed", "event_id": event_id}
+
+    evt = existing_evt or PaymentWebhookEvent(
+        provider="stripe",
+        event_id=event_id,
+        event_type=event_type,
+        signature_verified=True,
+        processed=False,
+        payload=payload,
+    )
+    if not existing_evt:
+        db.add(evt)
+        db.flush()
+
+    session_id = obj.get("id") if event_type.startswith("checkout.session.") else obj.get("metadata", {}).get("stripe_session_id")
+    if event_type == "checkout.session.completed" and session_id:
+        payment = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe").with_for_update())
+        if payment:
+            order = db.scalar(select(Order).where(Order.id == payment.order_id).with_for_update())
+            if order:
+                pi_id = obj.get("payment_intent") or session_id
+                _finalize_confirmed_payment(
+                    db,
+                    order=order,
+                    payment=payment,
+                    provider_payment_id=pi_id,
+                    payment_method="stripe",
+                    payment_reference=pi_id,
+                    actor_user_id=order.customer_id,
+                    raw_summary={"webhook_event": event_type, "stripe_session_id": session_id},
+                )
+    elif event_type in ("checkout.session.expired", "payment_intent.payment_failed") and session_id:
+        payment = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe").with_for_update())
+        if payment and payment.status == "PENDING":
+            order = db.scalar(select(Order).where(Order.id == payment.order_id).with_for_update())
+            if order and order.status == "PAYMENT_PENDING":
+                mark_payment_failed(db, order=order, payment=payment, reason="Stripe webhook payment failed or expired")
+
+    evt.processed = True
+    evt.processed_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"status": "processed", "event_id": event_id}
+
+
+def record_stripe_failure(db: Session, payload: StripeFailureRequest) -> OrderOut:
     order = db.scalar(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))

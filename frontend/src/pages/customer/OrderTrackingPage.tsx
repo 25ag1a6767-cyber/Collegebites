@@ -43,6 +43,24 @@ export const OrderTrackingPage: React.FC = () => {
     queryFn: async () => (await api.get(`/tokens/receipts/${orderNumber}${querySuffix}`)).data,
   });
 
+  // Complete live Stripe redirect verification when returning from Stripe Checkout
+  useEffect(() => {
+    const stripeSid = searchParams.get("stripe_session_id");
+    if (!stripeSid || !order || order.payment_status === "CONFIRMED") return;
+    api
+      .post("/payments/stripe/verify", {
+        order_id: order.id,
+        stripe_session_id: stripeSid,
+        payment_method: "card",
+      })
+      .then(() => {
+        pushToast("Stripe payment verified! Token issued.", "success");
+        refetch();
+        refetchReceipt();
+      })
+      .catch((err) => pushToast(getApiError(err, "Stripe session verification pending webhook"), "info"));
+  }, [searchParams, order, refetch, refetchReceipt, pushToast]);
+
   // WebSocket real-time updates
   useEffect(() => {
     if (!order?.id) return;
