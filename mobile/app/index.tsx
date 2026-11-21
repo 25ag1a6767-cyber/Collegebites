@@ -12,8 +12,15 @@ import {
 } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { getMobileApiError, mobileApi } from "../src/api/client";
+import { canteensApi } from "../src/api/canteens.api";
+import { cartApi } from "../src/api/cart.api";
+import { getMobileApiError } from "../src/api/client";
+import { menuApi } from "../src/api/menu.api";
+import { ordersApi } from "../src/api/orders.api";
+import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
+
+const ACTIVE_STATUSES = new Set(["PAYMENT_PENDING", "PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING", "READY"]);
 
 export default function MenuScreen() {
   const router = useRouter();
@@ -38,55 +45,82 @@ export default function MenuScreen() {
   const [reviewComment, setReviewComment] = useState("");
   const [modalMsg, setModalMsg] = useState("");
 
-  const { data: canteens = [] } = useQuery<any[]>({
+  const { data: college } = useQuery<any>({
+    queryKey: ["m-college"],
+    queryFn: canteensApi.getCollegeSettings,
+  });
+
+  const {
+    data: canteens = [],
+    isError: canteensErr,
+    error: canteensErrObj,
+    refetch: refetchCanteens,
+  } = useQuery<any[]>({
     queryKey: ["m-canteens"],
-    queryFn: async () => (await mobileApi.get("/canteens")).data,
+    queryFn: canteensApi.listCanteens,
   });
   const activeCanteen = canteens.find((c) => c.id === selectedCanteenId) || canteens[0];
 
   const { data: categories = [] } = useQuery<any[]>({
     queryKey: ["m-categories", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
-    queryFn: async () => (await mobileApi.get(`/menus/canteens/${activeCanteen.id}/categories`)).data,
+    queryFn: () => menuApi.listCategories(activeCanteen.id),
+  });
+
+  const { data: promotions = [] } = useQuery<any[]>({
+    queryKey: ["m-promotions", activeCanteen?.id],
+    enabled: Boolean(activeCanteen?.id),
+    queryFn: () => canteensApi.listActivePromotions(activeCanteen.id),
   });
 
   const { data: announcements = [] } = useQuery<any[]>({
     queryKey: ["m-announcements"],
-    queryFn: async () => (await mobileApi.get("/notifications/announcements")).data,
+    queryFn: canteensApi.listAnnouncements,
   });
+
+  const { data: myOrders = [] } = useQuery<any[]>({
+    queryKey: ["m-orders"],
+    enabled: Boolean(user),
+    queryFn: ordersApi.listMyOrders,
+    refetchInterval: 10000,
+  });
+  const liveOrder = myOrders.find((o) => ACTIVE_STATUSES.has(o.status));
 
   const { data: profile } = useQuery<any>({
     queryKey: ["m-profile"],
     enabled: Boolean(user),
-    queryFn: async () => (await mobileApi.get("/customers/profile")).data,
+    queryFn: profileApi.getProfile,
   });
 
-  const { data: items = [], isLoading: itemsLoading } = useQuery<any[]>({
+  const {
+    data: items = [],
+    isLoading: itemsLoading,
+    isError: itemsErr,
+    error: itemsErrObj,
+    refetch: refetchItems,
+  } = useQuery<any[]>({
     queryKey: ["m-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, tagFilter, sortBy],
     enabled: Boolean(activeCanteen?.id),
-    queryFn: async () => {
-      const qs: string[] = [`sort_by=${encodeURIComponent(sortBy)}`];
-      if (search.trim()) qs.push(`q=${encodeURIComponent(search.trim())}`);
-      if (selectedCategoryId) qs.push(`category_id=${encodeURIComponent(selectedCategoryId)}`);
-      if (vegFilter === "veg") qs.push("is_veg=true");
-      if (vegFilter === "nonveg") qs.push("is_veg=false");
-      if (tagFilter === "featured") qs.push("featured=true");
-      if (tagFilter === "popular") qs.push("popular=true");
-      if (tagFilter === "special") qs.push("todays_special=true");
-      return (await mobileApi.get(`/menus/canteens/${activeCanteen.id}/items?${qs.join("&")}`)).data;
-    },
+    queryFn: () =>
+      menuApi.listItems(activeCanteen.id, {
+        q: search,
+        categoryId: selectedCategoryId,
+        vegFilter,
+        tagFilter,
+        sortBy,
+      }),
   });
 
   const { data: cart } = useQuery<any>({
     queryKey: ["m-cart", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
-    queryFn: async () => (await mobileApi.get(`/carts?canteen_id=${activeCanteen.id}`)).data,
+    queryFn: () => cartApi.getCart(activeCanteen.id),
   });
 
   const { data: itemReviews = [] } = useQuery<any[]>({
     queryKey: ["m-item-reviews", activeItem?.id],
     enabled: Boolean(activeItem?.id),
-    queryFn: async () => (await mobileApi.get(`/support/items/${activeItem.id}/reviews`)).data,
+    queryFn: () => menuApi.getItemReviews(activeItem.id),
   });
 
   const openModal = (item: any) => {
@@ -111,19 +145,17 @@ export default function MenuScreen() {
       const addons = Object.entries(selAddons)
         .filter(([, q]) => q > 0)
         .map(([addon_id, quantity]) => ({ addon_id, quantity }));
-      return (
-        await mobileApi.post("/carts/items", {
-          canteen_id: activeCanteen.id,
-          food_item_id: activeItem.id,
-          variant_id: selVariantId || null,
-          quantity: qty,
-          spice_level: selSpice || null,
-          sugar_level: selSugar || null,
-          removed_ingredients: selRemoved,
-          addons,
-          special_instructions: instructions.trim() || null,
-        })
-      ).data;
+      return cartApi.addItem({
+        canteen_id: activeCanteen.id,
+        food_item_id: activeItem.id,
+        variant_id: selVariantId || null,
+        quantity: qty,
+        spice_level: selSpice || null,
+        sugar_level: selSugar || null,
+        removed_ingredients: selRemoved,
+        addons,
+        special_instructions: instructions.trim() || null,
+      });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["m-cart", activeCanteen?.id] });
@@ -136,9 +168,10 @@ export default function MenuScreen() {
     if (!user) return;
     try {
       const isFav = profile?.favourite_item_ids?.includes(foodId);
-      if (isFav) await mobileApi.delete(`/customers/favourites/${foodId}`);
-      else await mobileApi.post(`/customers/favourites/${foodId}`);
+      if (isFav) await profileApi.removeFavourite(foodId);
+      else await profileApi.addFavourite(foodId);
       qc.invalidateQueries({ queryKey: ["m-profile"] });
+      qc.invalidateQueries({ queryKey: ["m-favourites"] });
     } catch {
       // keep silent on quick toggle failure
     }
@@ -147,7 +180,7 @@ export default function MenuScreen() {
   const submitReview = async () => {
     if (!activeItem) return;
     try {
-      await mobileApi.post("/support/reviews", {
+      await menuApi.submitReview({
         food_item_id: activeItem.id,
         rating: reviewRating,
         comment: reviewComment.trim() || null,
@@ -174,17 +207,66 @@ export default function MenuScreen() {
     return (base + addonSum) * qty;
   })();
 
+  const itemDisabled =
+    Boolean(activeItem) &&
+    (!activeItem.is_available ||
+      activeItem.insufficient_ingredients ||
+      activeItem.is_schedule_active_now === false ||
+      !activeCanteen?.is_open_now);
+
   return (
     <View style={styles.container}>
-      {/* Announcements + Live Board link */}
+      {/* College branding + Announcements + Live Board */}
       <View style={styles.topRow}>
-        <Text style={styles.brandSub} numberOfLines={1}>
-          {announcements[0]?.title || (activeCanteen?.is_open_now ? "Canteen Open • Ordering Live" : "Canteen Closed")}
-        </Text>
+        <View style={{ flex: 1, marginRight: 8 }}>
+          <Text style={styles.collegeTitle} numberOfLines={1}>
+            {college?.college_name || "CollegeBites Campus"}
+          </Text>
+          <Text style={styles.brandSub} numberOfLines={1}>
+            {announcements[0]?.title ||
+              promotions[0]?.title ||
+              (activeCanteen
+                ? `${activeCanteen.location || activeCanteen.name} • ${
+                    activeCanteen.is_open_now ? "Accepting Orders" : "Currently Closed"
+                  }`
+                : "Select a canteen")}
+          </Text>
+        </View>
         <Pressable onPress={() => router.push("/board")} style={styles.boardChip}>
           <Text style={styles.boardChipTxt}>Live Board →</Text>
         </Pressable>
       </View>
+
+      {liveOrder && (
+        <Pressable onPress={() => router.push(`/order/${liveOrder.order_number}`)} style={styles.activeTrackBanner}>
+          <View>
+            <Text style={styles.activeTrackTitle}>
+              Active Order {liveOrder.pickup_token_code ? `• Token ${liveOrder.pickup_token_code}` : ""}
+            </Text>
+            <Text style={styles.activeTrackSub}>
+              {liveOrder.canteen_name} • {liveOrder.status}
+            </Text>
+          </View>
+          <Text style={styles.activeTrackCta}>Track →</Text>
+        </Pressable>
+      )}
+
+      {(canteensErr || itemsErr) && (
+        <View style={styles.errBox}>
+          <Text style={styles.errTxt}>
+            {getMobileApiError(canteensErr ? canteensErrObj : itemsErrObj, "Unable to reach canteen backend")}
+          </Text>
+          <Pressable
+            onPress={() => {
+              refetchCanteens();
+              refetchItems();
+            }}
+            style={styles.retryChip}
+          >
+            <Text style={styles.retryTxt}>Retry</Text>
+          </Pressable>
+        </View>
+      )}
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.canteenBar}>
         {canteens.map((c) => {
@@ -198,8 +280,11 @@ export default function MenuScreen() {
               }}
               style={[styles.canteenPill, active && styles.canteenPillActive]}
             >
-              <Text style={[styles.canteenTitle, active && { color: "#fff" }]}>{c.name}</Text>
+              <Text style={[styles.canteenTitle, active && { color: "#fff" }]}>
+                {c.name} {!c.is_open_now ? "(Closed)" : ""}
+              </Text>
               <Text style={[styles.canteenSub, active && { color: "#fed7aa" }]}>
+                {c.location ? `${c.location} • ` : ""}
                 {c.crowd_level} • ~{c.estimated_wait_minutes}m
               </Text>
             </Pressable>
@@ -261,7 +346,7 @@ export default function MenuScreen() {
             style={[styles.chip, tagFilter === tg && { backgroundColor: "#ea580c", borderColor: "#ea580c" }]}
           >
             <Text style={[styles.chipTxt, tagFilter === tg && { color: "#fff" }]}>
-              {tg === "special" ? "Special" : tg}
+              {tg === "special" ? "Today's Special" : tg}
             </Text>
           </Pressable>
         ))}
@@ -278,7 +363,8 @@ export default function MenuScreen() {
         }
         renderItem={({ item }) => {
           const outOfSchedule = item.is_schedule_active_now === false;
-          const unavailable = !item.is_available || item.insufficient_ingredients || outOfSchedule || !activeCanteen?.is_open_now;
+          const unavailable =
+            !item.is_available || item.insufficient_ingredients || outOfSchedule || !activeCanteen?.is_open_now;
           const isFav = profile?.favourite_item_ids?.includes(item.id);
           return (
             <Pressable onPress={() => openModal(item)} style={styles.card}>
@@ -301,7 +387,8 @@ export default function MenuScreen() {
                   {item.description}
                 </Text>
                 <Text style={styles.itemMeta}>
-                  ₹{item.base_price} • {item.prep_time_minutes}m • ★ {item.average_rating}
+                  ₹{item.base_price} • {item.prep_time_minutes}m
+                  {Number(item.average_rating) > 0 ? ` • ★ ${item.average_rating}` : ""}
                 </Text>
               </View>
               <Pressable
@@ -343,6 +430,13 @@ export default function MenuScreen() {
               style={styles.heroImg}
             />
             <Text style={{ fontSize: 13, color: "#475569" }}>{activeItem.description}</Text>
+            {(activeItem.portion_size || activeItem.calories != null) && (
+              <Text style={{ fontSize: 12, color: "#334155", fontWeight: "700" }}>
+                {activeItem.portion_size ? `Portion: ${activeItem.portion_size}` : ""}
+                {activeItem.portion_size && activeItem.calories != null ? " • " : ""}
+                {activeItem.calories != null ? `${activeItem.calories} kcal` : ""}
+              </Text>
+            )}
             {Boolean(activeItem.ingredients_text) && (
               <Text style={{ fontSize: 12, color: "#64748b" }}>Ingredients: {activeItem.ingredients_text}</Text>
             )}
@@ -381,32 +475,32 @@ export default function MenuScreen() {
                 {activeItem.addons
                   .filter((ad: any) => ad.is_available !== false)
                   .map((ad: any) => {
-                  const cnt = selAddons[ad.id] || 0;
-                  return (
-                    <View key={ad.id} style={styles.optRow}>
-                      <Text style={{ fontWeight: "600" }}>
-                        {ad.name} (+₹{ad.price})
-                      </Text>
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                        <Pressable
-                          onPress={() => setSelAddons((p) => ({ ...p, [ad.id]: Math.max(0, cnt - 1) }))}
-                          style={styles.qtyBtn}
-                        >
-                          <Text style={{ fontWeight: "800" }}>-</Text>
-                        </Pressable>
-                        <Text style={{ fontWeight: "800" }}>{cnt}</Text>
-                        <Pressable
-                          onPress={() =>
-                            setSelAddons((p) => ({ ...p, [ad.id]: Math.min(ad.max_quantity || 10, cnt + 1) }))
-                          }
-                          style={styles.qtyBtn}
-                        >
-                          <Text style={{ fontWeight: "800" }}>+</Text>
-                        </Pressable>
+                    const cnt = selAddons[ad.id] || 0;
+                    return (
+                      <View key={ad.id} style={styles.optRow}>
+                        <Text style={{ fontWeight: "600" }}>
+                          {ad.name} (+₹{ad.price})
+                        </Text>
+                        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                          <Pressable
+                            onPress={() => setSelAddons((p) => ({ ...p, [ad.id]: Math.max(0, cnt - 1) }))}
+                            style={styles.qtyBtn}
+                          >
+                            <Text style={{ fontWeight: "800" }}>-</Text>
+                          </Pressable>
+                          <Text style={{ fontWeight: "800" }}>{cnt}</Text>
+                          <Pressable
+                            onPress={() =>
+                              setSelAddons((p) => ({ ...p, [ad.id]: Math.min(ad.max_quantity || 10, cnt + 1) }))
+                            }
+                            style={styles.qtyBtn}
+                          >
+                            <Text style={{ fontWeight: "800" }}>+</Text>
+                          </Pressable>
+                        </View>
                       </View>
-                    </View>
-                  );
-                })}
+                    );
+                  })}
               </View>
             )}
 
@@ -483,8 +577,14 @@ export default function MenuScreen() {
                   <Text style={{ fontWeight: "800" }}>+</Text>
                 </Pressable>
               </View>
-              <Pressable onPress={() => addMut.mutate()} style={[styles.addBtn, { flex: 1, alignItems: "center", paddingVertical: 14 }]}>
-                <Text style={styles.addBtnText}>Add to Cart • ₹{modalPrice.toFixed(2)}</Text>
+              <Pressable
+                disabled={itemDisabled || addMut.isPending}
+                onPress={() => addMut.mutate()}
+                style={[styles.addBtn, { flex: 1, alignItems: "center", paddingVertical: 14 }, itemDisabled && { backgroundColor: "#cbd5e1" }]}
+              >
+                <Text style={styles.addBtnText}>
+                  {itemDisabled ? "Currently Unavailable" : `Est. ₹${modalPrice.toFixed(2)} • Add to Cart`}
+                </Text>
               </Pressable>
             </View>
 
@@ -528,9 +628,37 @@ export default function MenuScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#f8fafc", padding: 12 },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
-  brandSub: { flex: 1, fontSize: 12, fontWeight: "700", color: "#475569", marginRight: 8 },
-  boardChip: { backgroundColor: "#0f172a", paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 },
+  collegeTitle: { fontSize: 13, fontWeight: "900", color: "#0f172a" },
+  brandSub: { fontSize: 11, fontWeight: "600", color: "#475569" },
+  boardChip: { backgroundColor: "#0f172a", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
   boardChipTxt: { color: "#fff", fontSize: 11, fontWeight: "700" },
+  activeTrackBanner: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#fff7ed",
+    borderColor: "#fed7aa",
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 8,
+  },
+  activeTrackTitle: { fontSize: 12, fontWeight: "900", color: "#9a3412" },
+  activeTrackSub: { fontSize: 11, color: "#c2410c", marginTop: 1 },
+  activeTrackCta: { fontSize: 12, fontWeight: "900", color: "#ea580c" },
+  errBox: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: "#fee2e2",
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+  },
+  errTxt: { flex: 1, color: "#991b1b", fontSize: 12, fontWeight: "700" },
+  retryChip: { backgroundColor: "#991b1b", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
+  retryTxt: { color: "#fff", fontSize: 11, fontWeight: "800" },
   canteenBar: { maxHeight: 62, marginBottom: 8 },
   canteenPill: { backgroundColor: "#fff", borderRadius: 12, padding: 10, marginRight: 8, borderWidth: 1, borderColor: "#e2e8f0" },
   canteenPillActive: { backgroundColor: "#0f172a", borderColor: "#0f172a" },

@@ -13,7 +13,7 @@ def test_promotions_notifications_reviews_support_and_reports(client: TestClient
     items = client.get(f"/api/v1/menus/canteens/{canteen['id']}/items").json()
     biryani = next(i for i in items if "Biryani" in i["name"])
 
-    # 1. Create announcement & coupon
+    # 1. Create announcement & banner (and verify coupons are permanently removed)
     ann = client.post(
         "/api/v1/notifications/announcements",
         headers=admin["headers"],
@@ -22,18 +22,28 @@ def test_promotions_notifications_reviews_support_and_reports(client: TestClient
     assert ann.status_code == 201
     assert any(a["title"] == "Exam Week Extended Hours" for a in client.get("/api/v1/notifications/announcements").json())
 
-    coup = client.post(
-        "/api/v1/promotions/coupons",
+    assert client.get("/api/v1/promotions/coupons", headers=admin["headers"]).status_code in (404, 405)
+    assert (
+        client.post(
+            "/api/v1/promotions/coupons",
+            headers=admin["headers"],
+            json={"code": "FLAT20", "title": "Flat ₹20 Off", "discount_type": "fixed", "discount_value": "20.00"},
+        ).status_code
+        in (404, 405)
+    )
+
+    promo = client.post(
+        "/api/v1/promotions",
         headers=admin["headers"],
         json={
-            "code": "FLAT20",
-            "title": "Flat ₹20 Off",
-            "discount_type": "fixed",
-            "discount_value": "20.00",
-            "min_order_amount": "80.00",
+            "canteen_id": canteen["id"],
+            "title": "Exam Week Night Counter Open",
+            "subtitle": "Hot snacks and coffee until 10 PM",
+            "badge_text": "OPEN LATE",
+            "promo_type": "banner",
         },
     )
-    assert coup.status_code == 201
+    assert promo.status_code == 201
 
     # 2. Place paid order to generate real analytics & notifications
     order = client.post(

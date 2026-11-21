@@ -37,6 +37,15 @@ async function main() {
   const errors = [];
   const attachErrorListeners = (page) => {
     page.on("pageerror", (e) => errors.push(`PageError: ${e.message}`));
+    page.on("dialog", async (d) => {
+      errors.push(`UnexpectedNativeDialog (${d.type()}): ${d.message()}`);
+      await d.dismiss().catch(() => {});
+    });
+    page.on("response", (res) => {
+      if (res.status() >= 500) {
+        errors.push(`HTTP ${res.status()} on ${res.url()}`);
+      }
+    });
     page.on("console", (m) => {
       const locUrl = m.location()?.url || "";
       if (m.type() === "error" && !m.text().includes("favicon") && !locUrl.includes("favicon")) {
@@ -46,7 +55,36 @@ async function main() {
   };
 
   try {
-    // 1. Customer / Guest QR Ordering Flow
+    // 0. Mobile App (PWA) Viewport, Manifest, Service Worker & /scan QR Scanner Check
+    const pwaCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const pwaPage = await pwaCtx.newPage();
+    attachErrorListeners(pwaPage);
+    await pwaPage.goto(FRONTEND_URL, { waitUntil: "networkidle" });
+
+    const manifestRes = await pwaCtx.request.get(`${FRONTEND_URL}/manifest.webmanifest`);
+    assert.equal(manifestRes.status(), 200, "manifest.webmanifest should return 200");
+    const manifestJson = await manifestRes.json();
+    assert.equal(manifestJson.display, "standalone");
+    assert.ok(Array.isArray(manifestJson.icons) && manifestJson.icons.length >= 2);
+
+    const swRes = await pwaCtx.request.get(`${FRONTEND_URL}/sw.js`);
+    assert.equal(swRes.status(), 200, "sw.js should return 200");
+
+    const mobileNav = pwaPage.locator('nav[aria-label="Mobile Customer Navigation"]');
+    await mobileNav.waitFor({ state: "visible", timeout: 10000 });
+    await pwaPage.getByTitle("Install CollegeBites Mobile App").click();
+    await pwaPage.getByText("Install CollegeBites Mobile App").waitFor({ timeout: 5000 });
+    await pwaPage.keyboard.press("Escape").catch(() => {});
+    await pwaPage.locator("button").filter({ has: pwaPage.locator("svg") }).first().click().catch(() => {});
+
+    await pwaPage.goto(`${FRONTEND_URL}/scan`, { waitUntil: "networkidle" });
+    await pwaPage.getByPlaceholder("e.g. CB-MAIN-T01").fill("CB-MAIN-T01");
+    await pwaPage.getByRole("button", { name: "Open", exact: true }).click();
+    await pwaPage.getByRole("heading", { name: "Main Canteen" }).waitFor({ timeout: 10000 });
+    await pwaPage.getByRole("button", { name: /Open Menu & Order Now/i }).click();
+    await pwaCtx.close();
+
+    // 1. Customer / Guest QR Ordering Flow (Razorpay)
     const custCtx = await browser.newContext();
     const page = await custCtx.newPage();
     attachErrorListeners(page);
@@ -90,6 +128,27 @@ async function main() {
     const pickupToken = tokenText.trim();
     assert.ok(pickupToken.startsWith("A"), `Expected pickup token starting with A, got: ${pickupToken}`);
     console.log("E2E_GUEST_TOKEN:", pickupToken);
+
+    // 1b. Signed-in Student Stripe Checkout Flow
+    const stripeCtx = await browser.newContext();
+    const stripePage = await stripeCtx.newPage();
+    attachErrorListeners(stripePage);
+    await stripePage.goto(`${FRONTEND_URL}/login`, { waitUntil: "networkidle" });
+    await stripePage.getByRole("button", { name: /Student \(Customer\)/i }).click();
+    await stripePage.waitForURL(`${FRONTEND_URL}/`, { timeout: 10000 }).catch(() => {});
+    await stripePage.getByPlaceholder("Search dishes, ingredients...").fill("Cold Coffee");
+    await stripePage.waitForTimeout(500);
+    await stripePage.getByRole("button", { name: /Customize & Add/i }).first().click();
+    await stripePage.getByRole("button", { name: /Add to Cart/i }).click();
+    await stripePage.getByRole("button", { name: /Proceed to Checkout/i }).click();
+    await stripePage.getByRole("button", { name: /Stripe Checkout/i }).click();
+    await stripePage.locator('input[type="checkbox"]').check();
+    await stripePage.getByRole("button", { name: /Pay ₹/i }).click();
+    await stripePage.getByText(/Stripe: cs_test_/).waitFor({ timeout: 10000 });
+    await stripePage.getByRole("button", { name: /Complete & Verify Payment/i }).click();
+    await stripePage.waitForURL(/\/orders\/CB-/, { timeout: 15000 });
+    await stripePage.getByText("Official Digital Token Slip & Payment Receipt").waitFor({ timeout: 10000 });
+    console.log("E2E_STRIPE_ORDER_URL:", stripePage.url());
 
     // 2. Digital Token Board check
     const boardPage = await custCtx.newPage();
@@ -138,13 +197,30 @@ async function main() {
     await pickPage.getByRole("button", { name: "Verify Order" }).click();
     await pickPage.getByText("ALREADY_COLLECTED").first().waitFor({ timeout: 10000 });
 
-    // 5. Admin Console All Tabs Smoke Check
+    // 4b. Cashier POS Walk-in & Receipt Slip Check
+    const posCtx = await browser.newContext();
+    const posPage = await posCtx.newPage();
+    attachErrorListeners(posPage);
+    await posPage.goto(`${FRONTEND_URL}/login`, { waitUntil: "networkidle" });
+    await posPage.getByRole("button", { name: /Cashier POS/i }).click();
+    await posPage.waitForURL(/\/cashier/);
+    await posPage.getByPlaceholder("Quick search dishes...").waitFor({ timeout: 10000 });
+    await posPage.locator("button").filter({ hasText: "₹" }).first().click();
+    await posPage.getByRole("button", { name: /Accept Payment & Print Token/i }).click();
+    await posPage.getByText("Official Digital Token Slip & Payment Receipt").waitFor({ timeout: 10000 });
+
+    // 5. Admin Console All Tabs + Breakdowns Smoke Check
     const adminCtx = await browser.newContext();
     const adminPage = await adminCtx.newPage();
     attachErrorListeners(adminPage);
     await adminPage.goto(`${FRONTEND_URL}/login`, { waitUntil: "networkidle" });
     await adminPage.getByRole("button", { name: /College Admin/i }).click();
     await adminPage.waitForURL(/\/admin/);
+    await adminPage.getByText("Category-wise Sales").waitFor({ timeout: 10000 });
+    await adminPage.getByText("Counter-wise Sales").waitFor({ timeout: 10000 });
+    await adminPage.getByText("Payment Breakdown").waitFor({ timeout: 10000 });
+    await adminPage.getByText("Peak Hours").waitFor({ timeout: 10000 });
+
     for (const tabName of [
       "Orders & Users",
       "Locations, Counters & Hours",
@@ -152,7 +228,7 @@ async function main() {
       "Location QR Codes",
       "Queue, Crowd & Slots",
       "Staff, Attendance & Tasks",
-      "Coupons & Announcements",
+      "Announcements & Banners",
       "Support Tickets",
       "Settings, Reconcile & Audits",
     ]) {
@@ -169,6 +245,9 @@ async function main() {
     await kitPage.waitForTimeout(300);
 
     await adminPage.goto(`${FRONTEND_URL}/inventory`, { waitUntil: "networkidle" });
+    await adminPage.getByText("Inventory Manager Portal").waitFor({ timeout: 10000 });
+    await adminPage.getByText("All Inventory Items").first().waitFor({ timeout: 10000 });
+    await adminPage.getByText("Price Management & Selling Price Approvals").waitFor({ timeout: 10000 });
     await adminPage.getByText("Link Dish Recipe (Auto Stock Deduction)").waitFor({ timeout: 10000 });
     await adminPage.getByText("Manual Stock Adjustment").waitFor({ timeout: 10000 });
 

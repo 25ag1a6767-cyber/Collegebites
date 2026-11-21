@@ -43,7 +43,7 @@ from app.models.menu import (
     RecipeIngredient,
 )
 from app.models.order import PickupSlot
-from app.models.promotion import Coupon, LoyaltyAccount, Promotion
+from app.models.promotion import LoyaltyAccount, Promotion
 from app.models.engagement import Announcement, NotificationTemplate
 
 
@@ -476,27 +476,14 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
             )
         )
 
-    # Coupons, Promotions, Announcements & Templates
-    db.add(
-        Coupon(
-            code="CAMPUS10",
-            title="10% Student Campus Offer",
-            description="Save 10% up to ₹50 on orders ₹100+",
-            discount_type="percentage",
-            discount_value=Decimal("10.00"),
-            min_order_amount=Decimal("100.00"),
-            max_discount_amount=Decimal("50.00"),
-            usage_limit_per_user=10,
-            is_active=True,
-        )
-    )
+    # Promotional Banners, Announcements & Templates (no coupons)
     db.add(
         Promotion(
             canteen_id=main_canteen.id,
-            title="Lunch Combo Special — Use code CAMPUS10",
+            title="Lunch Combo Special — Fresh Kitchen Counters Open",
             subtitle="Order ahead and skip the 12:30 PM counter rush!",
-            badge_text="10% OFF",
-            coupon_code="CAMPUS10",
+            badge_text="SPECIAL",
+            coupon_code=None,
             is_active=True,
         )
     )

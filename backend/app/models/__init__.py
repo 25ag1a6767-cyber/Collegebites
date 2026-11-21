@@ -67,7 +67,9 @@ from app.models.payment import (
     ReceiptPrintJob,
 )
 from app.models.inventory import (
+    InventoryAuditLog,
     InventoryItem,
+    PriceChangeRequest,
     PurchaseOrder,
     PurchaseOrderItem,
     StockAdjustment,
@@ -158,6 +160,8 @@ __all__ = [
     "ReceiptPrintHistory",
     "Supplier",
     "InventoryItem",
+    "InventoryAuditLog",
+    "PriceChangeRequest",
     "StockBatch",
     "StockMovement",
     "PurchaseOrder",

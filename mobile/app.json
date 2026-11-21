@@ -5,17 +5,51 @@
     "version": "1.0.0",
     "scheme": "collegebites",
     "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ea580c"
+    },
     "platforms": ["ios", "android", "web"],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "edu.collegebites.app",
+      "associatedDomains": ["applinks:collegebites-alpha.vercel.app"],
       "infoPlist": {
         "NSCameraUsageDescription": "Scan canteen table, counter, and order pickup QR codes."
       }
     },
     "android": {
       "package": "edu.collegebites.app",
-      "permissions": ["CAMERA", "NOTIFICATIONS"]
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ea580c"
+      },
+      "permissions": ["CAMERA", "NOTIFICATIONS"],
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "collegebites-alpha.vercel.app",
+              "pathPrefix": "/scan"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "apiUrl": "https://collegebites-alpha.vercel.app/api/v1"
     },
     "plugins": [
       "expo-router",

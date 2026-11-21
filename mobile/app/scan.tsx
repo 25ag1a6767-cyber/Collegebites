@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useRouter } from "expo-router";
-import { getMobileApiError, mobileApi } from "../src/api/client";
+import { getMobileApiError } from "../src/api/client";
+import { tokensApi } from "../src/api/tokens.api";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 const STAFF_ROLES = new Set(["super_admin", "college_admin", "canteen_manager", "cashier", "pickup_staff"]);
@@ -22,12 +23,13 @@ export default function ScanScreen() {
   const [busy, setBusy] = useState(false);
 
   const resolveLocation = async (raw: string) => {
-    const code = raw.includes("/scan/") ? raw.split("/scan/").pop() || raw : raw;
+    const code = raw.includes("/scan/") ? (raw.split("/scan/").pop() || raw).split(/[?#]/)[0] : raw;
     setBusy(true);
+    setStatusMsg("");
     try {
-      const res = await mobileApi.get(`/qr/locations/resolve/${encodeURIComponent(code.trim())}`);
-      setCanteen(res.data.canteen.id, res.data.qr.code);
-      setStatusMsg(`Selected ${res.data.canteen.name}`);
+      const data = await tokensApi.resolveLocationQr(code);
+      setCanteen(data.canteen.id, data.qr.code);
+      setStatusMsg(`Selected ${data.canteen.name}`);
       router.push("/");
     } catch (e: unknown) {
       setStatusMsg(getMobileApiError(e, "Invalid or revoked QR code"));
@@ -54,8 +56,8 @@ export default function ScanScreen() {
         method = "manual_token";
       }
       setVerifyMethod(method);
-      const res = await mobileApi.post("/pickup/verify", payload);
-      setPickupResult(res.data);
+      const data = await tokensApi.verifyPickup(payload);
+      setPickupResult(data);
     } catch (e: unknown) {
       setStatusMsg(getMobileApiError(e, "Pickup verification failed"));
     } finally {
@@ -67,7 +69,7 @@ export default function ScanScreen() {
     if (!pickupResult?.order_id) return;
     setBusy(true);
     try {
-      await mobileApi.post("/pickup/handover", {
+      await tokensApi.confirmHandover({
         order_id: pickupResult.order_id,
         counter_id: pickupResult.counter_id || null,
         verification_method: verifyMethod,
@@ -81,8 +83,8 @@ export default function ScanScreen() {
   };
 
   const handleScanData = (raw: string) => {
-    if (mode === "pickup" && isStaff) verifyPickup(raw);
-    else resolveLocation(raw);
+    if (mode === "pickup" && isStaff) void verifyPickup(raw);
+    else void resolveLocation(raw);
   };
 
   return (
@@ -148,24 +150,26 @@ export default function ScanScreen() {
           placeholder={mode === "pickup" ? "e.g. A001" : "e.g. CB-MAIN-T01"}
         />
         <Pressable disabled={busy} onPress={() => handleScanData(manualCode)} style={styles.btn}>
-          <Text style={styles.btnText}>{busy ? "..." : mode === "pickup" ? "Verify" : "Open"}</Text>
+          <Text style={styles.btnText}>{busy ? "..." : "Verify"}</Text>
         </Pressable>
       </View>
 
       {Boolean(statusMsg) && <Text style={styles.msg}>{statusMsg}</Text>}
 
       {pickupResult && (
-        <View style={styles.verifyCard}>
-          <Text style={{ fontWeight: "900", fontSize: 15, color: "#0f172a" }}>{pickupResult.result_code}</Text>
-          <Text style={{ fontSize: 12, color: "#475569" }}>{pickupResult.message}</Text>
-          {pickupResult.order_number && (
-            <Text style={{ fontSize: 12, fontWeight: "700" }}>
-              {pickupResult.order_number} • Token {pickupResult.pickup_token} ({pickupResult.counter_name})
+        <View style={styles.card}>
+          <Text style={{ fontWeight: "900", fontSize: 16, color: pickupResult.can_handover ? "#059669" : "#dc2626" }}>
+            {pickupResult.result_code}
+          </Text>
+          <Text style={{ fontSize: 13, color: "#334155", marginTop: 4 }}>{pickupResult.message}</Text>
+          {pickupResult.pickup_token && (
+            <Text style={{ fontSize: 24, fontWeight: "900", color: "#0f172a", marginTop: 6 }}>
+              Token {pickupResult.pickup_token} ({pickupResult.order_number})
             </Text>
           )}
           {pickupResult.can_handover && (
-            <Pressable disabled={busy} onPress={confirmHandover} style={[styles.btn, { backgroundColor: "#059669" }]}>
-              <Text style={styles.btnText}>{busy ? "Confirming..." : "Confirm Food Handover"}</Text>
+            <Pressable disabled={busy} onPress={confirmHandover} style={[styles.btn, { backgroundColor: "#059669", marginTop: 12 }]}>
+              <Text style={styles.btnText}>Confirm Food Handover</Text>
             </Pressable>
           )}
         </View>
@@ -175,17 +179,17 @@ export default function ScanScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16, backgroundColor: "#f8fafc" },
+  container: { flex: 1, backgroundColor: "#f8fafc", padding: 16 },
   title: { fontSize: 18, fontWeight: "800", color: "#0f172a" },
-  modeBtn: { flex: 1, backgroundColor: "#e2e8f0", borderRadius: 10, paddingVertical: 8, alignItems: "center" },
-  modeBtnActive: { backgroundColor: "#0f172a" },
-  modeTxt: { fontSize: 12, fontWeight: "700", color: "#334155" },
-  camBox: { height: 260, borderRadius: 16, overflow: "hidden", backgroundColor: "#000" },
-  label: { fontSize: 12, fontWeight: "700", color: "#475569" },
+  camBox: { height: 240, borderRadius: 16, overflow: "hidden", backgroundColor: "#0f172a" },
+  label: { fontSize: 12, fontWeight: "700", color: "#475569", marginTop: 8 },
   row: { flexDirection: "row", gap: 8 },
-  input: { flex: 1, backgroundColor: "#fff", borderRadius: 12, borderWidth: 1, borderColor: "#cbd5e1", paddingHorizontal: 12, paddingVertical: 10 },
-  btn: { backgroundColor: "#ea580c", borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, justifyContent: "center", alignItems: "center" },
-  btnText: { color: "#fff", fontWeight: "700" },
-  msg: { color: "#dc2626", fontWeight: "700" },
-  verifyCard: { backgroundColor: "#fff", borderRadius: 14, padding: 14, gap: 8, borderWidth: 1, borderColor: "#cbd5e1" },
+  input: { flex: 1, backgroundColor: "#fff", borderRadius: 10, borderWidth: 1, borderColor: "#cbd5e1", paddingHorizontal: 12 },
+  btn: { backgroundColor: "#ea580c", borderRadius: 10, paddingHorizontal: 16, paddingVertical: 12, alignItems: "center" },
+  btnText: { color: "#fff", fontWeight: "800" },
+  msg: { color: "#ea580c", fontWeight: "700", marginTop: 6 },
+  modeBtn: { flex: 1, paddingVertical: 8, borderRadius: 10, backgroundColor: "#e2e8f0", alignItems: "center" },
+  modeBtnActive: { backgroundColor: "#0f172a" },
+  modeTxt: { fontSize: 12, fontWeight: "800", color: "#334155" },
+  card: { backgroundColor: "#fff", borderRadius: 14, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" },
 });

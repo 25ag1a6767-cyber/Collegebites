@@ -2,8 +2,19 @@ import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { getMobileApiError, mobileApi } from "../src/api/client";
+import { z } from "zod";
+import { authApi } from "../src/api/auth.api";
+import { canteensApi } from "../src/api/canteens.api";
+import { cartApi } from "../src/api/cart.api";
+import { getMobileApiError } from "../src/api/client";
+import { ordersApi } from "../src/api/orders.api";
+import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
+
+const guestSchema = z.object({
+  guestName: z.string().trim().min(2, "Guest name must be at least 2 characters."),
+  guestPhone: z.string().trim().min(8, "Enter a valid mobile number (e.g. +919876543210)."),
+});
 
 export default function CheckoutScreen() {
   const router = useRouter();
@@ -12,36 +23,42 @@ export default function CheckoutScreen() {
 
   const { data: college } = useQuery<any>({
     queryKey: ["m-college"],
-    queryFn: async () => (await mobileApi.get("/canteens/college")).data,
+    queryFn: canteensApi.getCollegeSettings,
   });
 
   const { data: canteens = [] } = useQuery<any[]>({
     queryKey: ["m-canteens"],
-    queryFn: async () => (await mobileApi.get("/canteens")).data,
+    queryFn: canteensApi.listCanteens,
   });
   const activeCanteen = canteens.find((c) => c.id === selectedCanteenId) || canteens[0];
   const activeCanteenId = activeCanteen?.id;
 
+  const { data: canteenDetail } = useQuery<any>({
+    queryKey: ["m-canteen-detail", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: () => canteensApi.getCanteenDetail(activeCanteenId),
+  });
+
   const { data: cart, refetch: refetchCart } = useQuery<any>({
     queryKey: ["m-cart", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    queryFn: async () => (await mobileApi.get(`/carts?canteen_id=${activeCanteenId}`)).data,
+    queryFn: () => cartApi.getCart(activeCanteenId),
   });
 
   const { data: slots = [] } = useQuery<any[]>({
     queryKey: ["m-slots", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    queryFn: async () => (await mobileApi.get(`/orders/slots/${activeCanteenId}`)).data,
+    queryFn: () => ordersApi.getPickupSlots(activeCanteenId),
   });
 
   const { data: loyalty } = useQuery<any>({
     queryKey: ["m-loyalty"],
     enabled: Boolean(user),
-    queryFn: async () => (await mobileApi.get("/promotions/loyalty/me")).data,
+    queryFn: profileApi.getMyLoyalty,
   });
 
-  const [couponInput, setCouponInput] = useState("");
   const [redeemPoints, setRedeemPoints] = useState(0);
+  const [selectedCounterId, setSelectedCounterId] = useState<string>("");
   const [selectedSlotId, setSelectedSlotId] = useState<string>("");
   const [payMethod, setPayMethod] = useState<"razorpay" | "stripe" | "cash" | "pay_at_pickup">("razorpay");
   const [guestName, setGuestName] = useState("");
@@ -57,35 +74,23 @@ export default function CheckoutScreen() {
 
   const updateQty = async (cartItemId: string, nextQty: number) => {
     try {
-      await mobileApi.patch(`/carts/items/${cartItemId}`, { quantity: nextQty });
+      await cartApi.updateItem(cartItemId, { quantity: nextQty });
       refetchCart();
     } catch (e: unknown) {
       setErrorMsg(getMobileApiError(e, "Could not update item"));
     }
   };
 
-  const applyCoupon = async () => {
-    if (!activeCanteenId) return;
-    setErrorMsg("");
-    try {
-      const res = await mobileApi.post("/carts/coupon", {
-        canteen_id: activeCanteenId,
-        coupon_code: couponInput.trim() || null,
-      });
-      qc.setQueryData(["m-cart", activeCanteenId], res.data);
-      if (!res.data.coupon_valid && res.data.coupon_message) {
-        setErrorMsg(res.data.coupon_message);
-      }
-    } catch (e: unknown) {
-      setErrorMsg(getMobileApiError(e, "Coupon error"));
-    }
-  };
-
   const requestOtp = async () => {
     setErrorMsg("");
+    const parsed = guestSchema.safeParse({ guestName: guestName || "Guest User", guestPhone });
+    if (!parsed.success) {
+      setErrorMsg(parsed.error.issues[0]?.message || "Enter a valid mobile number");
+      return;
+    }
     try {
-      const res = await mobileApi.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
-      setDevOtp(res.data.dev_otp || null);
+      const res = await authApi.requestOtp({ target: guestPhone.trim(), purpose: "guest_checkout" });
+      setDevOtp(res.dev_otp || null);
     } catch (e: unknown) {
       setErrorMsg(getMobileApiError(e, "Failed to send OTP"));
     }
@@ -94,12 +99,12 @@ export default function CheckoutScreen() {
   const verifyOtp = async () => {
     setErrorMsg("");
     try {
-      const res = await mobileApi.post("/auth/otp/verify", {
+      const res = await authApi.verifyOtp({
         target: guestPhone.trim(),
         purpose: "guest_checkout",
         code: otpCode.trim(),
       });
-      setOtpToken(res.data.verification_token);
+      setOtpToken(res.verification_token);
     } catch (e: unknown) {
       setErrorMsg(getMobileApiError(e, "OTP verification failed"));
     }
@@ -107,13 +112,18 @@ export default function CheckoutScreen() {
 
   const placeOrder = async () => {
     setErrorMsg("");
+    if (!activeCanteen?.is_open_now) {
+      setErrorMsg("Selected canteen is currently closed or temporarily unavailable.");
+      return;
+    }
     if (!acceptedPolicy) {
       setErrorMsg("Please accept the college payment policy first.");
       return;
     }
     if (!user) {
-      if (!guestName.trim() || !guestPhone.trim()) {
-        setErrorMsg("Enter guest name and mobile number.");
+      const parsed = guestSchema.safeParse({ guestName, guestPhone });
+      if (!parsed.success) {
+        setErrorMsg(parsed.error.issues[0]?.message || "Enter valid guest name and mobile number.");
         return;
       }
       if (college?.guest_otp_required && !otpToken) {
@@ -123,15 +133,14 @@ export default function CheckoutScreen() {
     }
     setBusy(true);
     try {
-      const orderRes = await mobileApi.post(
-        "/orders/checkout",
+      const ord = await ordersApi.checkout(
         {
           canteen_id: activeCanteenId,
+          counter_id: selectedCounterId || null,
           location_qr_code: scannedQrCode || null,
           pickup_slot_id: selectedSlotId || null,
           order_channel: "mobile",
           payment_method: payMethod,
-          coupon_code: cart?.coupon_code || null,
           redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
           idempotency_key: idemKey,
           guest_name: !user ? guestName.trim() : null,
@@ -140,11 +149,11 @@ export default function CheckoutScreen() {
           notes: orderNotes.trim() || null,
           accepted_policy: true,
         },
-        { headers: { "X-Idempotency-Key": idemKey } }
+        idemKey
       );
-      const ord = orderRes.data;
       if (ord.guest_access_token) saveGuestOrderToken(ord.order_number, ord.guest_access_token);
       qc.invalidateQueries({ queryKey: ["m-cart", activeCanteenId] });
+      qc.invalidateQueries({ queryKey: ["m-orders"] });
       router.push(`/order/${ord.order_number}`);
     } catch (e: unknown) {
       setErrorMsg(getMobileApiError(e, "Checkout failed"));
@@ -165,6 +174,11 @@ export default function CheckoutScreen() {
     );
   }
 
+  const checkoutBlocked =
+    busy ||
+    (cart.validation_errors?.length || 0) > 0 ||
+    !activeCanteen?.is_open_now;
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ gap: 12, paddingBottom: 40 }}>
       <Text style={styles.title}>Checkout • {cart.canteen_name}</Text>
@@ -183,7 +197,7 @@ export default function CheckoutScreen() {
         <View key={it.id} style={styles.rowCard}>
           <View style={{ flex: 1 }}>
             <Text style={styles.itemTxt}>
-              {it.item_name} {it.variant_name ? `(${it.variant_name})` : ""}
+              {it.item_name} {it.variant_name ? `(${it.variant_name})` : ""} • ₹{it.unit_price}
             </Text>
             {it.customizations?.map((c: any, idx: number) => (
               <Text key={idx} style={{ fontSize: 11, color: "#64748b" }}>
@@ -193,6 +207,9 @@ export default function CheckoutScreen() {
             {Boolean(it.special_instructions) && (
               <Text style={{ fontSize: 11, fontStyle: "italic", color: "#64748b" }}>Note: {it.special_instructions}</Text>
             )}
+            <Pressable onPress={() => updateQty(it.id, 0)}>
+              <Text style={{ fontSize: 11, color: "#dc2626", fontWeight: "700", marginTop: 3 }}>Remove</Text>
+            </Pressable>
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <Pressable onPress={() => updateQty(it.id, it.quantity - 1)} style={styles.qtyBtn}>
@@ -207,21 +224,31 @@ export default function CheckoutScreen() {
         </View>
       ))}
 
-      {/* Coupon */}
-      <View style={styles.box}>
-        <Text style={styles.sub}>Promo Coupon</Text>
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          <TextInput style={[styles.input, { flex: 1 }]} value={couponInput} onChangeText={setCouponInput} placeholder="WELCOME10" />
-          <Pressable onPress={applyCoupon} style={styles.btnSec}>
-            <Text style={{ color: "#fff", fontWeight: "700" }}>Apply</Text>
-          </Pressable>
+      {/* Pickup Counter Selection */}
+      {canteenDetail?.counters?.length > 0 && (
+        <View style={styles.box}>
+          <Text style={styles.sub}>Pickup Counter</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <Pressable
+              onPress={() => setSelectedCounterId("")}
+              style={[styles.slotPill, selectedCounterId === "" && styles.slotActive]}
+            >
+              <Text style={[styles.slotTxt, selectedCounterId === "" && { color: "#fff" }]}>Auto Assign</Text>
+            </Pressable>
+            {canteenDetail.counters
+              .filter((ct: any) => ct.is_active !== false)
+              .map((ct: any) => (
+                <Pressable
+                  key={ct.id}
+                  onPress={() => setSelectedCounterId(ct.id)}
+                  style={[styles.slotPill, selectedCounterId === ct.id && styles.slotActive]}
+                >
+                  <Text style={[styles.slotTxt, selectedCounterId === ct.id && { color: "#fff" }]}>{ct.name}</Text>
+                </Pressable>
+              ))}
+          </ScrollView>
         </View>
-        {Number(cart.discount_amount) > 0 && (
-          <Text style={{ color: "#059669", fontWeight: "700", fontSize: 12 }}>
-            Discount applied: -₹{cart.discount_amount}
-          </Text>
-        )}
-      </View>
+      )}
 
       {/* Pickup Slot */}
       {slots.length > 0 && (
@@ -316,7 +343,9 @@ export default function CheckoutScreen() {
 
       <View style={styles.totalBox}>
         <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-          <Text style={{ color: "#94a3b8", fontSize: 12 }}>Subtotal ₹{cart.subtotal_amount} • Tax ₹{cart.tax_amount}</Text>
+          <Text style={{ color: "#94a3b8", fontSize: 12 }}>
+            Subtotal ₹{cart.subtotal_amount} • Discount -₹{cart.discount_amount} • Tax ₹{cart.tax_amount}
+          </Text>
         </View>
         <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
           <Text style={styles.totalLabel}>Total Payable</Text>
@@ -333,9 +362,9 @@ export default function CheckoutScreen() {
 
       {Boolean(errorMsg) && <Text style={{ color: "#dc2626", fontWeight: "700" }}>{errorMsg}</Text>}
       <Pressable
-        disabled={busy || cart.validation_errors?.length > 0}
+        disabled={checkoutBlocked}
         onPress={placeOrder}
-        style={[styles.btnPrimary, (busy || cart.validation_errors?.length > 0) && { backgroundColor: "#cbd5e1" }]}
+        style={[styles.btnPrimary, checkoutBlocked && { backgroundColor: "#cbd5e1" }]}
       >
         <Text style={styles.btnPrimaryTxt}>
           {busy ? "Processing..." : `Proceed to Payment • ₹${cart.total_amount}`}
@@ -363,7 +392,7 @@ const styles = StyleSheet.create({
   slotPill: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, backgroundColor: "#f1f5f9", marginRight: 6 },
   slotActive: { backgroundColor: "#ea580c" },
   slotTxt: { fontSize: 12, fontWeight: "700", color: "#334155" },
-  payOpt: { flex: 1, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "#cbd5e1", alignItems: "center" },
+  payOpt: { flex: 1, minWidth: 95, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "#cbd5e1", alignItems: "center" },
   payOptActive: { backgroundColor: "#0f172a", borderColor: "#0f172a" },
   policyRow: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fffbeb", padding: 10, borderRadius: 10 },
   btnPrimary: { backgroundColor: "#ea580c", borderRadius: 12, paddingVertical: 14, paddingHorizontal: 20, alignItems: "center" },

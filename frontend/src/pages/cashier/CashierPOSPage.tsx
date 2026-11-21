@@ -53,7 +53,6 @@ export const CashierPOSPage: React.FC = () => {
   const [customerName, setCustomerName] = useState("Walk-in Customer");
   const [customerPhone, setCustomerPhone] = useState("");
   const [payMethod, setPayMethod] = useState<"cash" | "upi_pos" | "card_pos">("cash");
-  const [couponCode, setCouponCode] = useState("");
   const [busy, setBusy] = useState(false);
 
   // Order search & receipt modal
@@ -95,7 +94,6 @@ export const CashierPOSPage: React.FC = () => {
         customer_name: customerName || "Walk-in Customer",
         customer_phone: customerPhone || null,
         payment_method: payMethod,
-        coupon_code: couponCode || null,
         items: posLines.map((l) => ({
           food_item_id: l.food.id,
           variant_id: l.variantId || null,
@@ -104,7 +102,6 @@ export const CashierPOSPage: React.FC = () => {
       });
       pushToast(`Token ${res.data.pickup_token_code} created!`, "success");
       setPosLines([]);
-      setCouponCode("");
       const recRes = await api.get<ReceiptSnapshot>(`/tokens/receipts/${res.data.order_number}`);
       setActiveReceipt(recRes.data);
       refetchShift();
@@ -271,8 +268,6 @@ export const CashierPOSPage: React.FC = () => {
                 ))
               )}
             </div>
-
-            <Input value={couponCode} onChange={(e) => setCouponCode(e.target.value)} placeholder="Coupon (optional)" />
 
             <div className="grid grid-cols-3 gap-2">
               {(["cash", "upi_pos", "card_pos"] as const).map((m) => (

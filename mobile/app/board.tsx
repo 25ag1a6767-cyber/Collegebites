@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { buildMobileWsUrl, mobileApi } from "../src/api/client";
+import { canteensApi } from "../src/api/canteens.api";
+import { buildMobileWsUrl } from "../src/api/client";
+import { tokensApi } from "../src/api/tokens.api";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 export default function BoardScreen() {
@@ -11,7 +13,7 @@ export default function BoardScreen() {
 
   const { data: canteens = [] } = useQuery<any[]>({
     queryKey: ["m-canteens"],
-    queryFn: async () => (await mobileApi.get("/canteens")).data,
+    queryFn: canteensApi.listCanteens,
   });
 
   const activeId = pickedId || selectedCanteenId || canteens[0]?.id || "";
@@ -19,7 +21,7 @@ export default function BoardScreen() {
   const { data: board } = useQuery<any>({
     queryKey: ["m-board", activeId],
     enabled: Boolean(activeId),
-    queryFn: async () => (await mobileApi.get(`/pickup/board/${activeId}`)).data,
+    queryFn: () => tokensApi.getBoard(activeId),
     refetchInterval: 4000,
   });
 

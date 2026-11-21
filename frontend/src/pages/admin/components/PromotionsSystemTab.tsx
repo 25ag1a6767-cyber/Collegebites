@@ -1,26 +1,25 @@
 import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Megaphone, Monitor, Shield, Tag } from "lucide-react";
+import { Megaphone, Monitor, Shield, Sparkles } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
 import type { CollegeSettings } from "../../../types";
 import { Badge, Button, Card, Input, Select, useToast } from "../../../components/ui/Primitives";
 
 export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCanteenId }) => {
   const { pushToast } = useToast();
-  const { data: coupons = [], refetch: refetchCoupons } = useQuery<any[]>({
-    queryKey: ["admin-coupons"],
-    queryFn: async () => (await api.get("/promotions/coupons?active_only=false")).data,
+  const { data: promos = [], refetch: refetchPromos } = useQuery<any[]>({
+    queryKey: ["admin-promotions", activeCanteenId],
+    queryFn: async () => (await api.get(`/promotions${activeCanteenId ? `?canteen_id=${activeCanteenId}` : ""}`)).data,
   });
   const { data: announcements = [], refetch: refetchAnn } = useQuery<any[]>({
     queryKey: ["admin-announcements"],
     queryFn: async () => (await api.get("/notifications/announcements")).data,
   });
 
-  const [code, setCode] = useState("");
-  const [title, setTitle] = useState("");
-  const [discType, setDiscType] = useState<"percentage" | "fixed">("percentage");
-  const [discVal, setDiscVal] = useState("10");
-  const [minOrder, setMinOrder] = useState("100");
+  const [promoTitle, setPromoTitle] = useState("");
+  const [promoSubtitle, setPromoSubtitle] = useState("");
+  const [promoBadge, setPromoBadge] = useState("SPECIAL");
+  const [promoType, setPromoType] = useState<"banner" | "flash_offer" | "combo">("banner");
   const [annTitle, setAnnTitle] = useState("");
   const [annBody, setAnnBody] = useState("");
 
@@ -28,68 +27,67 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
     <div className="grid gap-6 md:grid-cols-2">
       <Card className="p-5 space-y-3">
         <h2 className="font-bold text-slate-900 flex items-center gap-2">
-          <Tag className="h-4 w-4 text-orange-600" /> Coupons & Offers ({coupons.length})
+          <Sparkles className="h-4 w-4 text-orange-600" /> Highlight Banners & Combos ({promos.length})
         </h2>
         <div className="grid grid-cols-2 gap-2">
-          <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Code (FEST20)" />
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" />
+          <Input value={promoTitle} onChange={(e) => setPromoTitle(e.target.value)} placeholder="Banner title (Fresh Lunch Bowl)" />
+          <Input value={promoSubtitle} onChange={(e) => setPromoSubtitle(e.target.value)} placeholder="Subtitle / timing note" />
         </div>
-        <div className="grid grid-cols-3 gap-2">
-          <Select value={discType} onChange={(e) => setDiscType(e.target.value as any)}>
-            <option value="percentage">% Off</option>
-            <option value="fixed">Flat ₹</option>
+        <div className="grid grid-cols-2 gap-2">
+          <Select value={promoType} onChange={(e) => setPromoType(e.target.value as any)}>
+            <option value="banner">Campus Banner</option>
+            <option value="combo">Meal Combo</option>
+            <option value="flash_offer">Special Highlight</option>
           </Select>
-          <Input value={discVal} onChange={(e) => setDiscVal(e.target.value)} placeholder="Value" />
-          <Input value={minOrder} onChange={(e) => setMinOrder(e.target.value)} placeholder="Min ₹" />
+          <Input value={promoBadge} onChange={(e) => setPromoBadge(e.target.value)} placeholder="Badge text (SPECIAL)" />
         </div>
         <Button
           size="sm"
           onClick={async () => {
             try {
-              await api.post("/promotions/coupons", {
-                code,
-                title,
-                discount_type: discType,
-                discount_value: discVal,
-                min_order_amount: minOrder,
+              await api.post("/promotions", {
+                canteen_id: activeCanteenId || null,
+                title: promoTitle,
+                subtitle: promoSubtitle || null,
+                badge_text: promoBadge || null,
+                promo_type: promoType,
               });
-              setCode("");
-              setTitle("");
-              refetchCoupons();
-              pushToast("Coupon created", "success");
+              setPromoTitle("");
+              setPromoSubtitle("");
+              refetchPromos();
+              pushToast("Highlight banner created", "success");
             } catch (err) {
               pushToast(getApiError(err), "error");
             }
           }}
         >
-          Create Coupon
+          Publish Banner
         </Button>
         <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
-          {coupons.map((c) => (
-            <div key={c.id} className="flex items-center justify-between gap-2">
-              <span className="font-mono font-bold">
-                {c.code} {!c.is_active && <span className="text-red-500">(Paused)</span>}
-              </span>
-              <div className="flex items-center gap-2">
-                <span>
-                  {c.discount_value} ({c.discount_type}) • Used {c.times_used}×
-                </span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      await api.patch(`/promotions/coupons/${c.id}`, { is_active: !c.is_active });
-                      refetchCoupons();
-                      pushToast(`Coupon ${!c.is_active ? "activated" : "paused"}`, "info");
-                    } catch (err) {
-                      pushToast(getApiError(err), "error");
-                    }
-                  }}
-                  className="font-bold text-orange-600 hover:underline"
-                >
-                  {c.is_active ? "Pause" : "Activate"}
-                </button>
+          {promos.length === 0 && <div className="text-slate-500">No active highlight banners configured.</div>}
+          {promos.map((p) => (
+            <div key={p.id} className="flex items-center justify-between gap-2 rounded-lg bg-orange-50/70 p-2">
+              <div>
+                <div className="font-bold text-slate-900">
+                  {p.badge_text ? `[${p.badge_text}] ` : ""}{p.title}
+                </div>
+                {p.subtitle && <div className="text-slate-600">{p.subtitle}</div>}
               </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await api.delete(`/promotions/${p.id}`);
+                    refetchPromos();
+                    pushToast("Banner deactivated", "info");
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+                className="font-bold text-red-600 hover:underline shrink-0"
+              >
+                Remove
+              </button>
             </div>
           ))}
         </div>

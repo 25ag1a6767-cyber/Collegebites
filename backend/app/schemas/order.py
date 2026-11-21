@@ -35,11 +35,6 @@ class CartItemUpdateIn(BaseModel):
     special_instructions: Optional[str] = Field(default=None, max_length=300)
 
 
-class CartApplyCouponIn(BaseModel):
-    canteen_id: UUID
-    coupon_code: Optional[str] = Field(default=None, max_length=64)
-
-
 class CartCustomizationOut(BaseModel):
     customization_type: str
     addon_id: Optional[UUID]

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.permissions import AuthenticatedPrincipal, get_optional_principal
-from app.schemas.order import CartApplyCouponIn, CartItemAddIn, CartItemUpdateIn, CartSummaryOut
+from app.schemas.order import CartItemAddIn, CartItemUpdateIn, CartSummaryOut
 from app.services import cart_service
 
 router = APIRouter(prefix="/carts", tags=["Cart"])
@@ -53,21 +53,6 @@ def update_cart_item(
     return cart_service.update_cart_item(
         db,
         cart_item_id,
-        payload,
-        user_id=principal.user.id if principal else None,
-        guest_session_id=x_guest_session_id,
-    )
-
-
-@router.post("/coupon", response_model=CartSummaryOut)
-def apply_coupon(
-    payload: CartApplyCouponIn,
-    x_guest_session_id: Optional[str] = Header(default=None),
-    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
-    db: Session = Depends(get_db),
-):
-    return cart_service.apply_coupon_to_cart(
-        db,
         payload,
         user_id=principal.user.id if principal else None,
         guest_session_id=x_guest_session_id,

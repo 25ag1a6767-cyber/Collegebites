@@ -31,7 +31,7 @@ def test_qr_location_resolve_revoke_and_replace(client: TestClient):
     assert client.get(f"/api/v1/qr/locations/resolve/{new_code}").status_code == 410
 
 
-def test_cart_backend_pricing_coupon_and_guest_checkout_idempotency(client: TestClient):
+def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: TestClient):
     main = next(c for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
     cid = main["id"]
     items = client.get(f"/api/v1/menus/canteens/{cid}/items").json()
@@ -58,7 +58,7 @@ def test_cart_backend_pricing_coupon_and_guest_checkout_idempotency(client: Test
     )
     assert r1.status_code == 200, r1.text
 
-    # Add 2 Cold Coffee (50 * 2 = 100) -> Subtotal = 260
+    # Add 2 Cold Coffee (50 * 2 = 100) -> Subtotal = 260, 5% tax = 13.00 -> Total = 273.00
     r2 = client.post(
         "/api/v1/carts/items",
         headers=guest_headers,
@@ -71,13 +71,13 @@ def test_cart_backend_pricing_coupon_and_guest_checkout_idempotency(client: Test
     )
     assert r2.status_code == 200
     assert Decimal(r2.json()["subtotal_amount"]) == Decimal("260.00")
+    assert Decimal(r2.json()["discount_amount"]) == Decimal("0.00")
+    assert Decimal(r2.json()["tax_amount"]) == Decimal("13.00")
+    assert Decimal(r2.json()["total_amount"]) == Decimal("273.00")
 
-    # Apply coupon CAMPUS10 (10% of 260 = 26 discount -> taxable 234 -> 5% tax = 11.70 -> total = 245.70)
+    # Coupons are completely removed
     rc = client.post("/api/v1/carts/coupon", headers=guest_headers, json={"canteen_id": cid, "coupon_code": "CAMPUS10"})
-    assert rc.status_code == 200
-    assert Decimal(rc.json()["discount_amount"]) == Decimal("26.00")
-    assert Decimal(rc.json()["tax_amount"]) == Decimal("11.70")
-    assert Decimal(rc.json()["total_amount"]) == Decimal("245.70")
+    assert rc.status_code in (404, 405)
 
     # Guest checkout requires OTP first
     no_otp = client.post(
@@ -122,7 +122,8 @@ def test_cart_backend_pricing_coupon_and_guest_checkout_idempotency(client: Test
     assert order["payment_status"] == "PENDING"
     assert order["pickup_token_code"] is None  # NO token before verified payment!
     assert order["qr_token_raw"] is None
-    assert Decimal(order["total_amount"]) == Decimal("245.70")
+    assert Decimal(order["total_amount"]) == Decimal("273.00")
+    assert order["coupon_code"] is None
     assert order["razorpay_order_id"] is not None
     guest_token = order["guest_access_token"]
     assert guest_token is not None

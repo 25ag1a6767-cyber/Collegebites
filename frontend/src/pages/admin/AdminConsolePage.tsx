@@ -33,11 +33,17 @@ export const AdminConsolePage: React.FC = () => {
   const [canteenId, setCanteenId] = useState(user?.assigned_canteen_id || selectedCanteenId || "");
   const activeCanteenId = (!isCollegeAdmin && user?.assigned_canteen_id) ? user.assigned_canteen_id : (canteenId || canteens[0]?.id || "");
   const [scopeReportToCanteen, setScopeReportToCanteen] = useState(!isCollegeAdmin);
+  const [reportStartDate, setReportStartDate] = useState("");
+  const [reportEndDate, setReportEndDate] = useState("");
 
-  const reportQueryCanteen = scopeReportToCanteen && activeCanteenId ? `?canteen_id=${activeCanteenId}` : "";
+  const reportParams = new URLSearchParams();
+  if (scopeReportToCanteen && activeCanteenId) reportParams.set("canteen_id", activeCanteenId);
+  if (reportStartDate) reportParams.set("start_date", reportStartDate);
+  if (reportEndDate) reportParams.set("end_date", reportEndDate);
+  const reportQueryCanteen = reportParams.toString() ? `?${reportParams.toString()}` : "";
 
   const { data: report } = useQuery<any>({
-    queryKey: ["admin-report", activeCanteenId, scopeReportToCanteen],
+    queryKey: ["admin-report", activeCanteenId, scopeReportToCanteen, reportStartDate, reportEndDate],
     enabled: tab === "analytics",
     queryFn: async () => (await api.get(`/reports/dashboard${reportQueryCanteen}`)).data,
   });
@@ -139,7 +145,7 @@ export const AdminConsolePage: React.FC = () => {
           { k: "qr", l: "Location QR Codes" },
           { k: "queue", l: "Queue, Crowd & Slots" },
           { k: "staff", l: "Staff, Attendance & Tasks" },
-          { k: "promotions", l: "Coupons & Announcements" },
+          { k: "promotions", l: "Announcements & Banners" },
           { k: "support", l: "Support Tickets" },
           ...(isCollegeAdmin ? [{ k: "system", l: "Settings, Reconcile & Audits" }] : []),
         ].map((item) => (
@@ -156,19 +162,50 @@ export const AdminConsolePage: React.FC = () => {
 
       {tab === "analytics" && report && (
         <div className="space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            {isCollegeAdmin ? (
-              <label className="flex items-center gap-2 text-xs font-semibold text-slate-600 cursor-pointer">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              {isCollegeAdmin ? (
+                <label className="flex items-center gap-2 text-xs font-semibold text-slate-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={scopeReportToCanteen}
+                    onChange={(e) => setScopeReportToCanteen(e.target.checked)}
+                  />
+                  Filter report to selected canteen
+                </label>
+              ) : (
+                <span className="text-xs font-semibold text-slate-500">Scoped to assigned canteen</span>
+              )}
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
                 <input
-                  type="checkbox"
-                  checked={scopeReportToCanteen}
-                  onChange={(e) => setScopeReportToCanteen(e.target.checked)}
+                  type="date"
+                  value={reportStartDate}
+                  onChange={(e) => setReportStartDate(e.target.value)}
+                  aria-label="Report start date"
+                  className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs"
                 />
-                Filter report to selected canteen
-              </label>
-            ) : (
-              <span className="text-xs font-semibold text-slate-500">Scoped to assigned canteen</span>
-            )}
+                <span className="text-slate-400">to</span>
+                <input
+                  type="date"
+                  value={reportEndDate}
+                  onChange={(e) => setReportEndDate(e.target.value)}
+                  aria-label="Report end date"
+                  className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs"
+                />
+                {(reportStartDate || reportEndDate) && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setReportStartDate("");
+                      setReportEndDate("");
+                    }}
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+            </div>
             <div className="flex gap-2">
               <Button size="sm" variant="outline" onClick={() => downloadBlob(`/reports/export/csv${reportQueryCanteen}`, "collegebites-report.csv")}>
                 <Download className="h-3.5 w-3.5" /> Export CSV
@@ -183,22 +220,30 @@ export const AdminConsolePage: React.FC = () => {
             <Card className="p-4">
               <div className="text-xs text-slate-500">Confirmed Orders</div>
               <div className="text-2xl font-black text-slate-900">{report.sales.total_orders}</div>
-              <div className="text-xs text-emerald-700 mt-1">Completed: {report.operations.completed_orders}</div>
+              <div className="text-xs text-emerald-700 mt-1">
+                Completed: {report.operations.completed_orders} • Cancelled: {report.operations.cancelled_orders}
+              </div>
             </Card>
             <Card className="p-4">
               <div className="text-xs text-slate-500">Net Sales Revenue</div>
               <div className="text-2xl font-black text-orange-600">₹{report.sales.net_sales}</div>
-              <div className="text-xs text-slate-500 mt-1">AOV: ₹{report.sales.average_order_value}</div>
+              <div className="text-xs text-slate-500 mt-1">
+                AOV: ₹{report.sales.average_order_value} • Tax: ₹{report.sales.tax_collected}
+              </div>
             </Card>
             <Card className="p-4">
-              <div className="text-xs text-slate-500">Avg Prep Time</div>
+              <div className="text-xs text-slate-500">Prep &amp; Wait Times</div>
               <div className="text-2xl font-black text-slate-900">{report.operations.avg_prep_minutes} min</div>
-              <div className="text-xs text-slate-500 mt-1">Delayed: {report.operations.delayed_orders}</div>
+              <div className="text-xs text-slate-500 mt-1">
+                Pickup wait: {report.operations.avg_pickup_wait_minutes} min • Delayed: {report.operations.delayed_orders}
+              </div>
             </Card>
             <Card className="p-4">
-              <div className="text-xs text-slate-500">Repeat Customer Rate</div>
+              <div className="text-xs text-slate-500">Customers &amp; Support</div>
               <div className="text-2xl font-black text-slate-900">{report.customers.repeat_order_rate_percent}%</div>
-              <div className="text-xs text-slate-500 mt-1">Avg Rating: ★ {report.customers.average_food_rating}</div>
+              <div className="text-xs text-slate-500 mt-1">
+                Rating: ★ {report.customers.average_food_rating} • Open tickets: {report.support?.open_tickets ?? 0}
+              </div>
             </Card>
           </div>
 
@@ -221,14 +266,112 @@ export const AdminConsolePage: React.FC = () => {
             <Card className="p-5">
               <h3 className="font-bold text-slate-900 mb-3 text-sm">Top Selling Dishes</h3>
               <div className="space-y-2 text-xs">
-                {report.sales.top_items.map((ti: any) => (
-                  <div key={ti.item_name} className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <span className="font-bold text-slate-800">{ti.item_name}</span>
-                    <span>
-                      {ti.quantity_sold} sold • <strong>₹{ti.revenue.toFixed(2)}</strong>
-                    </span>
-                  </div>
-                ))}
+                {report.sales.top_items.length === 0 ? (
+                  <div className="py-8 text-center text-slate-400">No dish sales recorded for selected range.</div>
+                ) : (
+                  report.sales.top_items.map((ti: any) => (
+                    <div key={ti.item_name} className="flex items-center justify-between border-b border-slate-100 pb-2">
+                      <span className="font-bold text-slate-800">{ti.item_name}</span>
+                      <span>
+                        {ti.quantity_sold} sold • <strong>₹{ti.revenue.toFixed(2)}</strong>
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+          </div>
+
+          <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-4">
+            <Card className="p-4">
+              <h3 className="font-bold text-slate-900 mb-2 text-xs uppercase tracking-wide">Category-wise Sales</h3>
+              <div className="space-y-1.5 text-xs">
+                {(report.sales.category_sales || []).length === 0 ? (
+                  <div className="text-slate-400">No category sales yet.</div>
+                ) : (
+                  (report.sales.category_sales || []).map((c: any) => (
+                    <div key={c.category} className="flex justify-between">
+                      <span className="text-slate-700 font-medium">{c.category}</span>
+                      <span className="font-bold">₹{Number(c.revenue).toFixed(2)} ({c.quantity})</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+
+            <Card className="p-4">
+              <h3 className="font-bold text-slate-900 mb-2 text-xs uppercase tracking-wide">Counter-wise Sales</h3>
+              <div className="space-y-1.5 text-xs">
+                {(report.sales.counter_sales || []).length === 0 ? (
+                  <div className="text-slate-400">No counter sales yet.</div>
+                ) : (
+                  (report.sales.counter_sales || []).map((c: any) => (
+                    <div key={c.counter} className="flex justify-between">
+                      <span className="text-slate-700 font-medium">{c.counter}</span>
+                      <span className="font-bold">₹{Number(c.revenue).toFixed(2)} ({c.orders})</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+
+            <Card className="p-4">
+              <h3 className="font-bold text-slate-900 mb-2 text-xs uppercase tracking-wide">Payment Breakdown</h3>
+              <div className="space-y-1.5 text-xs">
+                {(report.sales.payment_breakdown || []).length === 0 ? (
+                  <div className="text-slate-400">No confirmed payments yet.</div>
+                ) : (
+                  (report.sales.payment_breakdown || []).map((p: any) => (
+                    <div key={p.method} className="flex justify-between">
+                      <span className="uppercase text-slate-700 font-medium">{p.method}</span>
+                      <span className="font-bold">₹{Number(p.amount).toFixed(2)} ({p.orders})</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+
+            <Card className="p-4">
+              <h3 className="font-bold text-slate-900 mb-2 text-xs uppercase tracking-wide">Peak Hours</h3>
+              <div className="space-y-1.5 text-xs">
+                {(report.operations.peak_hours || []).length === 0 ? (
+                  <div className="text-slate-400">No hourly activity yet.</div>
+                ) : (
+                  (report.operations.peak_hours || []).slice(0, 6).map((h: any) => (
+                    <div key={h.hour} className="flex justify-between">
+                      <span className="font-mono text-slate-700">{h.hour}</span>
+                      <span className="font-bold">{h.orders} orders</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Card className="p-4 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div>
+                <div className="font-bold text-slate-900">Inventory &amp; Wastage Summary</div>
+                <div className="text-slate-500 mt-0.5">
+                  Tracked: {report.inventory?.tracked_ingredients ?? 0} • Low stock: {report.inventory?.low_stock_count ?? 0} • Expiring (7d): {report.inventory?.expiring_within_7_days ?? 0}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-slate-500">Wastage Loss</div>
+                <div className="text-sm font-black text-red-600">₹{report.inventory?.total_wastage_loss ?? "0.00"}</div>
+              </div>
+            </Card>
+
+            <Card className="p-4 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div>
+                <div className="font-bold text-slate-900">Staff &amp; Operations Activity</div>
+                <div className="text-slate-500 mt-0.5">
+                  Check-ins: {report.staff_performance?.present_checkins ?? 0} • Leaves: {report.staff_performance?.leave_records ?? 0} • Tasks done: {report.staff_performance?.tasks_completed ?? 0}/{report.staff_performance?.tasks_total ?? 0}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-slate-500">Walk-in POS</div>
+                <div className="text-sm font-black text-slate-900">{report.staff_performance?.cashier_walkin_orders ?? 0} orders</div>
               </div>
             </Card>
           </div>

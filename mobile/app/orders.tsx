@@ -2,7 +2,10 @@ import React, { useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { getMobileApiError, mobileApi } from "../src/api/client";
+import { authApi } from "../src/api/auth.api";
+import { cartApi } from "../src/api/cart.api";
+import { getMobileApiError } from "../src/api/client";
+import { ordersApi } from "../src/api/orders.api";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 export default function OrdersScreen() {
@@ -41,7 +44,7 @@ export default function OrdersScreen() {
             removedIngredients.push(c.option_value);
           }
         }
-        await mobileApi.post("/carts/items", {
+        await cartApi.addItem({
           canteen_id: o.canteen_id,
           food_item_id: it.food_item_id,
           variant_id: it.variant_id || null,
@@ -68,10 +71,16 @@ export default function OrdersScreen() {
     }
   };
 
-  const { data: orders = [] } = useQuery<any[]>({
+  const {
+    data: orders = [],
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery<any[]>({
     queryKey: ["m-orders"],
     enabled: Boolean(user),
-    queryFn: async () => (await mobileApi.get("/orders/my")).data,
+    queryFn: ordersApi.listMyOrders,
     refetchInterval: 8000,
   });
 
@@ -87,7 +96,7 @@ export default function OrdersScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.topBar}>
-        <Text style={styles.title}>Orders & Tokens</Text>
+        <Text style={styles.title}>Orders &amp; Tokens</Text>
         <Pressable onPress={() => router.push("/board")} style={styles.boardBtn}>
           <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>Live Token Board</Text>
         </Pressable>
@@ -128,12 +137,9 @@ export default function OrdersScreen() {
                   setBusy(true);
                   setStatusMsg("");
                   try {
-                    const r = await mobileApi.post("/auth/otp/request", {
-                      target: recoverPhone.trim(),
-                      purpose: "guest_checkout",
-                    });
+                    const r = await authApi.requestOtp({ target: recoverPhone.trim(), purpose: "guest_checkout" });
                     setOtpSent(true);
-                    setDevOtp(r.data.dev_otp || null);
+                    setDevOtp(r.dev_otp || null);
                   } catch (e: unknown) {
                     setStatusMsg(getMobileApiError(e, "Failed to send OTP"));
                   } finally {
@@ -161,19 +167,16 @@ export default function OrdersScreen() {
                     setBusy(true);
                     setStatusMsg("");
                     try {
-                      const ver = await mobileApi.post("/auth/otp/verify", {
+                      const ver = await authApi.verifyOtp({
                         target: recoverPhone.trim(),
                         purpose: "guest_checkout",
                         code: recoverOtp.trim(),
                       });
-                      const rows = await mobileApi.post("/orders/guest/lookup", {
-                        guest_phone: recoverPhone.trim(),
-                        otp_verification_token: ver.data.verification_token,
-                      });
-                      (rows.data || []).forEach((ord: any) => {
+                      const rows = await ordersApi.lookupGuestOrders(recoverPhone.trim(), ver.verification_token);
+                      (rows || []).forEach((ord: any) => {
                         if (ord.guest_access_token) saveGuestOrderToken(ord.order_number, ord.guest_access_token);
                       });
-                      setRecovered(rows.data || []);
+                      setRecovered(rows || []);
                     } catch (e: unknown) {
                       setStatusMsg(getMobileApiError(e, "Lookup failed"));
                     } finally {
@@ -201,9 +204,18 @@ export default function OrdersScreen() {
           {guestNums.map((num) => (
             <Pressable key={num} onPress={() => router.push(`/order/${num}`)} style={styles.card}>
               <Text style={styles.ordNo}>{num}</Text>
-              <Text style={styles.meta}>Tap to view live token, QR & receipt</Text>
+              <Text style={styles.meta}>Tap to view live token, QR &amp; receipt</Text>
             </Pressable>
           ))}
+        </View>
+      )}
+
+      {isError && (
+        <View style={styles.errBox}>
+          <Text style={styles.errTxt}>{getMobileApiError(error, "Could not load orders")}</Text>
+          <Pressable onPress={() => void refetch()} style={styles.goBtn}>
+            <Text style={{ color: "#fff", fontWeight: "800", fontSize: 11 }}>Retry</Text>
+          </Pressable>
         </View>
       )}
 
@@ -213,6 +225,13 @@ export default function OrdersScreen() {
         data={orders}
         keyExtractor={(o) => o.id}
         contentContainerStyle={{ gap: 10, paddingBottom: 30 }}
+        ListEmptyComponent={
+          user && !isLoading ? (
+            <Text style={{ textAlign: "center", color: "#64748b", marginTop: 20, fontSize: 13 }}>
+              No orders placed yet. Explore the menu to place your first order.
+            </Text>
+          ) : null
+        }
         renderItem={({ item }) => (
           <View style={styles.card}>
             <Pressable onPress={() => router.push(`/order/${item.order_number}`)}>
@@ -221,11 +240,11 @@ export default function OrdersScreen() {
                 <Text style={styles.token}>{item.pickup_token_code || item.status}</Text>
               </View>
               <Text style={styles.meta}>
-                {item.canteen_name} • ₹{item.total_amount} • {item.status}
+                {item.canteen_name} • ₹{item.total_amount} • {item.status} • {item.payment_status}
               </Text>
             </Pressable>
             <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
-              <Pressable onPress={() => reorder(item)} style={styles.reorderBtn}>
+              <Pressable disabled={busy} onPress={() => reorder(item)} style={styles.reorderBtn}>
                 <Text style={{ fontSize: 11, fontWeight: "700", color: "#0f172a" }}>Reorder</Text>
               </Pressable>
             </View>
@@ -243,10 +262,12 @@ const styles = StyleSheet.create({
   boardBtn: { backgroundColor: "#0f172a", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
   lookupBox: { backgroundColor: "#fff", borderRadius: 12, padding: 10, gap: 6, marginBottom: 12, borderWidth: 1, borderColor: "#e2e8f0" },
   input: { backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, fontSize: 12 },
-  goBtn: { backgroundColor: "#ea580c", borderRadius: 8, paddingHorizontal: 12, justifyContent: "center" },
+  goBtn: { backgroundColor: "#ea580c", borderRadius: 8, paddingHorizontal: 12, justifyContent: "center", paddingVertical: 6 },
   card: { backgroundColor: "#fff", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" },
   reorderBtn: { backgroundColor: "#f1f5f9", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: "#cbd5e1" },
   ordNo: { fontWeight: "800", fontSize: 15, color: "#0f172a" },
   token: { fontWeight: "900", fontSize: 15, color: "#ea580c" },
   meta: { fontSize: 12, color: "#64748b", marginTop: 4 },
+  errBox: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fee2e2", borderRadius: 10, padding: 10, marginBottom: 8 },
+  errTxt: { flex: 1, color: "#991b1b", fontSize: 12, fontWeight: "700" },
 });

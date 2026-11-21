@@ -24,7 +24,7 @@ Base URL: `/api/v1` (interactive OpenAPI docs served at `/docs` and `/redoc`).
 
 ## QR Location Ordering, Cart & Checkout (`/qr`, `/carts`, `/orders`)
 - `GET /qr/locations/resolve/{code}` — Identify canteen/counter/table from permanent QR; `POST /qr/locations`, `POST /qr/locations/{id}/revoke|replace`, `GET /qr/locations/{id}/image`
-- `GET /carts`, `POST /carts/items`, `PATCH /carts/items/{id}`, `POST /carts/coupon`
+- `GET /carts`, `POST /carts/items`, `PATCH /carts/items/{id}`
 - `GET /orders/slots/{canteen_id}`, `POST /orders/checkout`, `GET /orders/my`, `GET /orders/{id_or_number}`, `POST /orders/{id}/cancel`
 
 ## Payments — NO REFUNDS (`/payments`)
@@ -51,9 +51,9 @@ Base URL: `/api/v1` (interactive OpenAPI docs served at `/docs` and `/redoc`).
 
 ## Queue, Inventory, Staff, Promotions, Notifications, Support, Reports, Kiosk
 - `/queue/canteens/{id}`, `/queue/canteens/{id}/estimate`, `/queue/canteens/{id}/controls`, `/queue/canteens/{id}/slots`
-- `/inventory/suppliers`, `/inventory/canteens/{id}/items`, `/inventory/ingredients`, `/inventory/recipes/{food_item_id}`, `/inventory/purchase-orders`, `/inventory/adjustments`, `/inventory/wastage`, `/inventory/transfers`, `/inventory/canteens/{id}/alerts`
+- `/inventory/canteens/{id}/dashboard`, `/inventory/suppliers`, `/inventory/canteens/{id}/items`, `/inventory/items/{id}` (`PATCH`, `archive`, `restore`, `restock`, `purchase-price`), `/inventory/price-changes` (`POST`, `/review`), `/inventory/canteens/{id}/audit-logs`, `/inventory/canteens/{id}/reports/csv|pdf`, `/inventory/ingredients`, `/inventory/recipes/{food_item_id}`, `/inventory/purchase-orders`, `/inventory/adjustments`, `/inventory/wastage`, `/inventory/transfers`, `/inventory/canteens/{id}/alerts`
 - `/staff`, `/staff/shifts`, `/staff/attendance/check-in|check-out|leave`, `/staff/tasks`, `/staff/activity`
-- `/promotions`, `/promotions/coupons`, `/promotions/loyalty/me`, `/promotions/loyalty/apply-referral`
+- `/promotions`, `/promotions/loyalty/me`, `/promotions/loyalty/apply-referral`
 - `/notifications/my`, `/notifications/{id}/read`, `/notifications/preferences`, `/notifications/announcements`
 - `/support/reviews`, `/support/tickets`, `/support/tickets/{id}/assign|messages|resolve`
 - `/reports/dashboard`, `/reports/export/csv`, `/reports/export/pdf`

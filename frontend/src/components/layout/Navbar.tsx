@@ -12,6 +12,7 @@ import {
   Package,
   QrCode,
   ShoppingBag,
+  Smartphone,
   Tv,
   User as UserIcon,
   UtensilsCrossed,
@@ -19,7 +20,8 @@ import {
 import { api, buildWsUrl, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings } from "../../types";
-import { Badge, Button, crowdBadgeTone, useToast } from "../ui/Primitives";
+import { usePwaInstall } from "../../utils/pwa";
+import { Badge, Button, Modal, crowdBadgeTone, useToast } from "../ui/Primitives";
 
 export const Navbar: React.FC = () => {
   const location = useLocation();
@@ -28,6 +30,8 @@ export const Navbar: React.FC = () => {
   const { pushToast } = useToast();
   const { user, accessToken, logout, selectedCanteenId, setSelectedCanteen } = useAppStore();
   const [notifOpen, setNotifOpen] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
+  const pwa = usePwaInstall();
 
   useEffect(() => {
     if (!user?.id || !accessToken) return;
@@ -120,6 +124,9 @@ export const Navbar: React.FC = () => {
           <Link to="/" className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">
             Menu
           </Link>
+          <Link to="/scan" className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">
+            <QrCode className="h-3.5 w-3.5" /> Scan QR
+          </Link>
           <Link to="/orders" className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">
             Orders
           </Link>
@@ -184,6 +191,20 @@ export const Navbar: React.FC = () => {
         </nav>
 
         <div className="flex items-center gap-2">
+          {!pwa.installed && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={async () => {
+                const outcome = await pwa.promptInstall();
+                if (outcome === "manual") setInstallOpen(true);
+              }}
+              title="Install CollegeBites Mobile App"
+            >
+              <Smartphone className="h-4 w-4 text-orange-600" />
+              <span className="hidden sm:inline">Get App</span>
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => navigate("/checkout")} className="relative">
             <ShoppingBag className="h-4 w-4 text-orange-600" />
             <span>Cart</span>
@@ -302,6 +323,44 @@ export const Navbar: React.FC = () => {
           )}
         </div>
       </div>
+
+      <Modal open={installOpen} onClose={() => setInstallOpen(false)} title="Install CollegeBites Mobile App" maxWidth="max-w-md">
+        <div className="space-y-4 text-sm text-slate-700">
+          <p className="text-xs text-slate-500">
+            Use CollegeBites directly as an app on your Android phone or iPhone for instant menu browsing, QR scanning, live order tracking, and receipts.
+          </p>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5">
+            <div className="font-bold text-slate-900">iPhone / iPad (Safari)</div>
+            <ol className="list-decimal list-inside text-xs text-slate-600 space-y-1">
+              <li>Tap the <strong>Share</strong> icon in Safari&apos;s toolbar.</li>
+              <li>Scroll and tap <strong>Add to Home Screen</strong>.</li>
+              <li>Tap <strong>Add</strong> — CollegeBites launches full-screen like a native app.</li>
+            </ol>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5">
+            <div className="font-bold text-slate-900">Android (Chrome / Edge)</div>
+            <ol className="list-decimal list-inside text-xs text-slate-600 space-y-1">
+              <li>Tap browser menu <strong>⋮</strong> (top right).</li>
+              <li>Tap <strong>Install app</strong> or <strong>Add to Home screen</strong>.</li>
+            </ol>
+            {pwa.canPrompt && (
+              <Button
+                className="w-full mt-2"
+                size="sm"
+                onClick={async () => {
+                  const res = await pwa.promptInstall();
+                  if (res === "accepted") setInstallOpen(false);
+                }}
+              >
+                Install Now
+              </Button>
+            )}
+          </div>
+          <div className="rounded-xl border border-orange-200 bg-orange-50/70 p-3 text-xs text-orange-900">
+            <strong>Native Android &amp; iOS App:</strong> Supports deep links (<span className="font-mono">collegebites://</span>), live QR camera scanning, and push notifications via the Expo mobile app (<span className="font-mono">mobile/</span>).
+          </div>
+        </div>
+      </Modal>
     </header>
   );
 };

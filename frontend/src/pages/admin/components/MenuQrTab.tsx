@@ -19,6 +19,12 @@ export const MenuTab: React.FC<{
     enabled: Boolean(activeCanteenId),
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/schedules`)).data,
   });
+  const { data: pendingPriceRequests = [], refetch: refetchPriceRequests } = useQuery<any[]>({
+    queryKey: ["admin-pending-price-changes", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () =>
+      (await api.get(`/inventory/canteens/${activeCanteenId}/price-changes?status=pending_approval`)).data,
+  });
 
   const [catName, setCatName] = useState("");
   const [newDishName, setNewDishName] = useState("");
@@ -210,6 +216,75 @@ export const MenuTab: React.FC<{
             </div>
           </div>
         ))}
+      </Card>
+
+      {/* Selling Price Approval Queue (from Inventory Manager requests) */}
+      <Card className="p-4 space-y-2.5 border-orange-200 bg-orange-50/30">
+        <div className="font-bold text-slate-900 flex items-center justify-between">
+          <span>Pending Menu Selling Price Approvals ({pendingPriceRequests.length})</span>
+          <Badge tone={pendingPriceRequests.length > 0 ? "amber" : "green"}>
+            {pendingPriceRequests.length > 0 ? "Action Needed" : "All Reviewed"}
+          </Badge>
+        </div>
+        {pendingPriceRequests.length === 0 ? (
+          <div className="text-xs text-slate-500">No pending selling-price change requests from Inventory Manager.</div>
+        ) : (
+          <div className="space-y-2 text-xs">
+            {pendingPriceRequests.map((req) => (
+              <div
+                key={req.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-orange-200 bg-white p-3"
+              >
+                <div>
+                  <div className="font-bold text-slate-900">{req.food_item_name || "Menu Item"}</div>
+                  <div className="text-slate-600">
+                    ₹{req.old_price} → <strong className="text-orange-700">₹{req.new_price}</strong> • {req.reason} (Requested by{" "}
+                    {req.requested_by_name || "Inventory Manager"})
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="success"
+                    onClick={async () => {
+                      try {
+                        await api.post(`/inventory/price-changes/${req.id}/review`, {
+                          decision: "approve",
+                          review_notes: "Approved from Admin Menu console",
+                        });
+                        refetchPriceRequests();
+                        refetchMenu();
+                        pushToast("Selling price approved and live on menu", "success");
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={async () => {
+                      try {
+                        await api.post(`/inventory/price-changes/${req.id}/review`, {
+                          decision: "reject",
+                          review_notes: "Rejected from Admin Menu console",
+                        });
+                        refetchPriceRequests();
+                        pushToast("Selling price request rejected", "info");
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Reject
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       {/* Menu Schedules Management */}

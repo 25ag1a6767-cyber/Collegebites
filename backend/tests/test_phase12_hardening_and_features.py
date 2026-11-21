@@ -315,7 +315,7 @@ def test_rbac_canteen_isolation_ssrf_printing_holidays_and_schedules(client: Tes
         ).status_code
         == 403
     )
-    for blocked_host in ("127.0.0.1", "169.254.169.254", "10.0.0.5"):
+    for blocked_host in ("127.0.0.1", "169.254.169.254", "localhost", "::1"):
         ssrf = client.post(
             f"/api/v1/printing/receipts/{ono}/print",
             headers=cashier["headers"],
@@ -387,7 +387,21 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     assert slot_res.status_code == 200
     slot_id = slot_res.json()["id"]
 
-    # Checkout pending Stripe order using CAMPUS10 + 10 loyalty points + pickup slot
+    # Checkout pending Stripe order using 10 loyalty points + pickup slot (coupons disabled)
+    bad_coupon_co = client.post(
+        "/api/v1/orders/checkout",
+        headers=friend_hdrs,
+        json={
+            "canteen_id": cid,
+            "payment_method": "stripe",
+            "coupon_code": "CAMPUS10",
+            "use_cart": False,
+            "direct_items": [{"food_item_id": biryani["id"], "quantity": 1}],
+            "accepted_policy": True,
+        },
+    )
+    assert bad_coupon_co.status_code == 400
+
     co_pending = client.post(
         "/api/v1/orders/checkout",
         headers=friend_hdrs,
@@ -395,7 +409,6 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
             "canteen_id": cid,
             "pickup_slot_id": slot_id,
             "payment_method": "stripe",
-            "coupon_code": "CAMPUS10",
             "redeem_loyalty_points": 10,
             "use_cart": False,
             "direct_items": [{"food_item_id": biryani["id"], "quantity": 2}],
@@ -445,8 +458,8 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     guest_tok = g_co["guest_access_token"]
     assert (
         client.post(
-            "/api/v1/payments/stripe/fail",
-            json={"order_id": g_co["id"], "reason": "Insufficient funds", "guest_access_token": guest_tok},
+            f"/api/v1/payments/stripe/fail?guest_token={guest_tok}",
+            json={"order_id": g_co["id"], "reason": "Insufficient funds"},
         ).status_code
         == 200
     )
@@ -714,15 +727,15 @@ def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: 
     assert exc_ord.value.code == 1008
 
     with pytest.raises(WebSocketDisconnect) as exc_kit:
-        with client.websocket_connect(f"/api/v1/ws/kitchen/{mid}?token={student['access_token']}") as ws:
+        with client.websocket_connect(f"/api/v1/ws/kitchen/{mid}?token={student['token']}") as ws:
             ws.receive_text()
     assert exc_kit.value.code == 1008
 
-    with client.websocket_connect(f"/api/v1/ws/kitchen/{mid}?token={kitchen['access_token']}") as ws:
+    with client.websocket_connect(f"/api/v1/ws/kitchen/{mid}?token={kitchen['token']}") as ws:
         ws.send_text("ping")
         assert '"pong"' in ws.receive_text()
 
-    with client.websocket_connect(f"/api/v1/ws/notifications/{student['user']['id']}?token={student['access_token']}") as ws:
+    with client.websocket_connect(f"/api/v1/ws/notifications/{student['user']['id']}?token={student['token']}") as ws:
         ws.send_text("ping")
         assert '"pong"' in ws.receive_text()
 

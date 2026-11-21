@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Navbar } from "./components/layout/Navbar";
+import { MobileAppNav } from "./components/layout/MobileAppNav";
 import { Button, Card, ToastProvider } from "./components/ui/Primitives";
 import { useAppStore } from "./store/useAppStore";
 import { AuthPage } from "./pages/auth/AuthPage";
@@ -69,12 +70,13 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
         <BrowserRouter>
-          <div className="min-h-screen bg-slate-50 text-slate-900">
+          <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 md:pb-6">
             <Navbar />
             <Routes>
               <Route path="/" element={<HomePage />} />
               <Route path="/login" element={<AuthPage initialMode="login" />} />
               <Route path="/register" element={<AuthPage initialMode="register" />} />
+              <Route path="/scan" element={<ScanQRPage />} />
               <Route path="/scan/:code" element={<ScanQRPage />} />
               <Route path="/checkout" element={<CheckoutPage />} />
               <Route path="/orders" element={<MyOrdersPage />} />
@@ -134,6 +136,7 @@ export function App() {
               <Route path="/kiosk" element={<KioskPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            <MobileAppNav />
           </div>
         </BrowserRouter>
       </ToastProvider>

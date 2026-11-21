@@ -23,13 +23,15 @@ def create_pos_walkin_order(
     db: Session, payload: POSWalkInOrderRequest, cashier_user_id: UUID, ip_address: Optional[str] = None
 ) -> OrderOut:
     """Create a walk-in POS order and immediately record authorized cashier payment + token + QR + receipt."""
+    if payload.coupon_code and payload.coupon_code.strip():
+        raise HTTPException(status_code=400, detail="Coupons are disabled and not supported")
     co_req = CheckoutRequest(
         canteen_id=payload.canteen_id,
         counter_id=payload.counter_id,
         order_type="walk_in",
         order_channel="pos",
         payment_method=payload.payment_method,
-        coupon_code=payload.coupon_code,
+        coupon_code=None,
         guest_name=payload.customer_name,
         guest_phone=payload.customer_phone or "0000000000",
         notes=payload.notes,

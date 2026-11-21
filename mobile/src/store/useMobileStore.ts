@@ -41,6 +41,7 @@ interface MobileState {
   scannedQrCode: string | null;
   guestOrderTokens: Record<string, string>;
   cachedOrders: Record<string, any>;
+  onboardingSeen: boolean;
   hydrated: boolean;
 
   hydrate: () => Promise<void>;
@@ -49,6 +50,7 @@ interface MobileState {
   setCanteen: (canteenId: string, qrCode?: string | null) => void;
   saveGuestOrderToken: (orderNumber: string, token: string) => void;
   saveCachedOrder: (orderNumber: string, orderObj: any) => void;
+  markOnboardingSeen: () => Promise<void>;
 }
 
 const MAX_CACHED_ORDERS = 10;
@@ -62,22 +64,57 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   scannedQrCode: null,
   guestOrderTokens: {},
   cachedOrders: {},
+  onboardingSeen: false,
   hydrated: false,
 
   hydrate: async () => {
-    const [access, refresh, userRaw, guestTokRaw, guestSess, orderKeysRaw] = await Promise.all([
+    const [access, refresh, userRaw, guestTokRaw, guestSess, orderKeysRaw, onboardingRaw] = await Promise.all([
       getSecure("cb_access"),
       getSecure("cb_refresh"),
       getSecure("cb_user"),
       getSecure("cb_guest_tokens"),
       getSecure("cb_guest_session"),
       getSecure("cb_order_keys"),
+      getSecure("cb_onboarding_seen"),
     ]);
 
     let finalGuestSess = guestSess;
     if (!finalGuestSess) {
       finalGuestSess = "cb-mob-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
       await setSecure("cb_guest_session", finalGuestSess).catch(() => {});
+    }
+
+    let validAccess = access;
+    let validRefresh = refresh;
+    let validUser: MobileUser | null = userRaw ? JSON.parse(userRaw) : null;
+
+    if (validAccess) {
+      try {
+        const meRes = await axios.get(`${API_URL}/auth/me`, {
+          headers: { Authorization: `Bearer ${validAccess}` },
+          timeout: 6000,
+        });
+        validUser = meRes.data;
+      } catch (err: any) {
+        if (err?.response?.status === 401 && validRefresh) {
+          try {
+            const refRes = await axios.post(`${API_URL}/auth/refresh`, { refresh_token: validRefresh }, { timeout: 6000 });
+            validAccess = refRes.data.access_token;
+            validRefresh = refRes.data.refresh_token;
+            validUser = refRes.data.user;
+            await setSecure("cb_access", validAccess);
+            await setSecure("cb_refresh", validRefresh);
+            await setSecure("cb_user", JSON.stringify(validUser));
+          } catch {
+            validAccess = null;
+            validRefresh = null;
+            validUser = null;
+            await setSecure("cb_access", null);
+            await setSecure("cb_refresh", null);
+            await setSecure("cb_user", null);
+          }
+        }
+      }
     }
 
     const keys: string[] = orderKeysRaw ? JSON.parse(orderKeysRaw) : [];
@@ -96,14 +133,19 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     );
 
     set({
-      accessToken: access,
-      refreshToken: refresh,
-      user: userRaw ? JSON.parse(userRaw) : null,
+      accessToken: validAccess,
+      refreshToken: validRefresh,
+      user: validUser,
       guestSessionId: finalGuestSess,
       guestOrderTokens: guestTokRaw ? JSON.parse(guestTokRaw) : {},
       cachedOrders: loadedOrders,
+      onboardingSeen: onboardingRaw === "true",
       hydrated: true,
     });
+  },
+  markOnboardingSeen: async () => {
+    set({ onboardingSeen: true });
+    await setSecure("cb_onboarding_seen", "true").catch(() => {});
   },
   setAuth: async (access, refresh, user) => {
     await setSecure("cb_access", access);

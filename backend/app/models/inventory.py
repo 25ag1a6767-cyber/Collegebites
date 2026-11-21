@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, Money, QuantityNumeric, TimestampMixin, UUIDPrimaryKeyMixin
@@ -34,6 +34,17 @@ class InventoryItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     reorder_level: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("100.000"))
     unit: Mapped[str] = mapped_column(String(32), nullable=False, default="grams")
     unit_cost: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    category: Mapped[str] = mapped_column(String(80), nullable=False, default="General")
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    image_url: Mapped[Optional[str]] = mapped_column(String(500))
+    storage_location: Mapped[Optional[str]] = mapped_column(String(120))
+    preferred_supplier_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("suppliers.id", ondelete="SET NULL")
+    )
+    is_available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    archived_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 
 class StockBatch(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -116,7 +127,8 @@ class WastageRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("stock_batches.id", ondelete="SET NULL"))
     quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False)
-    reason: Mapped[str] = mapped_column(String(255), nullable=False)  # expired | spoiled | spilled | prep_waste
+    loss_type: Mapped[str] = mapped_column(String(32), nullable=False, default="wastage")  # damaged | expired | wastage
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)  # expired | spoiled | spilled | prep_waste | damaged
     estimated_loss: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
     recorded_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
@@ -131,3 +143,43 @@ class StockTransfer(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="completed")
     transferred_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     notes: Mapped[Optional[str]] = mapped_column(String(255))
+
+
+class InventoryAuditLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "inventory_audit_logs"
+    __table_args__ = (Index("ix_inv_audit_canteen_item", "canteen_id", "inventory_item_id", "created_at"),)
+
+    canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
+    inventory_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("inventory_items.id", ondelete="SET NULL"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(48), nullable=False)  # created | edited | archived | restored | stock_changed | purchase_price_updated | selling_price_requested | selling_price_approved | selling_price_rejected
+    field_name: Mapped[Optional[str]] = mapped_column(String(64))
+    old_value: Mapped[Optional[str]] = mapped_column(Text)
+    new_value: Mapped[Optional[str]] = mapped_column(Text)
+    reason: Mapped[Optional[str]] = mapped_column(String(255))
+    changed_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class PriceChangeRequest(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "price_change_requests"
+    __table_args__ = (Index("ix_price_change_canteen_status", "canteen_id", "status", "created_at"),)
+
+    canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
+    inventory_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("inventory_items.id", ondelete="SET NULL"), index=True
+    )
+    food_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("food_items.id", ondelete="CASCADE"), index=True
+    )
+    price_kind: Mapped[str] = mapped_column(String(32), nullable=False)  # purchase_cost | selling_price
+    old_price: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    new_price: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    reason: Mapped[str] = mapped_column(String(300), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending_approval"
+    )  # applied | pending_approval | approved | rejected
+    requested_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reviewed_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    review_notes: Mapped[Optional[str]] = mapped_column(String(300))
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

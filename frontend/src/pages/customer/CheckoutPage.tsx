@@ -53,7 +53,6 @@ export const CheckoutPage: React.FC = () => {
     queryFn: async () => (await api.get("/promotions/loyalty/me")).data,
   });
 
-  const [couponInput, setCouponInput] = useState("");
   const [redeemPoints, setRedeemPoints] = useState(0);
   const [slotId, setSlotId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"razorpay" | "stripe" | "cash" | "pay_at_pickup">("razorpay");
@@ -101,22 +100,6 @@ export const CheckoutPage: React.FC = () => {
     }
   };
 
-  const applyCoupon = async () => {
-    if (!activeCanteen) return;
-    try {
-      const res = await api.post("/carts/coupon", {
-        canteen_id: activeCanteen.id,
-        coupon_code: couponInput.trim() || null,
-      });
-      qc.setQueryData(["cart", activeCanteen.id], res.data);
-      if (res.data.coupon_message) {
-        pushToast(res.data.coupon_message, res.data.coupon_valid ? "success" : "error");
-      }
-    } catch (err) {
-      pushToast(getApiError(err), "error");
-    }
-  };
-
   const sendGuestOtp = async () => {
     if (!guestPhone.trim()) return pushToast("Enter your mobile number first", "error");
     try {
@@ -159,7 +142,6 @@ export const CheckoutPage: React.FC = () => {
         order_type: orderType,
         order_channel: scannedLocationQrCode ? "qr" : "web",
         payment_method: paymentMethod,
-        coupon_code: cart.coupon_code || null,
         redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
         idempotency_key: idemKey,
         guest_name: !user ? guestName : null,
@@ -525,17 +507,6 @@ export const CheckoutPage: React.FC = () => {
           <Card className="p-5 space-y-4">
             <h2 className="font-bold text-slate-900">Bill Summary (Server Verified)</h2>
 
-            <div className="flex gap-2">
-              <Input
-                value={couponInput}
-                onChange={(e) => setCouponInput(e.target.value)}
-                placeholder="Coupon code (e.g. CAMPUS10)"
-              />
-              <Button type="button" variant="outline" size="sm" onClick={applyCoupon}>
-                Apply
-              </Button>
-            </div>
-
             {user && (loyalty?.points_balance || 0) > 0 && (
               <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-3 text-xs space-y-1.5">
                 <div className="flex items-center justify-between font-bold text-orange-950">
@@ -574,10 +545,12 @@ export const CheckoutPage: React.FC = () => {
                 <span>Subtotal</span>
                 <span>₹{cart.subtotal_amount}</span>
               </div>
-              <div className="flex justify-between text-emerald-700">
-                <span>Discount {cart.coupon_code ? `(${cart.coupon_code})` : ""}</span>
-                <span>-₹{cart.discount_amount}</span>
-              </div>
+              {redeemPoints > 0 && (
+                <div className="flex justify-between text-emerald-700">
+                  <span>Loyalty Points Discount ({redeemPoints} pts)</span>
+                  <span>-₹{(redeemPoints / 4).toFixed(2)} est.</span>
+                </div>
+              )}
               <div className="flex justify-between text-slate-600">
                 <span>Tax</span>
                 <span>₹{cart.tax_amount}</span>

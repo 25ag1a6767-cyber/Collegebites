@@ -2,7 +2,9 @@ import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
+import { authApi } from "../src/api/auth.api";
 import { getMobileApiError, mobileApi } from "../src/api/client";
+import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 const CATEGORIES = [
@@ -34,7 +36,7 @@ export default function SupportScreen() {
   const { data: tickets = [], refetch } = useQuery<any[]>({
     queryKey: ["m-my-tickets"],
     enabled: Boolean(user),
-    queryFn: async () => (await mobileApi.get("/support/tickets/my")).data,
+    queryFn: profileApi.listMyTickets,
   });
 
   const { data: messages = [], refetch: refetchMessages } = useQuery<any[]>({
@@ -62,7 +64,7 @@ export default function SupportScreen() {
     setStatusMsg("");
     setBusy(true);
     try {
-      const res = await mobileApi.post("/support/tickets", {
+      const data = await profileApi.submitTicket({
         order_id: order_id || null,
         canteen_id: selectedCanteenId || null,
         category,
@@ -73,9 +75,9 @@ export default function SupportScreen() {
       });
       setSubject("");
       setDescription("");
-      setStatusMsg(`Ticket ${res.data.ticket_number} submitted.`);
+      setStatusMsg(`Ticket ${data.ticket_number} submitted.`);
       if (user) refetch();
-      else setGuestTickets((prev) => [res.data, ...prev]);
+      else setGuestTickets((prev) => [data, ...prev]);
     } catch (e: unknown) {
       setStatusMsg(getMobileApiError(e, "Could not submit ticket"));
     } finally {
@@ -109,7 +111,7 @@ export default function SupportScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ gap: 14, paddingBottom: 40 }}>
-      <Text style={styles.title}>Customer Support & Complaints</Text>
+      <Text style={styles.title}>Customer Support &amp; Complaints</Text>
       <Text style={styles.note}>Note: CollegeBites does not issue in-app refunds.</Text>
 
       <View style={styles.card}>
@@ -155,8 +157,8 @@ export default function SupportScreen() {
               onPress={async () => {
                 setBusy(true);
                 try {
-                  const r = await mobileApi.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
-                  setDevOtp(r.data.dev_otp || null);
+                  const r = await authApi.requestOtp({ target: guestPhone.trim(), purpose: "guest_checkout" });
+                  setDevOtp(r.dev_otp || null);
                 } catch (e: unknown) {
                   setStatusMsg(getMobileApiError(e));
                 } finally {
@@ -176,12 +178,12 @@ export default function SupportScreen() {
               onPress={async () => {
                 setBusy(true);
                 try {
-                  const ver = await mobileApi.post("/auth/otp/verify", {
+                  const ver = await authApi.verifyOtp({
                     target: guestPhone.trim(),
                     purpose: "guest_checkout",
                     code: guestOtp.trim(),
                   });
-                  const tok = ver.data.verification_token;
+                  const tok = ver.verification_token;
                   setGuestOtpTok(tok);
                   const rows = await mobileApi.post("/support/tickets/guest/lookup", {
                     guest_phone: guestPhone.trim(),
