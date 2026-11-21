@@ -70,7 +70,7 @@ export const OrderTrackingPage: React.FC = () => {
     if (stripeSid && handledStripeRef.current !== stripeSid) {
       handledStripeRef.current = stripeSid;
       api
-        .post("/payments/stripe/verify", {
+        .post(`/payments/stripe/verify${querySuffix}`, {
           order_id: order.id,
           stripe_session_id: stripeSid,
           payment_method: "card",
