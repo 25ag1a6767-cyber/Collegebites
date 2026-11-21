@@ -226,6 +226,7 @@ async function main() {
       "Locations, Counters & Hours",
       "Menus & CSV",
       "Location QR Codes",
+      "Website QR Generator",
       "Queue, Crowd & Slots",
       "Staff, Attendance & Tasks",
       "Announcements & Banners",
@@ -235,6 +236,9 @@ async function main() {
       await adminPage.getByRole("button", { name: tabName }).click();
       if (tabName === "Orders & Users") {
         await adminPage.getByText(pickupToken).first().waitFor({ timeout: 10000 });
+      }
+      if (tabName === "Website QR Generator") {
+        await adminPage.getByText("Scan to Order Food").first().waitFor({ timeout: 10000 });
       }
       await adminPage.waitForTimeout(250);
     }

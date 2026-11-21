@@ -78,6 +78,24 @@ def upgrade() -> None:
     op.execute("UPDATE promotions SET coupon_code = NULL WHERE coupon_code IS NOT NULL")
     op.execute("DELETE FROM coupons")
 
+    # Seed website QR management permission for college_admin on existing databases
+    op.execute(
+        """
+        INSERT INTO permissions (id, created_at, updated_at, code, resource, action, description)
+        VALUES ('9f1e2d3c-4b5a-6789-8abc-def012345678', NOW(), NOW(), 'qr:website_manage', 'qr', 'website_manage', 'qr:website_manage')
+        ON CONFLICT (code) DO NOTHING
+        """
+    )
+    op.execute(
+        """
+        INSERT INTO role_permissions (role_id, permission_id)
+        SELECT r.id, p.id
+        FROM roles r, permissions p
+        WHERE r.name = 'college_admin' AND p.code = 'qr:website_manage'
+        ON CONFLICT DO NOTHING
+        """
+    )
+
 
 def downgrade() -> None:
     op.drop_index("ix_price_change_canteen_status", table_name="price_change_requests")

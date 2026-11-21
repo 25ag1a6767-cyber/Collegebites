@@ -57,6 +57,7 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "support:manage",
         "kiosk:manage",
         "audit:view",
+        "qr:website_manage",
     ],
     ROLE_CANTEEN_MANAGER: [
         "canteen:manage_assigned",

@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import {
@@ -21,6 +21,8 @@ import { Badge, Button, Card, Input, Modal, Select, crowdBadgeTone, useToast } f
 
 export const HomePage: React.FC = () => {
   const navigate = useNavigate();
+  const { canteenSlug } = useParams<{ canteenSlug?: string }>();
+  const [searchParams] = useSearchParams();
   const qc = useQueryClient();
   const { pushToast } = useToast();
   const { user, selectedCanteenId, setSelectedCanteen } = useAppStore();
@@ -60,6 +62,35 @@ export const HomePage: React.FC = () => {
     enabled: Boolean(activeCanteen?.id),
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteen!.id}/categories`)).data,
   });
+
+  // Honor QR deep-link query params (?canteen=<slug|id>&category=<id|slug>#menu) and /canteen/:canteenSlug
+  useEffect(() => {
+    const requestedCanteen = (canteenSlug || searchParams.get("canteen") || "").trim().toLowerCase();
+    if (requestedCanteen && canteens.length > 0) {
+      const matched = canteens.find(
+        (c) => c.slug.toLowerCase() === requestedCanteen || c.id.toLowerCase() === requestedCanteen
+      );
+      if (matched && matched.id !== selectedCanteenId) {
+        setSelectedCanteen(matched.id);
+      }
+    }
+  }, [canteenSlug, searchParams, canteens, selectedCanteenId, setSelectedCanteen]);
+
+  useEffect(() => {
+    const requestedCategory = (searchParams.get("category") || "").trim().toLowerCase();
+    if (requestedCategory && categories.length > 0) {
+      const matched = categories.find(
+        (cat) => cat.id.toLowerCase() === requestedCategory || cat.slug.toLowerCase() === requestedCategory
+      );
+      if (matched) setSelectedCategoryId(matched.id);
+    }
+  }, [searchParams, categories]);
+
+  useEffect(() => {
+    if (window.location.hash === "#menu") {
+      document.getElementById("menu")?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [activeCanteen?.id]);
 
   const { data: items = [], isLoading: itemsLoading } = useQuery<FoodItem[]>({
     queryKey: ["menu-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, maxPrice, sortBy, activeTag],
@@ -313,7 +344,7 @@ export const HomePage: React.FC = () => {
       )}
 
       {/* Search, Filter & Category Bar */}
-      <Card className="p-4 space-y-3">
+      <Card id="menu" className="p-4 space-y-3">
         <div className="grid gap-3 md:grid-cols-5">
           <div className="relative md:col-span-2">
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />

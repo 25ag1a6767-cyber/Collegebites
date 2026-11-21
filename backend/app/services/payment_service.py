@@ -14,7 +14,7 @@ from app.core.security import sha256_hex
 from app.integrations.razorpay_client import razorpay_gateway
 from app.integrations.stripe_client import stripe_gateway
 from app.models.college import Canteen
-from app.models.order import Order, OrderItem, PickupSlot, SlotReservation
+from app.models.order import Order, OrderItem, OrderStatusHistory, PickupSlot, SlotReservation
 from app.models.payment import (
     Payment,
     PaymentReconciliation,

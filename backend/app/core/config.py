@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     API_PREFIX: str = "/api/v1"
     COLLEGE_TIMEZONE: str = "Asia/Kolkata"
     PUBLIC_BASE_URL: str = "http://localhost:5173"
+    PUBLIC_FRONTEND_URL: str = ""
     API_BASE_URL: str = "http://localhost:8000"
 
     DATABASE_URL: str = "postgresql+psycopg://postgres@127.0.0.1:5432/collegebites"
@@ -41,6 +42,18 @@ class Settings(BaseSettings):
         if vercel_host and "localhost" in self.PUBLIC_BASE_URL and not os.environ.get("PUBLIC_BASE_URL"):
             self.PUBLIC_BASE_URL = f"https://{vercel_host}"
         return self
+
+    @property
+    def public_frontend_url(self) -> str:
+        explicit = self.PUBLIC_FRONTEND_URL.strip()
+        if explicit:
+            return explicit.rstrip("/")
+        if os.environ.get("PUBLIC_BASE_URL"):
+            return os.environ["PUBLIC_BASE_URL"].strip().rstrip("/")
+        vercel_prod = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+        if vercel_prod:
+            return f"https://{vercel_prod}".rstrip("/")
+        return self.PUBLIC_BASE_URL.strip().rstrip("/")
 
     SECRET_KEY: str = "dev-only-change-me-collegebites-secret-key-at-least-64-characters-long"
     QR_SIGNING_SECRET: str = "dev-only-change-me-collegebites-qr-hmac-secret-at-least-64-characters"

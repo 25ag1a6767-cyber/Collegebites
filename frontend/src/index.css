@@ -36,4 +36,11 @@
     border: none !important;
     margin: 0 auto !important;
   }
+  .cb-poster-print {
+    width: 100% !important;
+    max-width: 160mm !important;
+    margin: 12mm auto !important;
+    box-shadow: none !important;
+    page-break-inside: avoid !important;
+  }
 }

@@ -74,6 +74,7 @@ export function App() {
             <Navbar />
             <Routes>
               <Route path="/" element={<HomePage />} />
+              <Route path="/canteen/:canteenSlug" element={<HomePage />} />
               <Route path="/login" element={<AuthPage initialMode="login" />} />
               <Route path="/register" element={<AuthPage initialMode="register" />} />
               <Route path="/scan" element={<ScanQRPage />} />

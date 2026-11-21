@@ -23,7 +23,7 @@ Base URL: `/api/v1` (interactive OpenAPI docs served at `/docs` and `/redoc`).
 - `GET/PATCH /customers/profile`, `POST/DELETE /customers/favourites/{food_item_id}`
 
 ## QR Location Ordering, Cart & Checkout (`/qr`, `/carts`, `/orders`)
-- `GET /qr/locations/resolve/{code}` — Identify canteen/counter/table from permanent QR; `POST /qr/locations`, `POST /qr/locations/{id}/revoke|replace`, `GET /qr/locations/{id}/image`
+- `GET /qr/locations/resolve/{code}` — Identify canteen/counter/table from permanent QR; `POST /qr/locations`, `POST /qr/locations/{id}/revoke|replace`, `GET /qr/locations/{id}/image`; Website QR Generator (College Admin): `GET /qr/website/config`, `POST /qr/website/generate`, `GET /qr/website/download?format=png|svg`
 - `GET /carts`, `POST /carts/items`, `PATCH /carts/items/{id}`
 - `GET /orders/slots/{canteen_id}`, `POST /orders/checkout`, `GET /orders/my`, `GET /orders/{id_or_number}`, `POST /orders/{id}/cancel`
 

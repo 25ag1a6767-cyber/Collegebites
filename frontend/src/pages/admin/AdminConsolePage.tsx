@@ -11,13 +11,14 @@ import { MenuTab, QRTab } from "./components/MenuQrTab";
 import { QueueTab, StaffTab } from "./components/QueueStaffTab";
 import { PromotionsTab, SystemTab } from "./components/PromotionsSystemTab";
 import { OrdersUsersTab } from "./components/OrdersUsersTab";
+import { WebsiteQrTab } from "./components/WebsiteQrTab";
 
 export const AdminConsolePage: React.FC = () => {
   const { pushToast } = useToast();
   const { user, selectedCanteenId } = useAppStore();
   const isCollegeAdmin = Boolean(user?.roles?.some((r) => r === "super_admin" || r === "college_admin"));
   const [tab, setTab] = useState<
-    "analytics" | "orders" | "locations" | "menu" | "qr" | "queue" | "staff" | "promotions" | "support" | "system"
+    "analytics" | "orders" | "locations" | "menu" | "qr" | "website_qr" | "queue" | "staff" | "promotions" | "support" | "system"
   >("analytics");
 
   const { data: college, refetch: refetchCollege } = useQuery<CollegeSettings>({
@@ -114,7 +115,7 @@ export const AdminConsolePage: React.FC = () => {
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 p-4 text-white">
+      <div className="no-print flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 p-4 text-white">
         <div className="flex items-center gap-3">
           <LayoutDashboard className="h-7 w-7 text-orange-400" />
           <div>
@@ -136,13 +137,14 @@ export const AdminConsolePage: React.FC = () => {
         </Select>
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="no-print flex flex-wrap gap-2">
         {[
           { k: "analytics", l: "Analytics & Reports" },
           { k: "orders", l: "Orders & Users" },
           { k: "locations", l: "Locations, Counters & Hours" },
           { k: "menu", l: "Menus & CSV" },
           { k: "qr", l: "Location QR Codes" },
+          ...(isCollegeAdmin ? [{ k: "website_qr", l: "Website QR Generator" }] : []),
           { k: "queue", l: "Queue, Crowd & Slots" },
           { k: "staff", l: "Staff, Attendance & Tasks" },
           { k: "promotions", l: "Announcements & Banners" },
@@ -396,6 +398,10 @@ export const AdminConsolePage: React.FC = () => {
       )}
 
       {tab === "qr" && <QRTab activeCanteenId={activeCanteenId} locationQrs={locationQrs} refetchQrs={refetchQrs} />}
+
+      {tab === "website_qr" && isCollegeAdmin && (
+        <WebsiteQrTab canteens={canteens} defaultCanteenId={activeCanteenId} downloadBlob={downloadBlob} />
+      )}
 
       {tab === "queue" && <QueueTab activeCanteenId={activeCanteenId} queueDash={queueDash} refetchQueue={refetchQueue} />}
 
