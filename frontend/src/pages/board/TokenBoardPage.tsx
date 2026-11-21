@@ -3,11 +3,13 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Volume2, VolumeX } from "lucide-react";
 import { api } from "../../api/client";
+import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
 import { Button, Select } from "../../components/ui/Primitives";
 
 export const TokenBoardPage: React.FC = () => {
   const { canteenId: routeCanteenId } = useParams<{ canteenId?: string }>();
+  const { selectedCanteenId } = useAppStore();
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState(routeCanteenId || "");
   const [voiceEnabled, setVoiceEnabled] = useState(false);
@@ -18,7 +20,7 @@ export const TokenBoardPage: React.FC = () => {
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
-  const activeId = selectedId || canteens[0]?.id || "";
+  const activeId = selectedId || routeCanteenId || selectedCanteenId || canteens[0]?.id || "";
 
   const { data: board } = useQuery<any>({
     queryKey: ["digital-board", activeId],

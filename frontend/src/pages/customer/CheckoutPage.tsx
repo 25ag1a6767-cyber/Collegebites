@@ -151,6 +151,44 @@ export const CheckoutPage: React.FC = () => {
       qc.invalidateQueries({ queryKey: ["cart", activeCanteen.id] });
 
       if (paymentMethod === "razorpay") {
+        if (ord.razorpay_key_id && ord.razorpay_key_id !== "rzp_test_collegebites_local") {
+          const loaded = await new Promise<boolean>((resolve) => {
+            if ((window as any).Razorpay) return resolve(true);
+            const script = document.createElement("script");
+            script.src = "https://checkout.razorpay.com/v1/checkout.js";
+            script.onload = () => resolve(true);
+            script.onerror = () => resolve(false);
+            document.body.appendChild(script);
+          });
+          if (loaded && (window as any).Razorpay) {
+            const rzp = new (window as any).Razorpay({
+              key: ord.razorpay_key_id,
+              order_id: ord.razorpay_order_id,
+              name: college?.college_name || "CollegeBites",
+              description: `Order ${ord.order_number}`,
+              handler: async (response: any) => {
+                try {
+                  const verified = await api.post<Order>("/payments/razorpay/verify", {
+                    order_id: ord.id,
+                    razorpay_order_id: response.razorpay_order_id,
+                    razorpay_payment_id: response.razorpay_payment_id,
+                    razorpay_signature: response.razorpay_signature,
+                    payment_method: "upi",
+                  });
+                  pushToast(`Payment Verified! Token: ${verified.data.pickup_token_code}`, "success");
+                  navigate(`/orders/${verified.data.order_number}`);
+                } catch (err) {
+                  pushToast(getApiError(err, "Razorpay signature verification failed"), "error");
+                }
+              },
+              modal: {
+                ondismiss: () => navigate(`/orders/${ord.order_number}`),
+              },
+            });
+            rzp.open();
+            return;
+          }
+        }
         setPendingOrder(ord);
       } else {
         pushToast("Order placed! Complete payment at counter to generate pickup token.", "info");
@@ -218,20 +256,24 @@ export const CheckoutPage: React.FC = () => {
     }
   };
 
-  if (!cart || cart.items.length === 0) {
-    return (
-      <div className="mx-auto max-w-xl px-4 py-14 text-center">
-        <Card className="p-8 space-y-4">
-          <h1 className="text-2xl font-extrabold text-slate-900">Your Cart is Empty</h1>
-          <p className="text-sm text-slate-600">Browse our campus canteens and add delicious items first.</p>
-          <Button onClick={() => navigate("/")}>Explore Menu</Button>
-        </Card>
-      </div>
-    );
-  }
-
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6">
+    <>
+      {!cart || cart.items.length === 0 ? (
+        <div className="mx-auto max-w-xl px-4 py-14 text-center">
+          <Card className="p-8 space-y-4">
+            <h1 className="text-2xl font-extrabold text-slate-900">
+              {pendingOrder ? "Complete Your Payment" : "Your Cart is Empty"}
+            </h1>
+            <p className="text-sm text-slate-600">
+              {pendingOrder
+                ? `Order ${pendingOrder.order_number} is created and awaiting payment verification.`
+                : "Browse our campus canteens and add delicious items first."}
+            </p>
+            {!pendingOrder && <Button onClick={() => navigate("/")}>Explore Menu</Button>}
+          </Card>
+        </div>
+      ) : (
+        <div className="mx-auto max-w-6xl px-4 py-6">
       <h1 className="mb-6 text-2xl font-extrabold text-slate-900">Checkout • {activeCanteen?.name}</h1>
 
       {cart.validation_errors.length > 0 && (
@@ -466,6 +508,8 @@ export const CheckoutPage: React.FC = () => {
           </Card>
         </div>
       </div>
+    </div>
+      )}
 
       {/* Razorpay Payment Verification Sheet */}
       <Modal open={Boolean(pendingOrder)} onClose={() => {}} title="Razorpay Checkout">
@@ -520,6 +564,6 @@ export const CheckoutPage: React.FC = () => {
           </div>
         )}
       </Modal>
-    </div>
+    </>
   );
 };
