@@ -2,6 +2,8 @@
 .venv
 backend/.venv
 backend/.env
+.env.local
+.env*.local
 backend/.pytest_cache
 backend/tests
 frontend/node_modules

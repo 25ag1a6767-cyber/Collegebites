@@ -1,5 +1,7 @@
+import os
 from functools import lru_cache
 from typing import List
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +26,20 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 30
 
     REDIS_URL: str = "memory://"
+
+    @model_validator(mode="after")
+    def _apply_cloud_env_fallbacks(self) -> "Settings":
+        # Map Vercel Marketplace Postgres / Upstash KV / Vercel URL variables when explicit overrides are unset
+        cloud_db = os.environ.get("POSTGRES_URL") or os.environ.get("POSTGRES_PRISMA_URL") or os.environ.get("NEON_DATABASE_URL")
+        if cloud_db and "127.0.0.1" in self.DATABASE_URL and not os.environ.get("DATABASE_URL"):
+            self.DATABASE_URL = cloud_db
+        cloud_redis = os.environ.get("KV_URL") or os.environ.get("UPSTASH_REDIS_URL")
+        if cloud_redis and self.REDIS_URL == "memory://" and not os.environ.get("REDIS_URL"):
+            self.REDIS_URL = cloud_redis
+        vercel_host = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or os.environ.get("VERCEL_URL")
+        if vercel_host and "localhost" in self.PUBLIC_BASE_URL and not os.environ.get("PUBLIC_BASE_URL"):
+            self.PUBLIC_BASE_URL = f"https://{vercel_host}"
+        return self
 
     SECRET_KEY: str = "dev-only-change-me-collegebites-secret-key-at-least-64-characters-long"
     QR_SIGNING_SECRET: str = "dev-only-change-me-collegebites-qr-hmac-secret-at-least-64-characters"
@@ -66,7 +82,14 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> List[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        origins = [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        for env_key in ("VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL", "VERCEL_BRANCH_URL"):
+            host = os.environ.get(env_key)
+            if host:
+                origin = f"https://{host}"
+                if origin not in origins:
+                    origins.append(origin)
+        return origins
 
     @property
     def is_production(self) -> bool:
