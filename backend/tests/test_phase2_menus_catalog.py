@@ -92,3 +92,46 @@ def test_menu_crud_csv_import_export_and_favourites(client: TestClient):
     )
     assert imp.status_code == 200
     assert imp.json()["created"] == 1
+
+    # Bounded price validation rejects numeric overflow cleanly (422, not 500 DataError)
+    oversized = client.post(
+        "/api/v1/menus/items",
+        headers=manager["headers"],
+        json={
+            "canteen_id": cid,
+            "category_id": categories[0]["id"],
+            "name": "Overflow Price Item",
+            "slug": "overflow-price-item",
+            "base_price": "99999999999999.00",
+        },
+    )
+    assert oversized.status_code == 422
+
+    # Manager links/unlinks item add-ons & toggles active state -> synced to customer menu
+    addon_res = client.post(
+        f"/api/v1/menus/items/{item_id}/addons",
+        headers=manager["headers"],
+        json={"name": "Roasted Papad", "price": "15.00", "addon_type": "side"},
+    )
+    assert addon_res.status_code == 201, addon_res.text
+    addon_id = addon_res.json()["id"]
+
+    cust_menu = client.get(f"/api/v1/menus/canteens/{cid}/items").json()
+    matched = next(m for m in cust_menu if m["id"] == item_id)
+    assert any(a["id"] == addon_id for a in matched["addons"])
+
+    unlinked = client.delete(
+        f"/api/v1/menus/items/{item_id}/addons/{addon_id}",
+        headers=manager["headers"],
+    )
+    assert unlinked.status_code == 200
+    assert all(a["id"] != addon_id for a in client.get(f"/api/v1/menus/items/{item_id}").json()["addons"])
+
+    deact = client.patch(
+        f"/api/v1/menus/items/{item_id}",
+        headers=manager["headers"],
+        json={"is_active": False},
+    )
+    assert deact.status_code == 200
+    assert all(m["id"] != item_id for m in client.get(f"/api/v1/menus/canteens/{cid}/items").json())
+    assert any(m["id"] == item_id for m in client.get(f"/api/v1/menus/canteens/{cid}/items?include_inactive=true").json())

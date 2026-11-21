@@ -24,14 +24,15 @@ class RazorpayFailureRequest(BaseModel):
 
 class StripeVerifyRequest(BaseModel):
     order_id: UUID
-    stripe_session_id: str = Field(min_length=4, max_length=160)
-    stripe_payment_intent_id: Optional[str] = Field(default=None, max_length=160)
+    stripe_payment_intent_id: Optional[str] = Field(default=None, min_length=4, max_length=160)
+    stripe_session_id: Optional[str] = Field(default=None, min_length=4, max_length=160)
     stripe_signature: Optional[str] = Field(default=None, max_length=256)
     payment_method: Optional[str] = Field(default="card")
 
 
 class StripeFailureRequest(BaseModel):
     order_id: UUID
+    stripe_payment_intent_id: Optional[str] = None
     stripe_session_id: Optional[str] = None
     reason: str = Field(default="Stripe checkout cancelled or failed", max_length=255)
 

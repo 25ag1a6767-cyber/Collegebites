@@ -24,6 +24,16 @@ export const PickupScannerPage: React.FC = () => {
     queryFn: async () => (await api.get(`/canteens/${activeCanteenId}`)).data,
   });
 
+  const { data: boardData, refetch: refetchBoard } = useQuery<{
+    ready_for_pickup: { token_code: string; counter_name: string; order_status: string; ready_at?: string }[];
+    now_preparing: { token_code: string; counter_name: string; order_status: string }[];
+  }>({
+    queryKey: ["pickup-scanner-board", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    refetchInterval: 4000,
+    queryFn: async () => (await api.get(`/pickup/board/${activeCanteenId}`)).data,
+  });
+
   const [counterId, setCounterId] = useState("");
   const [manualInput, setManualInput] = useState("");
   const [verifyMode, setVerifyMode] = useState<"qr" | "token" | "order">("token");
@@ -121,6 +131,7 @@ export const PickupScannerPage: React.FC = () => {
       });
       pushToast(`Handover confirmed for Token ${result.pickup_token}!`, "success");
       setResult({ ...result, can_handover: false, order_status: "COMPLETED", result_code: "COMPLETED", message: "Food handed over and order marked COMPLETED." });
+      refetchBoard();
     } catch (err) {
       pushToast(getApiError(err, "Handover failed"), "error");
     } finally {
@@ -303,6 +314,36 @@ export const PickupScannerPage: React.FC = () => {
           )}
         </Card>
       </div>
+
+      <Card className="p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="font-bold text-slate-900">
+            Ready for Handover ({boardData?.ready_for_pickup?.length || 0})
+          </h2>
+          <Badge tone="blue">{boardData?.now_preparing?.length || 0} Preparing</Badge>
+        </div>
+        {!boardData?.ready_for_pickup?.length ? (
+          <div className="text-xs text-slate-500">No tokens currently marked READY in this canteen.</div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {boardData.ready_for_pickup.map((t) => (
+              <button
+                key={t.token_code}
+                type="button"
+                onClick={() => {
+                  setVerifyMode("token");
+                  setManualInput(t.token_code);
+                  void runVerification({ pickup_token: t.token_code });
+                }}
+                className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-2 text-left hover:bg-emerald-100 transition"
+              >
+                <div className="font-extrabold text-sm text-emerald-950">{t.token_code}</div>
+                <div className="text-[11px] text-emerald-700">{t.counter_name}</div>
+              </button>
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
   );
 };

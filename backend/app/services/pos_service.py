@@ -77,6 +77,24 @@ def list_pending_counter_orders(db: Session, canteen_id: Optional[UUID] = None) 
     return serialize_orders_batch(db, list(orders))
 
 
+def list_active_canteen_orders(db: Session, canteen_id: Optional[UUID] = None) -> list[OrderOut]:
+    """List confirmed orders currently flowing through kitchen and pickup (PLACED/ACCEPTED/PREPARING/READY)."""
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(
+            Order.payment_status == "CONFIRMED",
+            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
+        )
+        .order_by(Order.created_at.desc())
+        .limit(60)
+    )
+    if canteen_id:
+        stmt = stmt.where(Order.canteen_id == canteen_id)
+    orders = db.scalars(stmt).all()
+    return serialize_orders_batch(db, list(orders))
+
+
 def search_pos_orders(db: Session, query: str, canteen_id: Optional[UUID] = None) -> list[OrderOut]:
     q = query.strip()
     token_order_ids = list(

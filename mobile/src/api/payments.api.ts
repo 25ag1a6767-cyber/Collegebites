@@ -16,11 +16,17 @@ export const paymentsApi = {
 
   verifyStripe: async (payload: {
     order_id: string;
-    stripe_session_id: string;
-    stripe_payment_intent_id: string;
-    stripe_signature: string;
+    stripe_payment_intent_id?: string;
+    stripe_session_id?: string;
+    stripe_signature?: string;
     payment_method?: string;
   }) => (await mobileApi.post("/payments/stripe/verify", payload)).data,
+
+  getStripeConfig: async (): Promise<{
+    publishable_key: string | null;
+    configured: boolean;
+    live_api_enabled: boolean;
+  }> => (await mobileApi.get("/payments/stripe/config")).data,
 
   failStripe: async (payload: { order_id: string; reason?: string }, guestToken?: string) => {
     const suffix = guestToken ? `?guest_token=${encodeURIComponent(guestToken)}` : "";

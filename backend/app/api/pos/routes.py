@@ -46,6 +46,16 @@ def pending_counter_orders(
     return pos_service.list_pending_counter_orders(db, canteen_id=scoped)
 
 
+@router.get("/orders/active", response_model=list[OrderOut])
+def active_canteen_orders(
+    canteen_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*POS_ROLES)),
+    db: Session = Depends(get_db),
+):
+    scoped = scoped_canteen_for_principal(principal, canteen_id)
+    return pos_service.list_active_canteen_orders(db, canteen_id=scoped)
+
+
 @router.get("/orders/search", response_model=list[OrderOut])
 def search_orders(
     q: str = Query(min_length=1),

@@ -1,9 +1,33 @@
 import React, { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, Download, Eye, Plus, QrCode, RefreshCw, Trash2, Upload } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { CalendarClock, Download, Eye, Plus, QrCode, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
 import type { FoodItem } from "../../../types";
 import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../../components/ui/Primitives";
+
+function toCleanSlug(raw: string, existingSlugs: string[], fallbackPrefix = "item"): string {
+  const base0 = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const base = base0.length >= 2 ? base0.slice(0, 120) : `${fallbackPrefix}-${Date.now().toString(36)}`;
+  const existing = new Set(existingSlugs.map((s) => s.toLowerCase()));
+  if (!existing.has(base)) return base;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${base.slice(0, 112)}-${i}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `${base.slice(0, 108)}-${Date.now().toString(36)}`;
+}
+
+function parseValidPrice(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 0 || n > 99999999.99) return null;
+  return Number(n.toFixed(2));
+}
 
 export const MenuTab: React.FC<{
   activeCanteenId: string;
@@ -14,6 +38,21 @@ export const MenuTab: React.FC<{
   downloadBlob: (url: string, filename: string) => Promise<void>;
 }> = ({ activeCanteenId, menuItems, categories, refetchMenu, refetchCategories, downloadBlob }) => {
   const { pushToast } = useToast();
+  const qc = useQueryClient();
+  const syncAllMenus = () => {
+    refetchMenu();
+    refetchCategories();
+    qc.invalidateQueries({ queryKey: ["admin-menu"] });
+    qc.invalidateQueries({ queryKey: ["admin-cats"] });
+    qc.invalidateQueries({ queryKey: ["menu-items"] });
+    qc.invalidateQueries({ queryKey: ["categories"] });
+    qc.invalidateQueries({ queryKey: ["smart-recs"] });
+    qc.invalidateQueries({ queryKey: ["pos-menu"] });
+    qc.invalidateQueries({ queryKey: ["kitchen-menu"] });
+    qc.invalidateQueries({ queryKey: ["inv-menu"] });
+    qc.invalidateQueries({ queryKey: ["inv-food-categories"] });
+    qc.invalidateQueries({ queryKey: ["canteens"] });
+  };
   const { data: schedules = [], refetch: refetchSchedules } = useQuery<any[]>({
     queryKey: ["menu-schedules", activeCanteenId],
     enabled: Boolean(activeCanteenId),
@@ -28,17 +67,29 @@ export const MenuTab: React.FC<{
 
   const [catName, setCatName] = useState("");
   const [newDishName, setNewDishName] = useState("");
+  const [newDishDesc, setNewDishDesc] = useState("");
   const [newDishPrice, setNewDishPrice] = useState("60.00");
+  const [newDishPrep, setNewDishPrep] = useState("10");
   const [newDishCatId, setNewDishCatId] = useState("");
   const [isVeg, setIsVeg] = useState(true);
+  const [newDishAvailable, setNewDishAvailable] = useState(true);
+  const [newDishFile, setNewDishFile] = useState<File | null>(null);
+  const [savingDish, setSavingDish] = useState(false);
+
   const [editItem, setEditItem] = useState<FoodItem | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editCatId, setEditCatId] = useState("");
+  const [editVeg, setEditVeg] = useState(true);
   const [editPrice, setEditPrice] = useState("");
   const [editPrep, setEditPrep] = useState("10");
   const [editDesc, setEditDesc] = useState("");
   const [editImg, setEditImg] = useState("");
   const [editAllergens, setEditAllergens] = useState("");
+  const [editAvailable, setEditAvailable] = useState(true);
+  const [editActive, setEditActive] = useState(true);
   const [editFeatured, setEditFeatured] = useState(false);
   const [editSpecial, setEditSpecial] = useState(false);
+  const [uploadingImg, setUploadingImg] = useState(false);
   const [newVarName, setNewVarName] = useState("");
   const [newVarPrice, setNewVarPrice] = useState("");
   const [newAddonName, setNewAddonName] = useState("");
@@ -50,13 +101,29 @@ export const MenuTab: React.FC<{
   const [assignSched, setAssignSched] = useState<any | null>(null);
   const [assignIds, setAssignIds] = useState<string[]>([]);
 
+  const refreshEditingItem = async (itemId: string) => {
+    syncAllMenus();
+    try {
+      const fresh = await api.get<FoodItem>(`/menus/items/${itemId}`);
+      setEditItem(fresh.data);
+      setEditImg(fresh.data.images?.[0]?.image_url || "");
+    } catch {
+      // ignore if deleted
+    }
+  };
+
   const openEditor = (it: FoodItem) => {
     setEditItem(it);
+    setEditName(it.name);
+    setEditCatId(it.category_id);
+    setEditVeg(Boolean(it.is_veg));
     setEditPrice(String(it.base_price));
     setEditPrep(String(it.prep_time_minutes));
     setEditDesc(it.description || "");
     setEditImg(it.images?.[0]?.image_url || "");
     setEditAllergens((it.allergens || []).map((a) => a.name).join(", "));
+    setEditAvailable(Boolean(it.is_available));
+    setEditActive(Boolean(it.is_active));
     setEditFeatured(Boolean(it.is_featured));
     setEditSpecial(Boolean(it.is_todays_special));
     setNewVarName("");
@@ -93,11 +160,15 @@ export const MenuTab: React.FC<{
               size="sm"
               variant="outline"
               onClick={async () => {
+                const name = catName.trim();
+                if (name.length < 2) {
+                  return pushToast("Category name must be at least 2 characters", "error");
+                }
                 try {
-                  const slug = catName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-                  await api.post("/menus/categories", { canteen_id: activeCanteenId, name: catName, slug });
+                  const slug = toCleanSlug(name, categories.map((c) => c.slug || ""), "cat");
+                  await api.post("/menus/categories", { canteen_id: activeCanteenId, name, slug });
                   setCatName("");
-                  refetchCategories();
+                  syncAllMenus();
                   pushToast("Category added", "success");
                 } catch (err) {
                   pushToast(getApiError(err), "error");
@@ -132,7 +203,7 @@ export const MenuTab: React.FC<{
                 onClick={async () => {
                   try {
                     await api.delete(`/menus/categories/${c.id}`);
-                    refetchCategories();
+                    syncAllMenus();
                     pushToast("Category deleted", "info");
                   } catch (err) {
                     pushToast(getApiError(err), "error");
@@ -146,58 +217,158 @@ export const MenuTab: React.FC<{
           ))}
         </div>
 
-        <div className="flex flex-wrap gap-2 items-center border-t border-slate-100 pt-3">
-          <Input value={newDishName} onChange={(e) => setNewDishName(e.target.value)} placeholder="New Dish Name" className="w-48" />
-          <Input value={newDishPrice} onChange={(e) => setNewDishPrice(e.target.value)} placeholder="Price" className="w-24" />
-          <Select value={newDishCatId} onChange={(e) => setNewDishCatId(e.target.value)} className="w-44">
-            <option value="">Select Category</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </Select>
-          <Select value={isVeg ? "veg" : "nonveg"} onChange={(e) => setIsVeg(e.target.value === "veg")} className="w-32">
-            <option value="veg">Veg</option>
-            <option value="nonveg">Non-Veg</option>
-          </Select>
-          <Button
-            size="sm"
-            onClick={async () => {
-              try {
-                const slug = newDishName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-                await api.post("/menus/items", {
-                  canteen_id: activeCanteenId,
-                  category_id: newDishCatId || categories[0]?.id,
-                  name: newDishName,
-                  slug,
-                  base_price: newDishPrice,
-                  is_veg: isVeg,
-                });
-                setNewDishName("");
-                refetchMenu();
-                pushToast("Dish added", "success");
-              } catch (err) {
-                pushToast(getApiError(err), "error");
-              }
-            }}
-          >
-            Add Item
-          </Button>
+        <div className="space-y-2 border-t border-slate-100 pt-3">
+          <div className="flex flex-wrap gap-2 items-center">
+            <Input value={newDishName} onChange={(e) => setNewDishName(e.target.value)} placeholder="New Dish Name" className="w-48" />
+            <Input
+              type="number"
+              min="0.01"
+              max="99999999.99"
+              step="0.01"
+              value={newDishPrice}
+              onChange={(e) => setNewDishPrice(e.target.value)}
+              placeholder="Price (₹)"
+              className="w-28"
+            />
+            <Input
+              type="number"
+              min="1"
+              max="240"
+              value={newDishPrep}
+              onChange={(e) => setNewDishPrep(e.target.value)}
+              placeholder="Prep min"
+              className="w-24"
+            />
+            <Select value={newDishCatId || categories[0]?.id || ""} onChange={(e) => setNewDishCatId(e.target.value)} className="w-44">
+              {categories.length === 0 ? (
+                <option value="">No Categories Yet</option>
+              ) : (
+                categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))
+              )}
+            </Select>
+            <Select value={isVeg ? "veg" : "nonveg"} onChange={(e) => setIsVeg(e.target.value === "veg")} className="w-28">
+              <option value="veg">Veg</option>
+              <option value="nonveg">Non-Veg</option>
+            </Select>
+            <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+              <input
+                type="checkbox"
+                checked={newDishAvailable}
+                onChange={(e) => setNewDishAvailable(e.target.checked)}
+              />
+              Available Now
+            </label>
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <Input
+              value={newDishDesc}
+              onChange={(e) => setNewDishDesc(e.target.value)}
+              placeholder="Description (optional, shown on customer menu)"
+              className="flex-1 min-w-[220px]"
+            />
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
+              <Upload className="h-3.5 w-3.5" />
+              {newDishFile ? newDishFile.name.slice(0, 20) : "Food Photo"}
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setNewDishFile(e.target.files?.[0] || null)}
+                className="hidden"
+              />
+            </label>
+            <Button
+              size="sm"
+              disabled={savingDish}
+              onClick={async () => {
+                const name = newDishName.trim();
+                const catId = newDishCatId || categories[0]?.id;
+                const priceNum = parseValidPrice(newDishPrice);
+                if (name.length < 2) {
+                  return pushToast("Dish name must be at least 2 characters", "error");
+                }
+                if (!catId) {
+                  return pushToast("Create or select a food category first", "error");
+                }
+                if (priceNum === null || priceNum <= 0) {
+                  return pushToast("Enter a valid price between 0.01 and 99999999.99", "error");
+                }
+                setSavingDish(true);
+                try {
+                  const slug = toCleanSlug(name, menuItems.map((m) => m.slug || ""), "dish");
+                  const prepMins = Math.min(240, Math.max(1, Number(newDishPrep) || 10));
+                  const created = await api.post<FoodItem>("/menus/items", {
+                    canteen_id: activeCanteenId,
+                    category_id: catId,
+                    name,
+                    slug,
+                    description: newDishDesc.trim() || null,
+                    base_price: priceNum.toFixed(2),
+                    prep_time_minutes: prepMins,
+                    is_veg: isVeg,
+                    is_available: newDishAvailable,
+                    is_active: true,
+                  });
+                  if (newDishFile) {
+                    const form = new FormData();
+                    form.append("file", newDishFile);
+                    await api.post(`/menus/items/${created.data.id}/upload-image`, form, {
+                      headers: { "Content-Type": "multipart/form-data" },
+                    });
+                  }
+                  setNewDishName("");
+                  setNewDishDesc("");
+                  setNewDishFile(null);
+                  syncAllMenus();
+                  pushToast(`"${created.data.name}" saved to menu`, "success");
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                } finally {
+                  setSavingDish(false);
+                }
+              }}
+            >
+              {savingDish ? "Saving..." : "Add Item"}
+            </Button>
+          </div>
         </div>
       </Card>
 
       <Card className="p-4 space-y-2">
         {menuItems.map((it) => (
           <div key={it.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 py-2 text-xs">
-            <div>
-              <span className="font-bold text-slate-900">{it.name}</span> • ₹{it.base_price} • {it.category_name}{" "}
-              {it.is_featured && <Badge tone="amber">Featured</Badge>}
-              {it.is_todays_special && <Badge tone="blue">Special</Badge>}
+            <div className="flex items-center gap-2.5">
+              {it.images?.[0]?.image_url ? (
+                <img
+                  src={it.images[0].image_url}
+                  alt={it.name}
+                  className="h-9 w-9 rounded-lg object-cover border border-slate-200"
+                />
+              ) : (
+                <div className="h-9 w-9 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-400">
+                  IMG
+                </div>
+              )}
+              <div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-bold text-slate-900">{it.name}</span>
+                  <span>• ₹{it.base_price}</span>
+                  <span className="text-slate-500">• {it.category_name || "Menu"}</span>
+                  <span className="text-slate-400">• {it.prep_time_minutes}m</span>
+                  <Badge tone={it.is_veg ? "green" : "red"}>{it.is_veg ? "Veg" : "Non-Veg"}</Badge>
+                  {!it.is_active && <Badge tone="red">Inactive</Badge>}
+                  {it.is_featured && <Badge tone="amber">Featured</Badge>}
+                  {it.is_todays_special && <Badge tone="blue">Special</Badge>}
+                </div>
+                {it.description && <div className="text-slate-500 line-clamp-1">{it.description}</div>}
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" onClick={() => openEditor(it)}>
-                Edit Price & Details
+                Edit Details & Add-ons
               </Button>
               <Button
                 size="sm"
@@ -205,13 +376,28 @@ export const MenuTab: React.FC<{
                 onClick={async () => {
                   try {
                     await api.patch(`/menus/items/${it.id}`, { is_available: !it.is_available });
-                    refetchMenu();
+                    syncAllMenus();
                   } catch (err) {
                     pushToast(getApiError(err), "error");
                   }
                 }}
               >
                 {it.is_available ? "Available" : "Disabled"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    await api.patch(`/menus/items/${it.id}`, { is_active: !it.is_active });
+                    syncAllMenus();
+                    pushToast(it.is_active ? "Item deactivated" : "Item activated", "info");
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                {it.is_active ? "Deactivate" : "Activate"}
               </Button>
             </div>
           </div>
@@ -253,7 +439,7 @@ export const MenuTab: React.FC<{
                           review_notes: "Approved from Admin Menu console",
                         });
                         refetchPriceRequests();
-                        refetchMenu();
+                        syncAllMenus();
                         pushToast("Selling price approved and live on menu", "success");
                       } catch (err) {
                         pushToast(getApiError(err), "error");
@@ -412,27 +598,96 @@ export const MenuTab: React.FC<{
           <div className="space-y-3 text-xs">
             <div className="grid grid-cols-2 gap-2">
               <div>
+                <label className="mb-1 block font-bold text-slate-600">Dish Name</label>
+                <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Category</label>
+                <Select value={editCatId} onChange={(e) => setEditCatId(e.target.value)}>
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div>
                 <label className="mb-1 block font-bold text-slate-600">Price (₹)</label>
-                <Input value={editPrice} onChange={(e) => setEditPrice(e.target.value)} />
+                <Input
+                  type="number"
+                  min="0.01"
+                  max="99999999.99"
+                  step="0.01"
+                  value={editPrice}
+                  onChange={(e) => setEditPrice(e.target.value)}
+                />
               </div>
               <div>
                 <label className="mb-1 block font-bold text-slate-600">Prep Time (min)</label>
-                <Input type="number" value={editPrep} onChange={(e) => setEditPrep(e.target.value)} />
+                <Input type="number" min="1" max="240" value={editPrep} onChange={(e) => setEditPrep(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Dietary</label>
+                <Select value={editVeg ? "veg" : "nonveg"} onChange={(e) => setEditVeg(e.target.value === "veg")}>
+                  <option value="veg">Veg</option>
+                  <option value="nonveg">Non-Veg</option>
+                </Select>
               </div>
             </div>
             <div>
               <label className="mb-1 block font-bold text-slate-600">Description</label>
               <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
             </div>
-            <div>
-              <label className="mb-1 block font-bold text-slate-600">Image URL</label>
-              <Input value={editImg} onChange={(e) => setEditImg(e.target.value)} placeholder="https://..." />
+            <div className="space-y-1.5">
+              <label className="block font-bold text-slate-600">Dish Image URL or File Upload</label>
+              <div className="flex gap-2 items-center">
+                <Input value={editImg} onChange={(e) => setEditImg(e.target.value)} placeholder="https://... or upload photo" className="flex-1" />
+                <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 font-semibold text-slate-700 hover:bg-slate-50">
+                  <Upload className="h-3.5 w-3.5" />
+                  {uploadingImg ? "Uploading..." : "Upload Photo"}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={uploadingImg}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file || !editItem) return;
+                      setUploadingImg(true);
+                      try {
+                        const form = new FormData();
+                        form.append("file", file);
+                        await api.post(`/menus/items/${editItem.id}/upload-image`, form, {
+                          headers: { "Content-Type": "multipart/form-data" },
+                        });
+                        await refreshEditingItem(editItem.id);
+                        pushToast("Dish photo uploaded", "success");
+                      } catch (err) {
+                        pushToast(getApiError(err, "Image upload failed"), "error");
+                      } finally {
+                        setUploadingImg(false);
+                        e.target.value = "";
+                      }
+                    }}
+                  />
+                </label>
+              </div>
             </div>
             <div>
               <label className="mb-1 block font-bold text-slate-600">Allergens (comma-separated)</label>
               <Input value={editAllergens} onChange={(e) => setEditAllergens(e.target.value)} placeholder="Dairy, Gluten, Nuts" />
             </div>
-            <div className="flex items-center gap-4 pt-1">
+            <div className="flex flex-wrap items-center gap-4 pt-1">
+              <label className="flex items-center gap-1.5 font-semibold">
+                <input type="checkbox" checked={editAvailable} onChange={(e) => setEditAvailable(e.target.checked)} />
+                Available for Order
+              </label>
+              <label className="flex items-center gap-1.5 font-semibold">
+                <input type="checkbox" checked={editActive} onChange={(e) => setEditActive(e.target.checked)} />
+                Active in Menu
+              </label>
               <label className="flex items-center gap-1.5 font-semibold">
                 <input type="checkbox" checked={editFeatured} onChange={(e) => setEditFeatured(e.target.checked)} />
                 Featured Dish
@@ -445,23 +700,36 @@ export const MenuTab: React.FC<{
             <Button
               className="w-full"
               onClick={async () => {
+                const name = editName.trim();
+                const priceNum = parseValidPrice(editPrice);
+                if (name.length < 2) {
+                  return pushToast("Dish name must be at least 2 characters", "error");
+                }
+                if (priceNum === null || priceNum <= 0) {
+                  return pushToast("Enter a valid price between 0.01 and 99999999.99", "error");
+                }
                 try {
                   const allergens = editAllergens
                     .split(",")
                     .map((s) => s.trim())
                     .filter(Boolean);
                   await api.patch(`/menus/items/${editItem.id}`, {
-                    base_price: editPrice,
-                    prep_time_minutes: Number(editPrep) || 10,
+                    name,
+                    category_id: editCatId || editItem.category_id,
+                    is_veg: editVeg,
+                    base_price: priceNum.toFixed(2),
+                    prep_time_minutes: Math.min(240, Math.max(1, Number(editPrep) || 10)),
                     description: editDesc,
                     image_url: editImg.trim() || null,
                     allergen_names: allergens,
+                    is_available: editAvailable,
+                    is_active: editActive,
                     is_featured: editFeatured,
                     is_todays_special: editSpecial,
                   });
                   pushToast("Dish updated!", "success");
                   setEditItem(null);
-                  refetchMenu();
+                  syncAllMenus();
                 } catch (err) {
                   pushToast(getApiError(err), "error");
                 }
@@ -481,8 +749,7 @@ export const MenuTab: React.FC<{
                     onClick={async () => {
                       try {
                         await api.patch(`/menus/variants/${v.id}`, { is_available: !v.is_available });
-                        refetchMenu();
-                        setEditItem(null);
+                        await refreshEditingItem(editItem.id);
                       } catch (err) {
                         pushToast(getApiError(err), "error");
                       }
@@ -495,20 +762,20 @@ export const MenuTab: React.FC<{
               </div>
               <div className="flex gap-2">
                 <Input value={newVarName} onChange={(e) => setNewVarName(e.target.value)} placeholder="Variant (e.g. Large)" />
-                <Input value={newVarPrice} onChange={(e) => setNewVarPrice(e.target.value)} placeholder="Extra ₹ (20)" className="w-28" />
+                <Input type="number" step="0.01" value={newVarPrice} onChange={(e) => setNewVarPrice(e.target.value)} placeholder="Extra ₹ (20)" className="w-28" />
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={async () => {
+                    if (!newVarName.trim()) return pushToast("Enter variant name", "error");
                     try {
                       await api.post(`/menus/items/${editItem.id}/variants`, {
-                        name: newVarName,
-                        price_delta: newVarPrice || "0",
+                        name: newVarName.trim(),
+                        price_delta: newVarPrice.trim() || "0",
                       });
                       setNewVarName("");
                       setNewVarPrice("");
-                      refetchMenu();
-                      setEditItem(null);
+                      await refreshEditingItem(editItem.id);
                       pushToast("Variant added", "success");
                     } catch (err) {
                       pushToast(getApiError(err), "error");
@@ -525,41 +792,61 @@ export const MenuTab: React.FC<{
               <div className="font-bold text-slate-700">Add-ons ({editItem.addons.length})</div>
               <div className="flex flex-wrap gap-1.5">
                 {editItem.addons.map((a) => (
-                  <button
+                  <div
                     key={a.id}
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await api.patch(`/menus/addons/${a.id}`, { is_available: !a.is_available });
-                        refetchMenu();
-                        setEditItem(null);
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      }
-                    }}
-                    className={`rounded-full border px-2.5 py-0.5 font-semibold ${a.is_available ? "bg-white border-slate-200" : "bg-red-50 border-red-200 text-red-700"}`}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-semibold ${a.is_available ? "bg-white border-slate-200" : "bg-red-50 border-red-200 text-red-700"}`}
                   >
-                    {a.name} ₹{a.price} ({a.is_available ? "On" : "Off"})
-                  </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await api.patch(`/menus/addons/${a.id}`, { is_available: !a.is_available });
+                          await refreshEditingItem(editItem.id);
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
+                      }}
+                    >
+                      {a.name} ₹{a.price} ({a.is_available ? "On" : "Off"})
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${a.name}`}
+                      onClick={async () => {
+                        try {
+                          await api.delete(`/menus/items/${editItem.id}/addons/${a.id}`);
+                          await refreshEditingItem(editItem.id);
+                          pushToast("Add-on removed from dish", "info");
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
+                      }}
+                      className="text-slate-400 hover:text-red-600"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
                 ))}
               </div>
               <div className="flex gap-2">
                 <Input value={newAddonName} onChange={(e) => setNewAddonName(e.target.value)} placeholder="Add-on (e.g. Extra Cheese)" />
-                <Input value={newAddonPrice} onChange={(e) => setNewAddonPrice(e.target.value)} placeholder="Price (15)" className="w-28" />
+                <Input type="number" min="0" step="0.01" value={newAddonPrice} onChange={(e) => setNewAddonPrice(e.target.value)} placeholder="Price (15)" className="w-28" />
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={async () => {
+                    if (!newAddonName.trim()) return pushToast("Enter add-on name", "error");
+                    const p = parseValidPrice(newAddonPrice || "0");
+                    if (p === null) return pushToast("Enter a valid add-on price", "error");
                     try {
                       await api.post(`/menus/items/${editItem.id}/addons`, {
-                        name: newAddonName,
-                        price: newAddonPrice || "0",
+                        name: newAddonName.trim(),
+                        price: p.toFixed(2),
                         addon_type: "addon",
                       });
                       setNewAddonName("");
                       setNewAddonPrice("");
-                      refetchMenu();
-                      setEditItem(null);
+                      await refreshEditingItem(editItem.id);
                       pushToast("Add-on linked", "success");
                     } catch (err) {
                       pushToast(getApiError(err), "error");

@@ -27,6 +27,7 @@ from app.schemas.menu import (
     FoodCategoryCreate,
     FoodCategoryOut,
     FoodCategoryUpdate,
+    FoodItemAddonCreate,
     FoodItemCreate,
     FoodItemOut,
     FoodItemUpdate,
@@ -299,6 +300,34 @@ def update_addon(
         raise HTTPException(status_code=404, detail="Addon not found")
     enforce_canteen_scope(principal, addon.canteen_id)
     return menu_service.update_addon(db, addon, payload, principal.user.id)
+
+
+@router.post("/items/{item_id}/addons", response_model=FoodAddonOut, status_code=status.HTTP_201_CREATED)
+def add_item_addon(
+    item_id: UUID,
+    payload: FoodItemAddonCreate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, item.canteen_id)
+    return menu_service.add_addon_to_food_item(db, item_id, payload, principal.user.id)
+
+
+@router.delete("/items/{item_id}/addons/{addon_id}")
+def remove_item_addon(
+    item_id: UUID,
+    addon_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, item.canteen_id)
+    return menu_service.unlink_addon_from_food_item(db, item_id, addon_id, principal.user.id)
 
 
 @router.get("/canteens/{canteen_id}/schedules", response_model=list[MenuScheduleOut])

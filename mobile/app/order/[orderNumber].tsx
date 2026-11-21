@@ -7,6 +7,7 @@ import { API_BASE_URL, buildMobileWsUrl, getMobileApiError } from "../../src/api
 import { ordersApi } from "../../src/api/orders.api";
 import { paymentsApi } from "../../src/api/payments.api";
 import { tokensApi } from "../../src/api/tokens.api";
+import { StripePayButton } from "../../src/components/StripePayButton";
 import { useMobileStore } from "../../src/store/useMobileStore";
 
 const STEPS = [
@@ -244,27 +245,23 @@ export default function OrderDetailScreen() {
         </View>
       )}
 
-      {order.status === "PAYMENT_PENDING" && order.stripe_session_id && (
-        <View style={styles.payBox}>
-          <Text style={styles.secTitle}>Complete Stripe Payment (₹{order.total_amount})</Text>
-          {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{errMsg}</Text>}
-          {order.stripe_checkout_url ? (
-            <Pressable
-              onPress={() => Linking.openURL(order.stripe_checkout_url)}
-              style={[styles.payBtn, { backgroundColor: "#4f46e5" }]}
-            >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Stripe Checkout</Text>
+      {order.status === "PAYMENT_PENDING" &&
+        (order.stripe_payment_intent_id || order.stripe_session_id || order.payment_method === "stripe") && (
+          <View style={styles.payBox}>
+            <Text style={styles.secTitle}>Complete Stripe Payment (₹{order.total_amount})</Text>
+            {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{errMsg}</Text>}
+            <StripePayButton
+              order={order}
+              guestToken={gToken}
+              disabled={paying}
+              onVerified={() => refetch()}
+              onError={(msg) => setErrMsg(msg)}
+            />
+            <Pressable disabled={paying} onPress={cancelStripePayment} style={styles.cancelBtn}>
+              <Text style={{ color: "#0f172a", fontWeight: "700" }}>Cancel Payment</Text>
             </Pressable>
-          ) : (
-            <Text style={{ color: "#64748b", fontSize: 12 }}>
-              Live Stripe Checkout credentials are not configured on the server for this environment.
-            </Text>
-          )}
-          <Pressable disabled={paying} onPress={cancelStripePayment} style={styles.cancelBtn}>
-            <Text style={{ color: "#0f172a", fontWeight: "700" }}>Cancel Payment</Text>
-          </Pressable>
-        </View>
-      )}
+          </View>
+        )}
 
       {order.status === "PAYMENT_PENDING" && order.razorpay_order_id && (
         <View style={styles.payBox}>

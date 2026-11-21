@@ -61,6 +61,7 @@ export const HomePage: React.FC = () => {
     queryKey: ["categories", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteen!.id}/categories`)).data,
+    refetchInterval: 8000,
   });
 
   // Honor QR deep-link query params (?canteen=<slug|id>&category=<id|slug>#menu) and /canteen/:canteenSlug
@@ -95,6 +96,7 @@ export const HomePage: React.FC = () => {
   const { data: items = [], isLoading: itemsLoading } = useQuery<FoodItem[]>({
     queryKey: ["menu-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, maxPrice, sortBy, activeTag],
     enabled: Boolean(activeCanteen?.id),
+    refetchInterval: 8000,
     queryFn: async () => {
       const params = new URLSearchParams();
       if (search.trim()) params.set("q", search.trim());
@@ -114,6 +116,7 @@ export const HomePage: React.FC = () => {
   const { data: recommended = [] } = useQuery<FoodItem[]>({
     queryKey: ["smart-recs", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
+    refetchInterval: 10000,
     queryFn: async () => (await api.get(`/kiosk/recommendations/${activeCanteen!.id}`)).data,
   });
 

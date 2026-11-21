@@ -168,13 +168,13 @@ async function main() {
     await stripePage.getByRole("button", { name: /Pay ₹/i }).click();
     const stripeModal = stripePage.locator("[data-order-id]").first();
     await stripeModal.waitFor({ timeout: 10000 });
-    const stripeSidBadge = await stripeModal.getByText(/Stripe: cs_test_/).textContent({ timeout: 10000 });
-    const stripeSid = stripeSidBadge.replace("Stripe:", "").trim();
+    const stripePiBadge = await stripeModal.getByText(/Stripe: pi_/).textContent({ timeout: 10000 });
+    const stripePi = stripePiBadge.replace("Stripe:", "").trim();
     const ts = Math.floor(Date.now() / 1000);
     const stripeBody = JSON.stringify({
       id: `evt_e2e_stripe_${Date.now()}`,
-      type: "checkout.session.completed",
-      data: { object: { id: stripeSid, payment_intent: `pi_e2e_${Date.now()}` } },
+      type: "payment_intent.succeeded",
+      data: { object: { id: stripePi, status: "succeeded" } },
     });
     const stripeSig = crypto
       .createHmac("sha256", process.env.STRIPE_WEBHOOK_SECRET || "whsec_collegebites_local")
@@ -279,6 +279,16 @@ async function main() {
       }
       if (tabName === "Website QR Generator") {
         await adminPage.getByText("Scan to Order Food").first().waitFor({ timeout: 10000 });
+      }
+      if (tabName === "Menus & CSV") {
+        const dishTitle = `E2E Paneer Roll ${Date.now().toString().slice(-4)}`;
+        await adminPage.getByPlaceholder("New Dish Name").fill(dishTitle);
+        await adminPage.getByPlaceholder("Price (₹)").fill("85.00");
+        await adminPage.getByRole("button", { name: "Add Item" }).click();
+        await adminPage.getByText(dishTitle).first().waitFor({ timeout: 10000 });
+        await stripePage.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+        await stripePage.getByPlaceholder("Search dishes, ingredients...").fill(dishTitle);
+        await stripePage.getByText(dishTitle).first().waitFor({ timeout: 10000 });
       }
       await adminPage.waitForTimeout(250);
     }

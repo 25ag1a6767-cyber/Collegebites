@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Archive,
@@ -28,6 +28,7 @@ type SectionTab = "all" | "items" | "menu" | "stock" | "pricing" | "suppliers" |
 export const InventoryPage: React.FC = () => {
   const { user, selectedCanteenId } = useAppStore();
   const { pushToast } = useToast();
+  const qc = useQueryClient();
 
   const canApproveSellingPrice = Boolean(
     user?.roles?.some((r) => ["super_admin", "college_admin", "canteen_manager"].includes(r))
@@ -130,6 +131,13 @@ export const InventoryPage: React.FC = () => {
     refetchAudit();
     refetchMenu();
     refetchFoodCategories();
+    qc.invalidateQueries({ queryKey: ["menu-items"] });
+    qc.invalidateQueries({ queryKey: ["categories"] });
+    qc.invalidateQueries({ queryKey: ["smart-recs"] });
+    qc.invalidateQueries({ queryKey: ["pos-menu"] });
+    qc.invalidateQueries({ queryKey: ["kitchen-menu"] });
+    qc.invalidateQueries({ queryKey: ["admin-menu"] });
+    qc.invalidateQueries({ queryKey: ["admin-cats"] });
   };
 
   // Add Item Form State (Section 3.3)

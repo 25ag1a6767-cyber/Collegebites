@@ -69,7 +69,8 @@ export const KitchenDisplayPage: React.FC = () => {
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
     queryKey: ["kitchen-menu", activeCanteenId],
     enabled: Boolean(activeCanteenId && showAvailabilityModal),
-    queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items`)).data,
+    refetchInterval: showAvailabilityModal ? 10000 : false,
+    queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items?include_inactive=false`)).data,
   });
 
   const { data: ingredients = [], refetch: refetchIngredients } = useQuery<any[]>({

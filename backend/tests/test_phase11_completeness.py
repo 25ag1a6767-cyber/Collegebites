@@ -158,16 +158,22 @@ def test_stripe_checkout_verify_webhook_idempotency_and_failure(client):
     )
     assert co.status_code == 201, co.text
     ord_data = co.json()
-    assert ord_data["stripe_session_id"].startswith("cs_test_")
+    pi_id = ord_data["stripe_payment_intent_id"]
+    assert pi_id.startswith("pi_test_")
+    assert ord_data["stripe_client_secret"].startswith(pi_id)
     assert ord_data["pickup_token_code"] is None
+
+    # Config endpoint must never expose secrets
+    cfg = client.get("/api/v1/payments/stripe/config")
+    assert cfg.status_code == 200
+    assert "secret" not in str(cfg.json()).lower()
 
     # Invalid Stripe signature must be rejected
     bad = client.post(
         "/api/v1/payments/stripe/verify",
         json={
             "order_id": ord_data["id"],
-            "stripe_session_id": ord_data["stripe_session_id"],
-            "stripe_payment_intent_id": "pi_test_123",
+            "stripe_payment_intent_id": pi_id,
             "stripe_signature": "bad_sig_value",
         },
         headers=student_hdrs,
@@ -175,15 +181,12 @@ def test_stripe_checkout_verify_webhook_idempotency_and_failure(client):
     assert bad.status_code == 400
 
     # Valid signature generates token + receipt
-    sig = stripe_gateway.compute_test_payment_signature(
-        stripe_session_id=ord_data["stripe_session_id"], stripe_payment_intent_id="pi_test_123"
-    )
+    sig = stripe_gateway.compute_test_payment_signature(stripe_payment_intent_id=pi_id)
     ok = client.post(
         "/api/v1/payments/stripe/verify",
         json={
             "order_id": ord_data["id"],
-            "stripe_session_id": ord_data["stripe_session_id"],
-            "stripe_payment_intent_id": "pi_test_123",
+            "stripe_payment_intent_id": pi_id,
             "stripe_signature": sig,
             "payment_method": "card",
         },
@@ -193,12 +196,12 @@ def test_stripe_checkout_verify_webhook_idempotency_and_failure(client):
     token_code = ok.json()["pickup_token_code"]
     assert token_code is not None
 
-    # Duplicate Stripe webhook delivery must stay idempotent without duplicating token
+    # Duplicate Stripe payment_intent.succeeded webhook delivery must stay idempotent without duplicating token
     wh_payload = json.dumps(
         {
             "id": f"evt_test_{ord_data['order_number']}",
-            "type": "checkout.session.completed",
-            "data": {"object": {"id": ord_data["stripe_session_id"], "payment_intent": "pi_test_123"}},
+            "type": "payment_intent.succeeded",
+            "data": {"object": {"id": pi_id, "status": "succeeded"}},
         }
     ).encode("utf-8")
     wh_sig = stripe_gateway.compute_test_webhook_signature(raw_body=wh_payload)
@@ -207,7 +210,24 @@ def test_stripe_checkout_verify_webhook_idempotency_and_failure(client):
     assert w1.status_code == 200 and w2.status_code == 200
     assert w2.json()["status"] == "already_processed"
 
-    # Separate order failure path
+    # Delayed / out-of-order payment_failed webhook MUST NOT downgrade an already confirmed order
+    late_fail = json.dumps(
+        {
+            "id": f"evt_late_fail_{ord_data['order_number']}",
+            "type": "payment_intent.payment_failed",
+            "data": {"object": {"id": pi_id, "last_payment_error": {"message": "Delayed event"}}},
+        }
+    ).encode("utf-8")
+    late_fail_sig = stripe_gateway.compute_test_webhook_signature(raw_body=late_fail)
+    lf_res = client.post("/api/v1/payments/stripe/webhook", content=late_fail, headers={"Stripe-Signature": late_fail_sig})
+    assert lf_res.status_code == 200
+    assert lf_res.json()["status"] == "ignored_non_pending"
+    assert client.get(f"/api/v1/orders/{ord_data['order_number']}", headers=student_hdrs).json()["payment_status"] == "CONFIRMED"
+
+    # Webhook processing -> canceled lifecycle + invalid webhook signature rejection
+    bad_wh = client.post("/api/v1/payments/stripe/webhook", content=late_fail, headers={"Stripe-Signature": "t=1,v1=bad"})
+    assert bad_wh.status_code == 400
+
     assert (
         client.post(
             "/api/v1/carts/items",
@@ -222,10 +242,172 @@ def test_stripe_checkout_verify_webhook_idempotency_and_failure(client):
         headers=student_hdrs,
     )
     assert co2.status_code == 201
+    pi2 = co2.json()["stripe_payment_intent_id"]
+
+    proc_body = json.dumps(
+        {"id": f"evt_proc_{co2.json()['order_number']}", "type": "payment_intent.processing", "data": {"object": {"id": pi2}}}
+    ).encode("utf-8")
+    assert (
+        client.post(
+            "/api/v1/payments/stripe/webhook",
+            content=proc_body,
+            headers={"Stripe-Signature": stripe_gateway.compute_test_webhook_signature(raw_body=proc_body)},
+        ).status_code
+        == 200
+    )
+    assert client.get(f"/api/v1/orders/{co2.json()['order_number']}", headers=student_hdrs).json()["status"] == "PAYMENT_PENDING"
+
+    cancel_body = json.dumps(
+        {
+            "id": f"evt_cancel_{co2.json()['order_number']}",
+            "type": "payment_intent.canceled",
+            "data": {"object": {"id": pi2, "cancellation_reason": "abandoned"}},
+        }
+    ).encode("utf-8")
+    assert (
+        client.post(
+            "/api/v1/payments/stripe/webhook",
+            content=cancel_body,
+            headers={"Stripe-Signature": stripe_gateway.compute_test_webhook_signature(raw_body=cancel_body)},
+        ).status_code
+        == 200
+    )
+    assert client.get(f"/api/v1/orders/{co2.json()['order_number']}", headers=student_hdrs).json()["status"] == "PAYMENT_FAILED"
+
+    # Separate order failure endpoint path + delayed success webhook must stay ignored for terminal order
+    assert (
+        client.post(
+            "/api/v1/carts/items",
+            json={"canteen_id": snacks["id"], "food_item_id": food["id"], "quantity": 1},
+            headers=student_hdrs,
+        ).status_code
+        == 200
+    )
+    co3 = client.post(
+        "/api/v1/orders/checkout",
+        json={"canteen_id": snacks["id"], "payment_method": "stripe", "accepted_policy": True},
+        headers=student_hdrs,
+    )
+    assert co3.status_code == 201
     f_res = client.post(
         "/api/v1/payments/stripe/fail",
-        json={"order_id": co2.json()["id"], "reason": "Card declined"},
+        json={"order_id": co3.json()["id"], "reason": "Card declined"},
         headers=student_hdrs,
     )
     assert f_res.status_code == 200
     assert f_res.json()["status"] == "PAYMENT_FAILED"
+
+    late_succ = json.dumps(
+        {
+            "id": f"evt_late_ok_{co3.json()['order_number']}",
+            "type": "payment_intent.succeeded",
+            "data": {"object": {"id": co3.json()["stripe_payment_intent_id"]}},
+        }
+    ).encode("utf-8")
+    ls_res = client.post(
+        "/api/v1/payments/stripe/webhook",
+        content=late_succ,
+        headers={"Stripe-Signature": stripe_gateway.compute_test_webhook_signature(raw_body=late_succ)},
+    )
+    assert ls_res.status_code == 200
+    assert ls_res.json()["status"] == "ignored_terminal_order"
+
+
+def test_stripe_live_sdk_payment_intent_flow(client, monkeypatch):
+    """Exercise the official Stripe SDK PaymentIntent paths with mocked API transport."""
+    from types import SimpleNamespace
+
+    student_hdrs = login_as(client, "student@collegebites.edu", "Student@12345")["headers"]
+    canteens = client.get("/api/v1/canteens").json()
+    main_c = next(c for c in canteens if c["code"] == "MAIN")
+    items = client.get(f"/api/v1/menus/canteens/{main_c['id']}/items").json()
+    food = items[0]
+
+    assert (
+        client.post(
+            "/api/v1/carts/items",
+            json={"canteen_id": main_c["id"], "food_item_id": food["id"], "quantity": 1},
+            headers=student_hdrs,
+        ).status_code
+        == 200
+    )
+
+    state = {"status": "processing", "amount_received": 0, "created_amount": 0}
+
+    class FakePIResource:
+        def create(self, *, params, options=None):
+            state["created_amount"] = params["amount"]
+            return SimpleNamespace(
+                id="pi_live_mock_001",
+                client_secret="pi_live_mock_001_secret_xyz",
+                amount=params["amount"],
+                currency="inr",
+                status="requires_payment_method",
+            )
+
+        def retrieve(self, pi_id):
+            return SimpleNamespace(
+                id=pi_id,
+                status=state["status"],
+                amount=state["created_amount"],
+                amount_received=state["amount_received"],
+                currency="inr",
+                metadata={"order_number": "TEST"},
+                last_payment_error=None,
+            )
+
+    fake_client = SimpleNamespace(v1=SimpleNamespace(payment_intents=FakePIResource()))
+    monkeypatch.setattr(stripe_gateway, "use_live_api", True)
+    monkeypatch.setattr(stripe_gateway, "publishable_key", "pk_test_mock_publishable")
+    monkeypatch.setattr(stripe_gateway, "_client", lambda: fake_client)
+
+    co = client.post(
+        "/api/v1/orders/checkout",
+        json={"canteen_id": main_c["id"], "payment_method": "stripe", "accepted_policy": True},
+        headers=student_hdrs,
+    )
+    assert co.status_code == 201, co.text
+    ord_data = co.json()
+    assert ord_data["stripe_payment_intent_id"] == "pi_live_mock_001"
+    assert ord_data["stripe_client_secret"] == "pi_live_mock_001_secret_xyz"
+    assert ord_data["stripe_publishable_key"] == "pk_test_mock_publishable"
+
+    # While Stripe status is 'processing', verify returns PAYMENT_PENDING without prematurely issuing a token
+    proc_res = client.post(
+        "/api/v1/payments/stripe/verify",
+        json={"order_id": ord_data["id"], "stripe_payment_intent_id": "pi_live_mock_001"},
+        headers=student_hdrs,
+    )
+    assert proc_res.status_code == 200
+    assert proc_res.json()["status"] == "PAYMENT_PENDING"
+    assert proc_res.json()["pickup_token_code"] is None
+
+    # Underpaid PaymentIntent mismatch must be rejected
+    state["status"] = "succeeded"
+    state["amount_received"] = max(1, state["created_amount"] - 100)
+    underpaid = client.post(
+        "/api/v1/payments/stripe/verify",
+        json={"order_id": ord_data["id"], "stripe_payment_intent_id": "pi_live_mock_001"},
+        headers=student_hdrs,
+    )
+    assert underpaid.status_code == 400
+
+    # Exact amount succeeded -> order confirmed & idempotent repeat verify returns same token
+    state["amount_received"] = state["created_amount"]
+    ok = client.post(
+        "/api/v1/payments/stripe/verify",
+        json={"order_id": ord_data["id"], "stripe_payment_intent_id": "pi_live_mock_001"},
+        headers=student_hdrs,
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["payment_status"] == "CONFIRMED"
+    tok = ok.json()["pickup_token_code"]
+    assert tok is not None
+
+    ok_again = client.post(
+        "/api/v1/payments/stripe/verify",
+        json={"order_id": ord_data["id"], "stripe_payment_intent_id": "pi_live_mock_001"},
+        headers=student_hdrs,
+    )
+    assert ok_again.status_code == 200
+    assert ok_again.json()["pickup_token_code"] == tok

@@ -35,16 +35,16 @@ class FoodCategoryOut(ORMModel):
 
 class FoodVariantIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    price_delta: Decimal = Field(default=Decimal("0.00"))
-    absolute_price: Optional[Decimal] = Field(default=None, ge=0)
+    price_delta: Decimal = Field(default=Decimal("0.00"), ge=Decimal("-99999999.99"), le=Decimal("99999999.99"))
+    absolute_price: Optional[Decimal] = Field(default=None, ge=0, le=Decimal("99999999.99"))
     is_default: bool = False
     is_available: bool = True
 
 
 class FoodVariantUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    price_delta: Optional[Decimal] = None
-    absolute_price: Optional[Decimal] = Field(default=None, ge=0)
+    price_delta: Optional[Decimal] = Field(default=None, ge=Decimal("-99999999.99"), le=Decimal("99999999.99"))
+    absolute_price: Optional[Decimal] = Field(default=None, ge=0, le=Decimal("99999999.99"))
     is_default: Optional[bool] = None
     is_available: Optional[bool] = None
 
@@ -62,7 +62,7 @@ class FoodAddonCreate(BaseModel):
     canteen_id: UUID
     name: str = Field(min_length=1, max_length=120)
     addon_type: str = Field(default="addon", pattern="^(addon|topping|side)$")
-    price: Decimal = Field(ge=0)
+    price: Decimal = Field(ge=0, le=Decimal("99999999.99"))
     is_veg: bool = True
     is_available: bool = True
 
@@ -70,9 +70,18 @@ class FoodAddonCreate(BaseModel):
 class FoodAddonUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     addon_type: Optional[str] = Field(default=None, pattern="^(addon|topping|side)$")
-    price: Optional[Decimal] = Field(default=None, ge=0)
+    price: Optional[Decimal] = Field(default=None, ge=0, le=Decimal("99999999.99"))
     is_veg: Optional[bool] = None
     is_available: Optional[bool] = None
+
+
+class FoodItemAddonCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    addon_type: str = Field(default="addon", pattern="^(addon|topping|side)$")
+    price: Decimal = Field(ge=0, le=Decimal("99999999.99"))
+    is_veg: bool = True
+    is_available: bool = True
+    max_quantity: int = Field(default=5, ge=1, le=20)
 
 
 class FoodAddonOut(ORMModel):
@@ -108,7 +117,7 @@ class FoodItemCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     slug: str = Field(min_length=2, max_length=160, pattern="^[a-z0-9-]+$")
     description: Optional[str] = None
-    base_price: Decimal = Field(ge=0)
+    base_price: Decimal = Field(ge=0, le=Decimal("99999999.99"))
     tax_rate_percent: Optional[Decimal] = Field(default=None, ge=0, le=50)
     is_veg: bool = True
     is_featured: bool = False
@@ -135,7 +144,7 @@ class FoodItemUpdate(BaseModel):
     counter_id: Optional[UUID] = None
     name: Optional[str] = Field(default=None, min_length=2, max_length=160)
     description: Optional[str] = None
-    base_price: Optional[Decimal] = Field(default=None, ge=0)
+    base_price: Optional[Decimal] = Field(default=None, ge=0, le=Decimal("99999999.99"))
     tax_rate_percent: Optional[Decimal] = Field(default=None, ge=0, le=50)
     is_veg: Optional[bool] = None
     is_featured: Optional[bool] = None

@@ -178,6 +178,8 @@ class OrderOut(ORMModel):
     guest_access_token: Optional[str] = None
     razorpay_order_id: Optional[str] = None
     razorpay_key_id: Optional[str] = None
+    stripe_payment_intent_id: Optional[str] = None
+    stripe_client_secret: Optional[str] = None
     stripe_session_id: Optional[str] = None
     stripe_checkout_url: Optional[str] = None
     stripe_publishable_key: Optional[str] = None

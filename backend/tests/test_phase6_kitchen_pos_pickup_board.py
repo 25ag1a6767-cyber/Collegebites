@@ -43,6 +43,11 @@ def test_kitchen_lifecycle_qr_verification_cases_handover_and_digital_board(clie
     qr_raw = order["qr_token_raw"]
     assert token is not None and qr_raw is not None
 
+    # Cashier live active queue shows the newly paid order
+    pos_active = client.get(f"/api/v1/pos/orders/active?canteen_id={canteen['id']}", headers=cashier["headers"])
+    assert pos_active.status_code == 200
+    assert any(o["id"] == order["id"] for o in pos_active.json())
+
     # 1. Invalid QR check -> rejected with no private order info leaked
     inv = client.post("/api/v1/pickup/verify", headers=pickup["headers"], json={"qr_payload": "CBQR.fake.bad"})
     assert inv.status_code == 200

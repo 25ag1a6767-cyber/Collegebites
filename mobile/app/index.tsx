@@ -58,6 +58,7 @@ export default function MenuScreen() {
   } = useQuery<any[]>({
     queryKey: ["m-canteens"],
     queryFn: canteensApi.listCanteens,
+    refetchInterval: 10000,
   });
   const activeCanteen = canteens.find((c) => c.id === selectedCanteenId) || canteens[0];
 
@@ -65,6 +66,7 @@ export default function MenuScreen() {
     queryKey: ["m-categories", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
     queryFn: () => menuApi.listCategories(activeCanteen.id),
+    refetchInterval: 8000,
   });
 
   const { data: promotions = [] } = useQuery<any[]>({
@@ -101,6 +103,7 @@ export default function MenuScreen() {
   } = useQuery<any[]>({
     queryKey: ["m-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, tagFilter, sortBy],
     enabled: Boolean(activeCanteen?.id),
+    refetchInterval: 8000,
     queryFn: () =>
       menuApi.listItems(activeCanteen.id, {
         q: search,

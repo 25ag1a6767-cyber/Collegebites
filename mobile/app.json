@@ -12,11 +12,17 @@
       "resizeMode": "contain",
       "backgroundColor": "#ea580c"
     },
-    "platforms": ["ios", "android", "web"],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "edu.collegebites.app",
-      "associatedDomains": ["applinks:collegebites-alpha.vercel.app"],
+      "associatedDomains": [
+        "applinks:collegebites-alpha.vercel.app"
+      ],
       "infoPlist": {
         "NSCameraUsageDescription": "Scan canteen table, counter, and order pickup QR codes."
       }
@@ -27,7 +33,10 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ea580c"
       },
-      "permissions": ["CAMERA", "NOTIFICATIONS"],
+      "permissions": [
+        "CAMERA",
+        "NOTIFICATIONS"
+      ],
       "intentFilters": [
         {
           "action": "VIEW",
@@ -39,7 +48,10 @@
               "pathPrefix": "/scan"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         }
       ]
     },
@@ -54,8 +66,20 @@
     "plugins": [
       "expo-router",
       "expo-secure-store",
-      ["expo-camera", { "cameraPermission": "Allow CollegeBites to scan canteen and order QR codes." }],
-      "expo-notifications"
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow CollegeBites to scan canteen and order QR codes."
+        }
+      ],
+      "expo-notifications",
+      [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.edu.collegebites.app",
+          "enableGooglePay": true
+        }
+      ]
     ]
   }
 }

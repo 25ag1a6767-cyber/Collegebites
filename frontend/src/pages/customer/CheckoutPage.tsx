@@ -6,6 +6,7 @@ import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings, Order } from "../../types";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
+import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
 import { openRazorpayModal } from "../../utils/razorpay";
 
 export const CheckoutPage: React.FC = () => {
@@ -202,10 +203,6 @@ export const CheckoutPage: React.FC = () => {
         }
         setPendingOrder(ord);
       } else {
-        if (ord.stripe_checkout_url) {
-          window.location.href = ord.stripe_checkout_url;
-          return;
-        }
         setPendingOrder(ord);
       }
     } catch (err) {
@@ -562,39 +559,62 @@ export const CheckoutPage: React.FC = () => {
     </div>
       )}
 
-      {/* Gateway Checkout Modal */}
+      {/* Stripe Elements / Gateway Modal */}
+      {pendingOrder?.payment_method === "stripe" && (
+        <StripePaymentModal
+          order={pendingOrder}
+          onClose={() => {}}
+          onSuccess={(verified) => {
+            pushToast(`Payment Verified! Token: ${verified.pickup_token_code}`, "success");
+            setPendingOrder(null);
+            navigate(`/orders/${verified.order_number}`);
+          }}
+          onProcessing={(procOrder) => {
+            pushToast("Payment is processing at Stripe. Tracking status...", "info");
+            setPendingOrder(null);
+            navigate(`/orders/${procOrder.order_number}`);
+          }}
+          onFailed={(failedOrder) => {
+            pushToast("Payment marked failed. Slot released.", "error");
+            setPendingOrder(null);
+            navigate(`/orders/${failedOrder.order_number}`);
+          }}
+          onNavigateStatus={(ord) => {
+            setPendingOrder(null);
+            navigate(`/orders/${ord.order_number}`);
+          }}
+        />
+      )}
+
+      {/* Razorpay Checkout Modal */}
       <Modal
-        open={Boolean(pendingOrder)}
+        open={Boolean(pendingOrder && pendingOrder.payment_method !== "stripe")}
         onClose={() => {}}
-        title={pendingOrder?.payment_method === "stripe" ? "Stripe Checkout" : "Razorpay Checkout"}
+        title="Razorpay Checkout"
       >
-        {pendingOrder && (
+        {pendingOrder && pendingOrder.payment_method !== "stripe" && (
           <div className="space-y-4" data-order-id={pendingOrder.id} data-order-number={pendingOrder.order_number}>
             <div className="rounded-xl bg-slate-900 p-4 text-white flex items-center justify-between">
               <div>
                 <div className="text-xs text-slate-400">CollegeBites • {pendingOrder.order_number}</div>
                 <div className="text-2xl font-extrabold">₹{pendingOrder.total_amount}</div>
               </div>
-              <Badge tone="amber">
-                {pendingOrder.payment_method === "stripe"
-                  ? `Stripe: ${pendingOrder.stripe_session_id}`
-                  : `RZP: ${pendingOrder.razorpay_order_id}`}
-              </Badge>
+              <Badge tone="amber">RZP: {pendingOrder.razorpay_order_id}</Badge>
             </div>
 
             <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs text-slate-600 flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
               <span>
-                {pendingOrder.stripe_checkout_url || pendingOrder.razorpay_key_id
+                {pendingOrder.razorpay_key_id
                   ? "Backend verifies cryptographic gateway HMAC/webhook signature before generating your Pickup Token, QR code & printable receipt."
                   : "Live gateway credentials are not configured in this environment. Track your pending order or cancel to retry."}
               </span>
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {(pendingOrder.stripe_checkout_url || pendingOrder.razorpay_key_id) ? (
+              {pendingOrder.razorpay_key_id ? (
                 <Button variant="success" className="flex-1" disabled={busy} onClick={launchGatewayCheckout}>
-                  Launch {pendingOrder.payment_method === "stripe" ? "Stripe" : "Razorpay"} Checkout
+                  Launch Razorpay Checkout
                 </Button>
               ) : (
                 <Button

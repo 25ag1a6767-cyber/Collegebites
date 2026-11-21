@@ -108,8 +108,8 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        INSERT INTO role_permissions (role_id, permission_id)
-        SELECT r.id, p.id
+        INSERT INTO role_permissions (id, created_at, updated_at, role_id, permission_id)
+        SELECT md5(r.id::text || ':' || p.id::text)::uuid, NOW(), NOW(), r.id, p.id
         FROM roles r, permissions p
         WHERE r.name = 'college_admin' AND p.code = 'qr:website_manage'
         ON CONFLICT DO NOTHING
@@ -117,8 +117,8 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        INSERT INTO role_permissions (role_id, permission_id)
-        SELECT r.id, p.id
+        INSERT INTO role_permissions (id, created_at, updated_at, role_id, permission_id)
+        SELECT md5(r.id::text || ':' || p.id::text)::uuid, NOW(), NOW(), r.id, p.id
         FROM roles r, permissions p
         WHERE r.name = 'inventory_manager' AND p.code = 'menu:manage_inventory'
         ON CONFLICT DO NOTHING

@@ -161,9 +161,20 @@ def _serialize_order_with_maps(
     raw_guest_token: Optional[str] = None,
 ) -> OrderOut:
     items_out = [OrderItemOut.model_validate(item) for item in order.items]
+    meta = pay_row.gateway_metadata if (pay_row and isinstance(pay_row.gateway_metadata, dict)) else {}
     checkout_url = None
-    if pay_row and pay_row.provider == "stripe" and isinstance(pay_row.gateway_metadata, dict):
-        checkout_url = pay_row.gateway_metadata.get("checkout_url")
+    stripe_client_secret = None
+    stripe_pi_id = None
+    stripe_sess_id = None
+    if pay_row and pay_row.provider == "stripe":
+        checkout_url = meta.get("checkout_url")
+        if order.status == "PAYMENT_PENDING" and pay_row.status == "PENDING":
+            stripe_client_secret = meta.get("client_secret")
+        if pay_row.provider_order_id and pay_row.provider_order_id.startswith("pi_"):
+            stripe_pi_id = pay_row.provider_order_id
+        else:
+            stripe_sess_id = pay_row.provider_order_id
+            stripe_pi_id = meta.get("payment_intent_id")
     return OrderOut(
         id=order.id,
         order_number=order.order_number,
@@ -197,7 +208,9 @@ def _serialize_order_with_maps(
         guest_access_token=raw_guest_token,
         razorpay_order_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "razorpay") else None,
         razorpay_key_id=razorpay_gateway.public_key_id if order.payment_method == "razorpay" else None,
-        stripe_session_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "stripe") else None,
+        stripe_payment_intent_id=stripe_pi_id,
+        stripe_client_secret=stripe_client_secret,
+        stripe_session_id=stripe_sess_id,
         stripe_checkout_url=checkout_url,
         stripe_publishable_key=stripe_gateway.publishable_key if order.payment_method == "stripe" else None,
         cancellation_policy_text=policy_text,
@@ -648,7 +661,7 @@ def checkout_order(
             provider = "counter_pos"
 
         provider_order_id = None
-        stripe_checkout_url = None
+        stripe_gateway_meta: dict[str, Any] = {}
         if provider == "razorpay":
             rzp_order = razorpay_gateway.create_order(
                 amount_inr=total_amount,
@@ -657,17 +670,18 @@ def checkout_order(
             )
             provider_order_id = rzp_order["id"]
         elif provider == "stripe":
-            guest_q = f"?guest_token={raw_guest_token}&" if raw_guest_token else "?"
-            base_web = settings.public_frontend_url
-            sess = stripe_gateway.create_checkout_session(
+            pi = stripe_gateway.create_payment_intent(
                 amount_inr=total_amount,
                 order_number=order.order_number,
-                success_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_session_id={{CHECKOUT_SESSION_ID}}",
-                cancel_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_cancelled=1",
                 customer_email=payload.guest_email,
+                idempotency_key=f"cb-pi-{order.id}",
+                metadata={"order_id": str(order.id), "canteen_code": canteen.code},
             )
-            provider_order_id = sess["id"]
-            stripe_checkout_url = sess.get("url")
+            provider_order_id = pi["id"]
+            stripe_gateway_meta = {
+                "payment_intent_id": pi["id"],
+                "client_secret": pi.get("client_secret"),
+            }
 
         payment = Payment(
             order_id=order.id,
@@ -677,7 +691,7 @@ def checkout_order(
             amount=total_amount,
             currency="INR",
             status="PENDING",
-            gateway_metadata={"checkout_url": stripe_checkout_url} if stripe_checkout_url else {},
+            gateway_metadata=stripe_gateway_meta,
         )
         db.add(payment)
         db.flush()
@@ -717,8 +731,6 @@ def checkout_order(
         .where(Order.id == order.id)
     )
     out = serialize_order(db, loaded, raw_guest_token=raw_guest_token)
-    if stripe_checkout_url:
-        out.stripe_checkout_url = stripe_checkout_url
     return out
 
 

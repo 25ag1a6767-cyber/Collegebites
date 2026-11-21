@@ -6,7 +6,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.time_utils import now_college
@@ -30,6 +30,7 @@ from app.schemas.menu import (
     FoodAddonUpdate,
     FoodCategoryCreate,
     FoodCategoryUpdate,
+    FoodItemAddonCreate,
     FoodItemCreate,
     FoodItemOut,
     FoodItemUpdate,
@@ -326,7 +327,7 @@ def create_food_item(db: Session, payload: FoodItemCreate, actor_user_id: UUID) 
 
     for addon_id in payload.addon_ids:
         addon = db.get(FoodAddon, addon_id)
-        if addon:
+        if addon and addon.canteen_id == item.canteen_id:
             db.add(FoodItemAddon(food_item_id=item.id, addon_id=addon.id))
 
     for alg_name in payload.allergen_names:
@@ -354,6 +355,15 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
     if not item:
         raise HTTPException(status_code=404, detail="Food item not found")
 
+    if payload.category_id is not None:
+        cat = db.get(FoodCategory, payload.category_id)
+        if not cat or cat.canteen_id != item.canteen_id:
+            raise HTTPException(status_code=400, detail="Invalid category for this canteen")
+    if payload.slug is not None and payload.slug != item.slug:
+        dup = db.scalar(select(FoodItem).where(FoodItem.canteen_id == item.canteen_id, FoodItem.slug == payload.slug))
+        if dup and dup.id != item.id:
+            raise HTTPException(status_code=409, detail="Food item slug already exists in this canteen")
+
     updates = payload.model_dump(exclude_unset=True, exclude={"image_url", "addon_ids", "allergen_names"})
     for k, v in updates.items():
         setattr(item, k, v)
@@ -373,7 +383,8 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
             db.delete(link)
         db.flush()
         for addon_id in payload.addon_ids:
-            if db.get(FoodAddon, addon_id):
+            addon = db.get(FoodAddon, addon_id)
+            if addon and addon.canteen_id == item.canteen_id:
                 db.add(FoodItemAddon(food_item_id=item.id, addon_id=addon_id))
 
     if payload.allergen_names is not None:
@@ -447,6 +458,75 @@ def update_addon(db: Session, addon: FoodAddon, payload: FoodAddonUpdate, actor_
 
 def list_addons(db: Session, canteen_id: UUID) -> list[FoodAddon]:
     return list(db.scalars(select(FoodAddon).where(FoodAddon.canteen_id == canteen_id).order_by(FoodAddon.name)).all())
+
+
+def add_addon_to_food_item(db: Session, item_id: UUID, payload: FoodItemAddonCreate, actor_user_id: UUID) -> FoodAddon:
+    """Create or reuse a canteen add-on and link it to the specified food item."""
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+
+    clean_name = payload.name.strip()
+    addon = db.scalar(
+        select(FoodAddon).where(
+            FoodAddon.canteen_id == item.canteen_id,
+            func.lower(FoodAddon.name) == clean_name.lower(),
+            FoodAddon.price == payload.price,
+        )
+    )
+    if not addon:
+        addon = FoodAddon(
+            canteen_id=item.canteen_id,
+            name=clean_name,
+            addon_type=payload.addon_type,
+            price=payload.price,
+            is_veg=payload.is_veg,
+            is_available=payload.is_available,
+            max_quantity=payload.max_quantity,
+        )
+        db.add(addon)
+        db.flush()
+
+    existing_link = db.scalar(
+        select(FoodItemAddon).where(FoodItemAddon.food_item_id == item.id, FoodItemAddon.addon_id == addon.id)
+    )
+    if not existing_link:
+        db.add(FoodItemAddon(food_item_id=item.id, addon_id=addon.id))
+
+    record_audit_log(
+        db,
+        action="food_item.addon_linked",
+        entity_type="food_item",
+        entity_id=str(item.id),
+        actor_user_id=actor_user_id,
+        details={"addon_id": str(addon.id), "addon_name": addon.name, "price": str(addon.price)},
+    )
+    db.commit()
+    db.refresh(addon)
+    return addon
+
+
+def unlink_addon_from_food_item(db: Session, item_id: UUID, addon_id: UUID, actor_user_id: UUID) -> dict:
+    """Unlink an add-on from a food item cleanly."""
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    link = db.scalar(
+        select(FoodItemAddon).where(FoodItemAddon.food_item_id == item.id, FoodItemAddon.addon_id == addon_id)
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Add-on link not found on this food item")
+    db.delete(link)
+    record_audit_log(
+        db,
+        action="food_item.addon_unlinked",
+        entity_type="food_item",
+        entity_id=str(item.id),
+        actor_user_id=actor_user_id,
+        details={"addon_id": str(addon_id)},
+    )
+    db.commit()
+    return {"status": "removed", "item_id": str(item_id), "addon_id": str(addon_id)}
 
 
 def _serialize_schedule(db: Session, sched: MenuSchedule) -> MenuScheduleOut:

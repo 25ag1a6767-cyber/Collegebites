@@ -218,7 +218,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                     required
                     value={identifier}
                     onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder="student@collegebites.edu"
+                    placeholder="you@college.edu"
                   />
                 </div>
               </>

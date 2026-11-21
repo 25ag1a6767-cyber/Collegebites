@@ -399,26 +399,87 @@ def record_razorpay_failure(
 def verify_stripe_checkout_payment(
     db: Session, payload: StripeVerifyRequest, actor_user_id: Optional[UUID] = None
 ) -> OrderOut:
-    order = db.scalar(select(Order).where(Order.id == payload.order_id).with_for_update())
+    order = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == payload.order_id)
+        .with_for_update()
+    )
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
     payment = db.scalar(
         select(Payment).where(Payment.order_id == order.id, Payment.provider == "stripe").with_for_update()
     )
-    if not payment or payment.provider_order_id != payload.stripe_session_id:
-        raise HTTPException(status_code=400, detail="Stripe session reference does not match this order")
+    if not payment or not payment.provider_order_id:
+        raise HTTPException(status_code=400, detail="Stripe payment record not found for this order")
 
-    intent_id = payload.stripe_payment_intent_id or payload.stripe_session_id
+    ref_pi = (payload.stripe_payment_intent_id or "").strip() or None
+    ref_sess = (payload.stripe_session_id or "").strip() or None
+    if not ref_pi and not ref_sess:
+        raise HTTPException(status_code=400, detail="Provide stripe_payment_intent_id or stripe_session_id")
+
+    is_pi_order = payment.provider_order_id.startswith("pi_")
+    if is_pi_order:
+        if ref_pi != payment.provider_order_id:
+            raise HTTPException(status_code=400, detail="Stripe PaymentIntent reference does not match this order")
+        intent_id = payment.provider_order_id
+    else:
+        if ref_sess != payment.provider_order_id and ref_pi != payment.provider_order_id:
+            raise HTTPException(status_code=400, detail="Stripe session reference does not match this order")
+        intent_id = ref_pi or payment.provider_order_id
+
+    if payment.status == "CONFIRMED" and order.payment_status == "CONFIRMED":
+        return serialize_order(db, order)
+    if order.status in ("CANCELLED", "REJECTED", "PAYMENT_FAILED"):
+        raise HTTPException(status_code=409, detail=f"Cannot verify payment for {order.status} order")
+
     if stripe_gateway.use_live_api:
-        session_obj = stripe_gateway.retrieve_checkout_session(payload.stripe_session_id)
-        if session_obj.get("payment_status") != "paid":
-            raise HTTPException(status_code=400, detail="Stripe checkout session is not marked as paid")
-        intent_id = session_obj.get("payment_intent") or intent_id
+        if is_pi_order:
+            pi_obj = stripe_gateway.retrieve_payment_intent(intent_id)
+            pi_status = pi_obj.get("status")
+            if pi_status == "processing":
+                db.add(
+                    PaymentTransaction(
+                        payment_id=payment.id,
+                        order_id=order.id,
+                        transaction_type="processing",
+                        amount=payment.amount,
+                        status="PENDING",
+                        external_reference=intent_id,
+                        raw_summary={"stripe_status": "processing"},
+                    )
+                )
+                db.commit()
+                return serialize_order(db, order)
+            if pi_status != "succeeded":
+                err_detail = pi_obj.get("last_payment_error") or f"Stripe payment status is {pi_status}, not succeeded"
+                db.add(
+                    PaymentTransaction(
+                        payment_id=payment.id,
+                        order_id=order.id,
+                        transaction_type="authorize",
+                        amount=payment.amount,
+                        status="FAILED",
+                        external_reference=intent_id,
+                        raw_summary={"stripe_status": pi_status, "error": err_detail},
+                    )
+                )
+                db.commit()
+                raise HTTPException(status_code=400, detail=err_detail)
+            expected_paise = int((payment.amount * 100).quantize(Decimal("1")))
+            received_paise = int(pi_obj.get("amount_received") or pi_obj.get("amount") or 0)
+            if received_paise < expected_paise:
+                raise HTTPException(status_code=400, detail="Stripe received amount is less than order total")
+        else:
+            session_obj = stripe_gateway.retrieve_checkout_session(payment.provider_order_id)
+            if session_obj.get("payment_status") != "paid":
+                raise HTTPException(status_code=400, detail="Stripe checkout session is not marked as paid")
+            intent_id = session_obj.get("payment_intent") or intent_id
     else:
         if not payload.stripe_signature or not stripe_gateway.verify_test_payment_signature(
-            stripe_session_id=payload.stripe_session_id,
             stripe_payment_intent_id=intent_id,
+            stripe_session_id=ref_sess,
             stripe_signature=payload.stripe_signature,
         ):
             db.add(
@@ -443,20 +504,21 @@ def verify_stripe_checkout_payment(
         payment_method=payload.payment_method or "card",
         payment_reference=intent_id,
         actor_user_id=actor_user_id or order.customer_id,
-        raw_summary={"method": payload.payment_method or "card", "stripe_session_id": payload.stripe_session_id},
+        raw_summary={
+            "method": payload.payment_method or "card",
+            "stripe_payment_intent_id": intent_id,
+            "stripe_session_id": ref_sess,
+        },
     )
 
 
 def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header: Optional[str]) -> dict[str, Any]:
-    if not stripe_signature_header or not stripe_gateway.verify_webhook_signature(
-        raw_body=raw_body, stripe_signature_header=stripe_signature_header
-    ):
+    if not stripe_signature_header:
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
 
-    try:
-        payload = json.loads(raw_body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=400, detail="Malformed Stripe webhook JSON payload") from exc
+    payload = stripe_gateway.construct_webhook_event(
+        raw_body=raw_body, stripe_signature_header=stripe_signature_header
+    )
     event_type = payload.get("type", "unknown")
     event_id = payload.get("id") or f"evt_stripe_{event_type}"
     obj = payload.get("data", {}).get("object", {})
@@ -481,19 +543,31 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
         db.add(evt)
         db.flush()
 
-    session_id = obj.get("id") if event_type.startswith("checkout.session.") else obj.get("metadata", {}).get("stripe_session_id")
-    if event_type == "checkout.session.completed" and session_id:
-        pay_ro = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe"))
-        if pay_ro:
-            order = db.scalar(select(Order).where(Order.id == pay_ro.order_id).with_for_update())
-            payment = db.scalar(select(Payment).where(Payment.id == pay_ro.id).with_for_update())
-            if order and payment:
-                evt.processed = True
-                evt.processed_at = datetime.now(timezone.utc)
+    pay_ro: Optional[Payment] = None
+    if event_type.startswith("payment_intent."):
+        pi_id = obj.get("id")
+        if pi_id:
+            pay_ro = db.scalar(
+                select(Payment).where(Payment.provider == "stripe", Payment.provider_order_id == pi_id)
+            )
+    elif event_type.startswith("checkout.session."):
+        session_id = obj.get("id")
+        if session_id:
+            pay_ro = db.scalar(
+                select(Payment).where(Payment.provider == "stripe", Payment.provider_order_id == session_id)
+            )
+
+    if pay_ro:
+        order = db.scalar(select(Order).where(Order.id == pay_ro.order_id).with_for_update())
+        payment = db.scalar(select(Payment).where(Payment.id == pay_ro.id).with_for_update())
+        if order and payment:
+            evt.processed = True
+            evt.processed_at = datetime.now(timezone.utc)
+            if event_type in ("payment_intent.succeeded", "checkout.session.completed"):
                 if order.status in ("CANCELLED", "REJECTED", "PAYMENT_FAILED"):
                     db.commit()
                     return {"status": "ignored_terminal_order", "event_id": event_id}
-                pi_id = obj.get("payment_intent") or session_id
+                pi_id = obj.get("id") if event_type == "payment_intent.succeeded" else (obj.get("payment_intent") or obj.get("id"))
                 _finalize_confirmed_payment(
                     db,
                     order=order,
@@ -502,19 +576,36 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
                     payment_method="stripe",
                     payment_reference=pi_id,
                     actor_user_id=order.customer_id,
-                    raw_summary={"webhook_event": event_type, "stripe_session_id": session_id},
+                    raw_summary={"webhook_event": event_type, "stripe_id": obj.get("id")},
                 )
                 return {"status": "processed", "event_id": event_id}
-    elif event_type in ("checkout.session.expired", "payment_intent.payment_failed") and session_id:
-        pay_ro = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe"))
-        if pay_ro:
-            order = db.scalar(select(Order).where(Order.id == pay_ro.order_id).with_for_update())
-            payment = db.scalar(select(Payment).where(Payment.id == pay_ro.id).with_for_update())
-            if payment and payment.status == "PENDING" and order and order.status == "PAYMENT_PENDING":
-                evt.processed = True
-                evt.processed_at = datetime.now(timezone.utc)
-                mark_payment_failed(db, order=order, payment=payment, reason="Stripe webhook payment failed or expired")
+
+            if event_type == "payment_intent.processing":
+                db.add(
+                    PaymentTransaction(
+                        payment_id=payment.id,
+                        order_id=order.id,
+                        transaction_type="processing",
+                        amount=payment.amount,
+                        status="PENDING",
+                        external_reference=obj.get("id"),
+                        raw_summary={"webhook_event": event_type},
+                    )
+                )
+                db.commit()
                 return {"status": "processed", "event_id": event_id}
+
+            if event_type in ("checkout.session.expired", "payment_intent.payment_failed", "payment_intent.canceled"):
+                if payment.status == "PENDING" and order.status == "PAYMENT_PENDING":
+                    err_msg = (
+                        (obj.get("last_payment_error") or {}).get("message")
+                        or obj.get("cancellation_reason")
+                        or f"Stripe webhook {event_type}"
+                    )
+                    mark_payment_failed(db, order=order, payment=payment, reason=err_msg[:255])
+                    return {"status": "processed", "event_id": event_id}
+                db.commit()
+                return {"status": "ignored_non_pending", "event_id": event_id}
 
     evt.processed = True
     evt.processed_at = datetime.now(timezone.utc)
@@ -548,7 +639,7 @@ def record_stripe_failure(
         is_staff=is_staff,
         staff_canteen_id=staff_canteen_id,
         guest_access_token=guest_access_token,
-        provider_order_id=payload.stripe_session_id,
+        provider_order_id=payload.stripe_payment_intent_id or payload.stripe_session_id,
         expected_provider_order_id=payment.provider_order_id,
     )
     mark_payment_failed(db, order=order, payment=payment, reason=payload.reason)
@@ -597,21 +688,22 @@ def retry_online_payment(
 
     order.payment_method = method
     provider_order_id = None
-    checkout_url = None
+    gateway_meta: dict[str, Any] = {}
     if method == "razorpay":
         rzp = razorpay_gateway.create_order(amount_inr=order.total_amount, receipt_ref=f"{order.order_number}-R", notes={"order_number": order.order_number})
         provider_order_id = rzp["id"]
     else:
-        guest_q = f"?guest_token={guest_access_token}&" if guest_access_token else "?"
-        base_web = settings.public_frontend_url
-        sess = stripe_gateway.create_checkout_session(
+        pi = stripe_gateway.create_payment_intent(
             amount_inr=order.total_amount,
             order_number=order.order_number,
-            success_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_cancelled=1",
+            idempotency_key=f"cb-retry-{order.id}-{int(datetime.now(timezone.utc).timestamp())}",
+            metadata={"order_id": str(order.id), "retry": "true"},
         )
-        provider_order_id = sess["id"]
-        checkout_url = sess.get("url")
+        provider_order_id = pi["id"]
+        gateway_meta = {
+            "payment_intent_id": pi["id"],
+            "client_secret": pi.get("client_secret"),
+        }
 
     payment = db.scalar(select(Payment).where(Payment.order_id == order.id).with_for_update())
     if not payment:
@@ -623,7 +715,7 @@ def retry_online_payment(
             amount=order.total_amount,
             currency="INR",
             status="PENDING",
-            gateway_metadata={"checkout_url": checkout_url} if checkout_url else {},
+            gateway_metadata=gateway_meta,
         )
         db.add(payment)
     else:
@@ -632,7 +724,7 @@ def retry_online_payment(
         payment.provider_order_id = provider_order_id
         payment.status = "PENDING"
         payment.failure_reason = None
-        payment.gateway_metadata = {"checkout_url": checkout_url} if checkout_url else {}
+        payment.gateway_metadata = gateway_meta
     db.flush()
     db.add(PaymentTransaction(payment_id=payment.id, order_id=order.id, transaction_type="retry_initiate", amount=order.total_amount, status="PENDING", external_reference=provider_order_id))
     db.commit()

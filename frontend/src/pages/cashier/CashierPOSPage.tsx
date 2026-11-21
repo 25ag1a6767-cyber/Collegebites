@@ -31,6 +31,7 @@ export const CashierPOSPage: React.FC = () => {
   const { data: items = [] } = useQuery<FoodItem[]>({
     queryKey: ["pos-menu", activeCanteenId],
     enabled: Boolean(activeCanteenId),
+    refetchInterval: 8000,
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items?available_only=true`)).data,
   });
 
@@ -43,9 +44,16 @@ export const CashierPOSPage: React.FC = () => {
 
   const { data: pendingCounterOrders = [], refetch: refetchPendingCounter } = useQuery<Order[]>({
     queryKey: ["pos-pending-counter", activeCanteenId],
-    enabled: Boolean(activeCanteenId && tab === "orders"),
+    enabled: Boolean(activeCanteenId),
     queryFn: async () => (await api.get(`/pos/orders/pending-counter?canteen_id=${activeCanteenId}`)).data,
     refetchInterval: 5000,
+  });
+
+  const { data: activeOrders = [], refetch: refetchActiveOrders } = useQuery<Order[]>({
+    queryKey: ["pos-active-orders", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/pos/orders/active?canteen_id=${activeCanteenId}`)).data,
+    refetchInterval: 4000,
   });
 
   const [searchMenu, setSearchMenu] = useState("");
@@ -105,6 +113,7 @@ export const CashierPOSPage: React.FC = () => {
       const recRes = await api.get<ReceiptSnapshot>(`/tokens/receipts/${res.data.order_number}`);
       setActiveReceipt(recRes.data);
       refetchShift();
+      refetchActiveOrders();
     } catch (err) {
       pushToast(getApiError(err, "POS checkout failed"), "error");
     } finally {
@@ -134,6 +143,7 @@ export const CashierPOSPage: React.FC = () => {
       setActiveReceipt(recRes.data);
       searchOrders();
       refetchPendingCounter();
+      refetchActiveOrders();
       refetchShift();
     } catch (err) {
       pushToast(getApiError(err), "error");
@@ -168,7 +178,11 @@ export const CashierPOSPage: React.FC = () => {
           </Select>
           {(["pos", "orders", "shift"] as const).map((t) => (
             <Button key={t} size="sm" variant={tab === t ? "primary" : "outline"} onClick={() => setTab(t)}>
-              {t === "pos" ? "Digital Walk-in POS" : t === "orders" ? "Search & Reprint" : "POS Shift"}
+              {t === "pos"
+                ? "Digital Walk-in POS"
+                : t === "orders"
+                ? `Orders & Reprint (${activeOrders.length + pendingCounterOrders.length})`
+                : "POS Shift"}
             </Button>
           ))}
         </div>
@@ -330,6 +344,51 @@ export const CashierPOSPage: React.FC = () => {
                         Collect Card
                       </Button>
                     </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card className="p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="font-bold text-slate-900">Live Active Canteen Orders ({activeOrders.length})</h2>
+              <Badge tone="blue">Auto-refreshing</Badge>
+            </div>
+            {activeOrders.length === 0 ? (
+              <div className="text-xs text-slate-500">No active paid orders in queue right now.</div>
+            ) : (
+              <div className="space-y-2">
+                {activeOrders.map((o) => (
+                  <div
+                    key={o.id}
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3 text-xs"
+                  >
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2 font-bold text-sm">
+                        <span>{o.order_number}</span>
+                        {o.pickup_token_code && <Badge tone="amber">Token {o.pickup_token_code}</Badge>}
+                        <Badge tone={o.status === "READY" ? "green" : "blue"}>{o.status}</Badge>
+                        <Badge tone="slate">{o.payment_method}</Badge>
+                      </div>
+                      <div className="text-slate-600 mt-1">
+                        {o.guest_name || "Customer"} • ₹{o.total_amount} • {o.items.map((it) => `${it.quantity}× ${it.item_name}`).join(", ")}
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          const rec = await api.get<ReceiptSnapshot>(`/tokens/receipts/${o.order_number}`);
+                          setActiveReceipt(rec.data);
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
+                      }}
+                    >
+                      <Printer className="h-3.5 w-3.5" /> View / Reprint Slip
+                    </Button>
                   </div>
                 ))}
               </div>

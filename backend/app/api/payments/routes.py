@@ -77,6 +77,18 @@ async def razorpay_webhook(
     return payment_service.handle_razorpay_webhook(db, raw_body, x_razorpay_signature)
 
 
+@router.get("/stripe/config")
+def stripe_config():
+    """Return non-sensitive Stripe client configuration (never exposes secret or webhook keys)."""
+    from app.integrations.stripe_client import stripe_gateway
+
+    return {
+        "publishable_key": stripe_gateway.publishable_key,
+        "configured": bool(stripe_gateway.publishable_key),
+        "live_api_enabled": stripe_gateway.use_live_api,
+    }
+
+
 @router.post("/stripe/verify", response_model=OrderOut)
 def verify_stripe(
     payload: StripeVerifyRequest,

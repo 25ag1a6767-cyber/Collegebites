@@ -7,6 +7,7 @@ import { useAppStore } from "../../store/useAppStore";
 import type { Order, ReceiptSnapshot } from "../../types";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
+import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
 import { openRazorpayModal } from "../../utils/razorpay";
 
 const STEPS = [
@@ -30,6 +31,7 @@ export const OrderTrackingPage: React.FC = () => {
   const [manualGuestToken, setManualGuestToken] = useState(guestToken || "");
   const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [stripeModalOrder, setStripeModalOrder] = useState<Order | null>(null);
   const handledStripeRef = useRef<string | null>(null);
   const effectiveToken = guestToken || manualGuestToken || undefined;
   const querySuffix = effectiveToken ? `?guest_token=${encodeURIComponent(effectiveToken)}` : "";
@@ -47,8 +49,10 @@ export const OrderTrackingPage: React.FC = () => {
     queryFn: async () => (await api.get(`/tokens/receipts/${orderNumber}${querySuffix}`)).data,
   });
 
-  // Complete or record cancelled Stripe Checkout redirect
+  // Complete or record cancelled Stripe PaymentIntent / Checkout redirect
   useEffect(() => {
+    const stripePi = searchParams.get("payment_intent");
+    const stripeRedirectStatus = searchParams.get("redirect_status");
     const stripeSid = searchParams.get("stripe_session_id");
     const stripeCancelled = searchParams.get("stripe_cancelled");
     if (!order || order.payment_status === "CONFIRMED") return;
@@ -57,7 +61,8 @@ export const OrderTrackingPage: React.FC = () => {
       api
         .post(`/payments/stripe/fail${querySuffix}`, {
           order_id: order.id,
-          stripe_session_id: order.stripe_session_id,
+          stripe_payment_intent_id: order.stripe_payment_intent_id || undefined,
+          stripe_session_id: order.stripe_session_id || undefined,
           reason: "Stripe checkout cancelled by customer",
         })
         .then(() => {
@@ -65,6 +70,40 @@ export const OrderTrackingPage: React.FC = () => {
           refetch();
         })
         .catch(() => {});
+      return;
+    }
+    if (stripePi && handledStripeRef.current !== stripePi) {
+      handledStripeRef.current = stripePi;
+      if (stripeRedirectStatus === "failed") {
+        api
+          .post(`/payments/stripe/fail${querySuffix}`, {
+            order_id: order.id,
+            stripe_payment_intent_id: stripePi,
+            reason: "Stripe 3DS or payment authorization failed",
+          })
+          .then(() => {
+            pushToast("Stripe payment failed. Retry below.", "error");
+            refetch();
+          })
+          .catch(() => {});
+        return;
+      }
+      api
+        .post(`/payments/stripe/verify${querySuffix}`, {
+          order_id: order.id,
+          stripe_payment_intent_id: stripePi,
+          payment_method: "stripe",
+        })
+        .then((res) => {
+          if (res.data.payment_status === "CONFIRMED") {
+            pushToast("Stripe payment verified! Token issued.", "success");
+          } else {
+            pushToast("Stripe payment is processing. Updating automatically...", "info");
+          }
+          refetch();
+          refetchReceipt();
+        })
+        .catch((err) => pushToast(getApiError(err, "Stripe PaymentIntent verification pending"), "info"));
       return;
     }
     if (stripeSid && handledStripeRef.current !== stripeSid) {
@@ -127,11 +166,12 @@ export const OrderTrackingPage: React.FC = () => {
     try {
       const res = await api.post<Order>(`/payments/retry/${order.id}${querySuffix}`, { payment_method: method });
       if (method === "stripe") {
-        if (res.data.stripe_checkout_url) {
-          window.location.href = res.data.stripe_checkout_url;
-          return;
-        }
-        throw new Error("Stripe Checkout session URL is not available in this environment.");
+        setStripeModalOrder(
+          effectiveToken && !res.data.guest_access_token
+            ? { ...res.data, guest_access_token: effectiveToken }
+            : res.data
+        );
+        return;
       }
       if (res.data.razorpay_order_id && res.data.razorpay_key_id) {
         const opened = await openRazorpayModal({
@@ -258,6 +298,24 @@ export const OrderTrackingPage: React.FC = () => {
           <div className="flex flex-wrap gap-2">
             {order.payment_status !== "CONFIRMED" && ["PAYMENT_PENDING", "PAYMENT_FAILED"].includes(order.status) && (
               <>
+                {order.status === "PAYMENT_PENDING" &&
+                  order.payment_method === "stripe" &&
+                  order.stripe_client_secret && (
+                    <Button
+                      size="sm"
+                      variant="success"
+                      disabled={busy}
+                      onClick={() =>
+                        setStripeModalOrder(
+                          effectiveToken && !order.guest_access_token
+                            ? { ...order, guest_access_token: effectiveToken }
+                            : order
+                        )
+                      }
+                    >
+                      Complete Stripe Payment
+                    </Button>
+                  )}
                 <Button size="sm" variant="primary" disabled={busy} onClick={() => void handleRetryOnlinePayment("razorpay")}>
                   <RefreshCw className="h-3.5 w-3.5" /> Pay via Razorpay
                 </Button>
@@ -303,6 +361,31 @@ export const OrderTrackingPage: React.FC = () => {
         busy={busy}
         onCancel={() => setConfirmCancelOpen(false)}
         onConfirm={handleConfirmCancelOrder}
+      />
+
+      <StripePaymentModal
+        order={stripeModalOrder}
+        onClose={() => setStripeModalOrder(null)}
+        onSuccess={() => {
+          pushToast("Stripe payment verified! Pickup token issued.", "success");
+          setStripeModalOrder(null);
+          refetch();
+          refetchReceipt();
+        }}
+        onProcessing={() => {
+          pushToast("Payment is processing at Stripe. Tracking status...", "info");
+          setStripeModalOrder(null);
+          refetch();
+        }}
+        onFailed={() => {
+          pushToast("Stripe payment cancelled or failed.", "info");
+          setStripeModalOrder(null);
+          refetch();
+        }}
+        onNavigateStatus={() => {
+          setStripeModalOrder(null);
+          refetch();
+        }}
       />
     </div>
   );
