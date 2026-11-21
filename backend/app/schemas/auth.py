@@ -66,6 +66,8 @@ class OTPRequestResponse(BaseModel):
     message: str
     expires_in_seconds: int
     dev_otp: Optional[str] = None
+    delivery_channel: Optional[str] = None
+    masked_destination: Optional[str] = None
 
 
 class OTPVerifyResponse(BaseModel):

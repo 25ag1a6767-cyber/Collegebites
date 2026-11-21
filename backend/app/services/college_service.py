@@ -149,6 +149,8 @@ def get_or_create_college_settings(db: Session) -> CollegeSettings:
 def update_college_settings(
     db: Session, payload: CollegeSettingsUpdate, actor_user_id: UUID, ip_address: Optional[str] = None
 ) -> CollegeSettings:
+    if payload.cash_at_counter_enabled is True or payload.pay_at_pickup_enabled is True:
+        raise HTTPException(status_code=400, detail="Cash and Pay-at-Pickup are disabled; CollegeBites accepts online payments only.")
     row = get_or_create_college_settings(db)
     for k, v in payload.model_dump(exclude_unset=True).items():
         setattr(row, k, v)
@@ -224,6 +226,8 @@ def get_canteen_detail(db: Session, canteen_id_or_slug: str) -> CanteenDetailOut
 def create_canteen(
     db: Session, payload: CanteenCreate, actor_user_id: UUID, ip_address: Optional[str] = None
 ) -> CanteenOut:
+    if payload.allow_cash_at_counter or payload.allow_pay_at_pickup:
+        raise HTTPException(status_code=400, detail="Cash and Pay-at-Pickup are disabled; CollegeBites accepts online payments only.")
     existing = db.scalar(select(Canteen).where(or_(Canteen.slug == payload.slug, Canteen.code == payload.code)))
     if existing:
         raise HTTPException(status_code=409, detail="Canteen slug or code already exists")
@@ -252,6 +256,8 @@ def create_canteen(
 def update_canteen(
     db: Session, canteen_id: UUID, payload: CanteenUpdate, actor_user_id: UUID, ip_address: Optional[str] = None
 ) -> CanteenOut:
+    if payload.allow_cash_at_counter is True or payload.allow_pay_at_pickup is True:
+        raise HTTPException(status_code=400, detail="Cash and Pay-at-Pickup are disabled; CollegeBites accepts online payments only.")
     canteen = db.get(Canteen, canteen_id)
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")

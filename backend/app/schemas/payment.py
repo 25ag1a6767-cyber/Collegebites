@@ -38,7 +38,7 @@ class StripeFailureRequest(BaseModel):
 
 class CounterPaymentCollectRequest(BaseModel):
     order_id: UUID
-    payment_method: str = Field(default="cash", pattern="^(cash|upi_pos|card_pos|pay_at_pickup)$")
+    payment_method: str = Field(default="upi_pos", pattern="^(upi_pos|card_pos|cash|pay_at_pickup)$")
     external_reference: Optional[str] = Field(default=None, max_length=120)
 
 

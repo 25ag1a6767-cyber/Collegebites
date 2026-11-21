@@ -207,7 +207,7 @@ class CanteenCreate(BaseModel):
     canteen_type: str = Field(default="canteen")
     tax_rate_percent: Decimal = Field(default=Decimal("5.00"), ge=0, le=50)
     allow_online_payment: bool = True
-    allow_cash_at_counter: bool = True
+    allow_cash_at_counter: bool = False
     allow_pay_at_pickup: bool = False
     max_concurrent_orders: int = Field(default=50, ge=1, le=500)
     orders_per_slot_capacity: int = Field(default=30, ge=1, le=500)

@@ -77,8 +77,22 @@ class Settings(BaseSettings):
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
     SMTP_USER: str = ""
+    SMTP_USERNAME: str = ""
     SMTP_PASSWORD: str = ""
+    SMTP_SECURE: bool = False
     SMTP_FROM_EMAIL: str = "noreply@collegebites.edu"
+
+    @property
+    def effective_smtp_user(self) -> str:
+        return (self.SMTP_USER or self.SMTP_USERNAME or "").strip()
+
+    @property
+    def effective_smtp_from(self) -> str:
+        if self.SMTP_FROM_EMAIL and self.SMTP_FROM_EMAIL != "noreply@collegebites.edu":
+            return self.SMTP_FROM_EMAIL.strip()
+        if "@" in self.effective_smtp_user:
+            return self.effective_smtp_user
+        return self.SMTP_FROM_EMAIL
     SMS_PROVIDER: str = "log"
     WHATSAPP_PROVIDER: str = "log"
     TWILIO_ACCOUNT_SID: str = ""

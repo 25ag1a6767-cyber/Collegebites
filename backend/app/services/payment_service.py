@@ -603,7 +603,7 @@ def retry_online_payment(
         provider_order_id = rzp["id"]
     else:
         guest_q = f"?guest_token={guest_access_token}&" if guest_access_token else "?"
-        base_web = settings.PUBLIC_BASE_URL.rstrip("/")
+        base_web = settings.public_frontend_url
         sess = stripe_gateway.create_checkout_session(
             amount_inr=order.total_amount,
             order_number=order.order_number,
@@ -642,6 +642,8 @@ def retry_online_payment(
 
 
 def collect_counter_payment(db: Session, payload: CounterPaymentCollectRequest, cashier_user_id: UUID) -> OrderOut:
+    if payload.payment_method in ("cash", "pay_at_pickup"):
+        raise HTTPException(status_code=400, detail="Cash and Pay-at-Pickup are disabled. Collect via UPI POS or Card POS.")
     order = db.scalar(select(Order).where(Order.id == payload.order_id).with_for_update())
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")

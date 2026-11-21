@@ -94,6 +94,7 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "supplier:manage",
         "purchase_order:manage",
         "wastage:record",
+        "menu:manage_inventory",
     ],
     ROLE_PICKUP_STAFF: [
         "pickup:verify",

@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 import httpx
+from fastapi import HTTPException
 
 from app.core.config import settings
 
@@ -15,15 +16,16 @@ STRIPE_API_BASE = "https://api.stripe.com/v1"
 class StripeGateway:
     """
     Stripe payment integration supporting live/sandbox REST Checkout Sessions and
-    deterministic HMAC-SHA256 test verification when running without live keys.
+    deterministic HMAC-SHA256 verification for dev/test suites.
     Strictly enforces CollegeBites' NO REFUNDS policy (never invokes refund endpoints).
     """
 
     def __init__(self) -> None:
-        self.publishable_key = settings.STRIPE_PUBLISHABLE_KEY or "pk_test_collegebites_local"
-        self.secret_key = settings.STRIPE_SECRET_KEY or "sk_test_collegebites_local"
-        self.webhook_secret = settings.STRIPE_WEBHOOK_SECRET or "whsec_collegebites_local"
-        self.use_live_api = bool(settings.STRIPE_SECRET_KEY and not settings.STRIPE_TEST_MODE)
+        self._configured = bool(settings.STRIPE_SECRET_KEY.strip())
+        self.publishable_key = settings.STRIPE_PUBLISHABLE_KEY.strip() or None
+        self.secret_key = settings.STRIPE_SECRET_KEY.strip() or "sk_test_collegebites_local"
+        self.webhook_secret = settings.STRIPE_WEBHOOK_SECRET.strip() or "whsec_collegebites_local"
+        self.use_live_api = self._configured
 
     def create_checkout_session(
         self,
@@ -57,6 +59,12 @@ class StripeGateway:
             )
             resp.raise_for_status()
             return resp.json()
+
+        if settings.is_production:
+            raise HTTPException(
+                status_code=503,
+                detail="Stripe payment gateway credentials (STRIPE_SECRET_KEY) are not configured in production.",
+            )
 
         sid = f"cs_test_cb_{secrets.token_hex(10)}"
         return {

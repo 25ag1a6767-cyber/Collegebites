@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 import httpx
+from fastapi import HTTPException
 
 from app.core.config import settings
 
@@ -12,13 +13,16 @@ RAZORPAY_API_BASE = "https://api.razorpay.com/v1"
 
 
 class RazorpayGateway:
-    """Razorpay integration supporting real live/sandbox REST orders and deterministic local HMAC test mode."""
+    """Razorpay integration supporting real live/sandbox REST orders and dev/test HMAC verification."""
 
     def __init__(self) -> None:
-        self.key_id = settings.RAZORPAY_KEY_ID or "rzp_test_collegebites_local"
-        self.key_secret = settings.RAZORPAY_KEY_SECRET or "rzp_test_secret_collegebites_local"
-        self.webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET or "rzp_webhook_secret_collegebites_local"
-        self.use_live_api = bool(settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET and not settings.RAZORPAY_TEST_MODE)
+        self._configured = bool(settings.RAZORPAY_KEY_ID.strip() and settings.RAZORPAY_KEY_SECRET.strip())
+        self.key_id = settings.RAZORPAY_KEY_ID.strip() or "rzp_test_collegebites_local"
+        self.public_key_id: Optional[str] = settings.RAZORPAY_KEY_ID.strip() or None
+        self.key_secret = settings.RAZORPAY_KEY_SECRET.strip() or "rzp_test_secret_collegebites_local"
+        self.webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET.strip() or "rzp_webhook_secret_collegebites_local"
+        # Call live/sandbox Razorpay REST Orders API whenever real credentials are configured
+        self.use_live_api = self._configured
 
     def create_order(self, *, amount_inr: Decimal, receipt_ref: str, notes: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         amount_paise = int((amount_inr * 100).quantize(Decimal("1")))
@@ -37,6 +41,11 @@ class RazorpayGateway:
             )
             resp.raise_for_status()
             return resp.json()
+        if settings.is_production:
+            raise HTTPException(
+                status_code=503,
+                detail="Razorpay payment gateway credentials (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET) are not configured in production.",
+            )
         return {
             "id": f"order_test_{secrets.token_hex(8)}",
             "entity": "order",

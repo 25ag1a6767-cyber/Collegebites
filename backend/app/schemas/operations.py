@@ -83,7 +83,7 @@ class POSWalkInOrderRequest(BaseModel):
     counter_id: Optional[UUID] = None
     customer_name: str = Field(default="Walk-in Customer", max_length=160)
     customer_phone: Optional[str] = Field(default=None, max_length=32)
-    payment_method: str = Field(default="cash", pattern="^(cash|upi_pos|card_pos)$")
+    payment_method: str = Field(default="upi_pos", pattern="^(upi_pos|card_pos|cash)$")
     coupon_code: Optional[str] = None
     notes: Optional[str] = None
     items: list[CheckoutItemDirectIn] = Field(min_length=1)

@@ -196,7 +196,7 @@ def _serialize_order_with_maps(
         qr_token_raw=qr_row.qr_payload_encoded if qr_row else None,
         guest_access_token=raw_guest_token,
         razorpay_order_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "razorpay") else None,
-        razorpay_key_id=razorpay_gateway.key_id if order.payment_method == "razorpay" else None,
+        razorpay_key_id=razorpay_gateway.public_key_id if order.payment_method == "razorpay" else None,
         stripe_session_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "stripe") else None,
         stripe_checkout_url=checkout_url,
         stripe_publishable_key=stripe_gateway.publishable_key if order.payment_method == "stripe" else None,
@@ -322,15 +322,18 @@ def checkout_order(
     if canteen.auto_throttle_enabled and active_count >= canteen.max_concurrent_orders:
         raise HTTPException(status_code=429, detail="Canteen queue is at full capacity. Please retry shortly.")
 
-    # Payment method authorization per college & canteen settings
+    # Strict NO-CASH, ONLINE-ONLY payment policy across all channels
+    if payload.payment_method in ("cash", "pay_at_pickup"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cash and Pay-at-Pickup are disabled. Only online/digital payments (Razorpay, Stripe, UPI/Card POS) are accepted.",
+        )
     if payload.payment_method == "razorpay" and not (college.razorpay_enabled and canteen.allow_online_payment):
         raise HTTPException(status_code=400, detail="Razorpay online payment is disabled for this canteen")
     if payload.payment_method == "stripe" and not (college.stripe_enabled and canteen.allow_online_payment):
         raise HTTPException(status_code=400, detail="Stripe online payment is disabled for this canteen")
-    if payload.payment_method == "cash" and not (cashier_user_id or (college.cash_at_counter_enabled and canteen.allow_cash_at_counter)):
-        raise HTTPException(status_code=400, detail="Cash at counter is disabled for this canteen")
-    if payload.payment_method == "pay_at_pickup" and not (college.pay_at_pickup_enabled and canteen.allow_pay_at_pickup):
-        raise HTTPException(status_code=400, detail="Pay at pickup is disabled for this canteen")
+    if payload.payment_method in ("upi_pos", "card_pos") and not cashier_user_id:
+        raise HTTPException(status_code=403, detail="POS terminal payment methods require authorized cashier staff")
 
     now = datetime.now(timezone.utc)
     # Resolve location QR if passed
@@ -357,10 +360,15 @@ def checkout_order(
     if is_guest:
         if not payload.guest_name or not payload.guest_phone:
             raise HTTPException(status_code=400, detail="Guest name and mobile number are required")
-        # Walk-in POS orders recorded by a cashier don't need guest SMS OTP
+        # Walk-in POS / Kiosk orders don't require OTP; Guest web/mobile verifies mobile or email OTP
         if college.guest_otp_required and not cashier_user_id and payload.order_channel != "kiosk":
-            if not validate_guest_otp_token(db, payload.guest_phone, payload.guest_otp_verification_token):
-                raise HTTPException(status_code=400, detail="Guest mobile OTP verification is required before checkout")
+            phone_ok = validate_guest_otp_token(db, payload.guest_phone, payload.guest_otp_verification_token)
+            email_ok = bool(
+                payload.guest_email
+                and validate_guest_otp_token(db, payload.guest_email, payload.guest_otp_verification_token)
+            )
+            if not (phone_ok or email_ok):
+                raise HTTPException(status_code=400, detail="Guest OTP verification (email or mobile) is required before checkout")
 
     # Gather line items from cart or direct payload
     line_specs: list[CheckoutItemDirectIn] = list(payload.direct_items)
@@ -631,13 +639,13 @@ def checkout_order(
                 )
             )
 
-        # Create payment request
+        # Create payment request (online/digital only)
         if payload.payment_method == "razorpay":
             provider = "razorpay"
         elif payload.payment_method == "stripe":
             provider = "stripe"
         else:
-            provider = "cash"
+            provider = "counter_pos"
 
         provider_order_id = None
         stripe_checkout_url = None
@@ -650,12 +658,13 @@ def checkout_order(
             provider_order_id = rzp_order["id"]
         elif provider == "stripe":
             guest_q = f"?guest_token={raw_guest_token}&" if raw_guest_token else "?"
-            base_web = settings.PUBLIC_BASE_URL.rstrip("/")
+            base_web = settings.public_frontend_url
             sess = stripe_gateway.create_checkout_session(
                 amount_inr=total_amount,
                 order_number=order.order_number,
                 success_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_session_id={{CHECKOUT_SESSION_ID}}",
                 cancel_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_cancelled=1",
+                customer_email=payload.guest_email,
             )
             provider_order_id = sess["id"]
             stripe_checkout_url = sess.get("url")

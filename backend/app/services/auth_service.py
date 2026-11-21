@@ -24,6 +24,8 @@ from app.core.security import (
     sha256_hex,
     verify_password,
 )
+from app.integrations.email_provider import send_email
+from app.integrations.sms_provider import send_sms_or_whatsapp
 from app.models.auth import (
     CustomerProfile,
     OTPVerification,
@@ -321,6 +323,16 @@ def logout_session(db: Session, session_id: UUID, user_id: UUID, ip_address: Opt
     db.commit()
 
 
+def _mask_otp_destination(dest: str) -> str:
+    if "@" in dest:
+        local, dom = dest.split("@", 1)
+        head = local[:2] if len(local) > 2 else local[:1]
+        return f"{head}***@{dom}"
+    if len(dest) <= 4:
+        return "***"
+    return f"{'*' * (len(dest) - 4)}{dest[-4:]}"
+
+
 def request_otp(db: Session, data: OTPRequest) -> OTPRequestResponse:
     code = generate_otp_code()
     target = data.target.strip()
@@ -336,12 +348,83 @@ def request_otp(db: Session, data: OTPRequest) -> OTPRequestResponse:
         expires_at=expires_at,
     )
     db.add(otp_rec)
-    db.commit()
+    db.flush()
 
-    return OTPRequestResponse(
-        message="Verification code generated",
-        expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
-        dev_otp=code if (not settings.is_production and settings.OTP_TEST_ECHO) else None,
+    subject = "CollegeBites Verification Code (OTP)"
+    body = (
+        f"Your CollegeBites verification code for {data.purpose.replace('_', ' ')} is: {code}\n\n"
+        f"This code expires in {settings.OTP_EXPIRY_MINUTES} minutes. Never share your OTP with anyone."
+    )
+    allow_dev_echo = bool(not settings.is_production and settings.OTP_TEST_ECHO)
+
+    if "@" in target:
+        ok, status_detail = send_email(target, subject, body)
+        if not ok:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Could not deliver OTP email ({status_detail}). Verify email address or SMTP settings.",
+            )
+        db.commit()
+        masked = _mask_otp_destination(target)
+        return OTPRequestResponse(
+            message=f"Verification code sent to email {masked}" if status_detail == "sent" else "Verification code generated (dev log)",
+            expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
+            dev_otp=code if (allow_dev_echo and status_detail != "sent") else None,
+            delivery_channel="email" if status_detail == "sent" else "dev_echo",
+            masked_destination=masked,
+        )
+
+    # Mobile phone target: try live SMS provider first
+    if settings.SMS_PROVIDER in ("twilio", "webhook"):
+        ok, status_detail = send_sms_or_whatsapp(target, f"CollegeBites OTP: {code} (valid {settings.OTP_EXPIRY_MINUTES} min)", channel="sms")
+        if ok and status_detail.startswith("dispatched"):
+            db.commit()
+            masked = _mask_otp_destination(target)
+            return OTPRequestResponse(
+                message=f"Verification code sent via SMS to {masked}",
+                expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
+                dev_otp=None,
+                delivery_channel="sms",
+                masked_destination=masked,
+            )
+        if settings.is_production or status_detail != "logged":
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"SMS OTP delivery failed ({status_detail}). Try using your email address instead.",
+            )
+
+    # Fallback: if a registered user with this phone has an email & SMTP is configured, send real Email OTP
+    matched_user = _find_user_by_identifier(db, target)
+    if matched_user and matched_user.email and settings.SMTP_HOST:
+        ok, status_detail = send_email(matched_user.email, subject, body)
+        if ok and status_detail == "sent":
+            db.commit()
+            masked = _mask_otp_destination(matched_user.email)
+            return OTPRequestResponse(
+                message=f"SMS unavailable; verification code sent to registered email {masked}",
+                expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
+                dev_otp=None,
+                delivery_channel="email",
+                masked_destination=masked,
+            )
+
+    if allow_dev_echo:
+        send_sms_or_whatsapp(target, f"CollegeBites OTP: {code}", channel="sms")
+        db.commit()
+        return OTPRequestResponse(
+            message="Verification code generated (dev test mode)",
+            expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
+            dev_otp=code,
+            delivery_channel="dev_echo",
+            masked_destination=_mask_otp_destination(target),
+        )
+
+    db.rollback()
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="SMS OTP delivery is not configured for phone numbers in production. Please enter an Email address to receive your real verification code.",
     )
 
 
