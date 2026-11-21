@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
-import { LifeBuoy, QrCode, ReceiptText, User, UtensilsCrossed } from "lucide-react";
+import { LifeBuoy, ReceiptText, User, UtensilsCrossed } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 
 const HIDDEN_PREFIXES = ["/board", "/kiosk", "/kitchen", "/cashier", "/pickup", "/inventory", "/admin", "/login", "/register"];
@@ -15,7 +15,6 @@ export const MobileAppNav: React.FC = () => {
 
   const tabs = [
     { to: "/", label: "Menu", icon: UtensilsCrossed, match: (p: string) => p === "/" || p === "/checkout" },
-    { to: "/scan", label: "Scan QR", icon: QrCode, match: (p: string) => p.startsWith("/scan") },
     { to: "/orders", label: "Orders", icon: ReceiptText, match: (p: string) => p.startsWith("/orders") },
     { to: "/support", label: "Support", icon: LifeBuoy, match: (p: string) => p.startsWith("/support") },
     {
@@ -31,7 +30,7 @@ export const MobileAppNav: React.FC = () => {
       aria-label="Mobile Customer Navigation"
       className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-slate-200 bg-white/95 backdrop-blur-md shadow-[0_-4px_20px_rgba(15,23,42,0.06)] no-print pb-[env(safe-area-inset-bottom)]"
     >
-      <div className="grid grid-cols-5">
+      <div className="grid grid-cols-4">
         {tabs.map((tab) => {
           const active = tab.match(pathname);
           const Icon = tab.icon;

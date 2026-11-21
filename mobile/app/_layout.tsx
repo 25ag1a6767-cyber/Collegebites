@@ -134,14 +134,7 @@ export default function RootLayout() {
             tabBarIcon: ({ color, size }) => <Ionicons name="restaurant-outline" size={size} color={color} />,
           }}
         />
-        <Tabs.Screen
-          name="scan"
-          options={{
-            title: "Scan QR",
-            tabBarLabel: "Scan QR",
-            tabBarIcon: ({ color, size }) => <Ionicons name="qr-code-outline" size={size} color={color} />,
-          }}
-        />
+        <Tabs.Screen name="scan" options={{ href: null, title: "Scan QR" }} />
         <Tabs.Screen
           name="checkout"
           options={{

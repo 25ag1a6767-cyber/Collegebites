@@ -53,6 +53,12 @@ def test_universal_customer_registration_login_refresh_logout(client: TestClient
     after_revoke = client.post("/api/v1/auth/refresh", json={"refresh_token": new_refresh})
     assert after_revoke.status_code == 401
 
+    # Normalized 10-digit phone & formatted +91 phone + pasted whitespace password login work seamlessly
+    p_login = client.post("/api/v1/auth/login", json={"identifier": "9123456789", "password": " StrongPassword123 "})
+    assert p_login.status_code == 200, p_login.text
+    p_login2 = client.post("/api/v1/auth/login", json={"identifier": "+91 9123456789", "password": "StrongPassword123"})
+    assert p_login2.status_code == 200, p_login2.text
+
 
 def test_otp_request_and_verification(client: TestClient):
     req = client.post("/api/v1/auth/otp/request", json={"target": "+919988776655", "purpose": "guest_checkout"})

@@ -222,8 +222,27 @@ def register_customer(
 
 def login_user(db: Session, data: LoginRequest, ip_address: Optional[str] = None) -> TokenResponse:
     ident = data.identifier.strip()
-    user = db.scalar(select(User).where(or_(User.email == ident.lower(), User.phone == ident)))
-    if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
+    digits = "".join(ch for ch in ident if ch.isdigit())
+    phone_candidates = {ident}
+    if len(digits) == 10:
+        phone_candidates.add(digits)
+        phone_candidates.add(f"+91{digits}")
+        phone_candidates.add(f"91{digits}")
+    elif len(digits) == 12 and digits.startswith("91"):
+        phone_candidates.add(f"+{digits}")
+        phone_candidates.add(digits[-10:])
+    user = db.scalar(
+        select(User).where(or_(User.email == ident.lower(), User.phone.in_(phone_candidates)))
+    )
+    pw_ok = bool(
+        user
+        and user.password_hash
+        and (
+            verify_password(data.password, user.password_hash)
+            or (data.password != data.password.strip() and verify_password(data.password.strip(), user.password_hash))
+        )
+    )
+    if not user or not pw_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",

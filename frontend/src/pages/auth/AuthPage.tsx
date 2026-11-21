@@ -56,7 +56,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
   const doLogin = async (idVal: string, pwVal: string, redirectPath?: string) => {
     setLoading(true);
     try {
-      const res = await api.post("/auth/login", { identifier: idVal, password: pwVal });
+      const res = await api.post("/auth/login", { identifier: idVal.trim(), password: pwVal.trim() });
       setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
       pushToast(`Welcome back, ${res.data.user.full_name}!`, "success");
       routeAfterAuth(res.data.user.roles || [], redirectPath);
