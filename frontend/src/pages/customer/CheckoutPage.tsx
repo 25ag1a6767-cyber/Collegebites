@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, CreditCard, ShieldAlert, Smartphone, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CreditCard, ShieldAlert, Trash2 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings, Order } from "../../types";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
+import { openRazorpayModal } from "../../utils/razorpay";
 
 export const CheckoutPage: React.FC = () => {
   const navigate = useNavigate();
@@ -55,7 +56,7 @@ export const CheckoutPage: React.FC = () => {
 
   const [redeemPoints, setRedeemPoints] = useState(0);
   const [slotId, setSlotId] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState<"razorpay" | "stripe" | "cash" | "pay_at_pickup">("razorpay");
+  const [paymentMethod, setPaymentMethod] = useState<"razorpay" | "stripe">("razorpay");
   const [orderType, setOrderType] = useState<"pickup" | "dine_in" | "qr_table">(
     selectedTableId ? "qr_table" : "pickup"
   );
@@ -63,15 +64,15 @@ export const CheckoutPage: React.FC = () => {
 
   // Guest info & OTP state
   const [guestName, setGuestName] = useState("");
+  const [guestEmail, setGuestEmail] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [otpCode, setOtpCode] = useState("");
   const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [otpVerifiedToken, setOtpVerifiedToken] = useState<string | null>(null);
   const [otpSent, setOtpSent] = useState(false);
 
-  // Razorpay / Note modal state
+  // Gateway Checkout Sheet / Note modal state
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
-  const [rzpMethod, setRzpMethod] = useState("upi");
   const [noteModalItem, setNoteModalItem] = useState<{ id: string; note: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [idemKey] = useState(() => "cb-idem-" + Date.now() + "-" + Math.random().toString(36).slice(2));
@@ -100,27 +101,30 @@ export const CheckoutPage: React.FC = () => {
     }
   };
 
+  const guestOtpTarget = guestEmail.trim() || guestPhone.trim();
+
   const sendGuestOtp = async () => {
-    if (!guestPhone.trim()) return pushToast("Enter your mobile number first", "error");
+    if (!guestOtpTarget) return pushToast("Enter your email address or mobile number first", "error");
     try {
-      const res = await api.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
+      const res = await api.post("/auth/otp/request", { target: guestOtpTarget, purpose: "guest_checkout" });
       setOtpSent(true);
       setDevOtpHint(res.data.dev_otp || null);
-      pushToast("OTP sent to your mobile number", "success");
+      pushToast(res.data.message || "OTP sent!", "success");
     } catch (err) {
       pushToast(getApiError(err, "Failed to send OTP"), "error");
     }
   };
 
   const verifyGuestOtp = async () => {
+    if (!guestOtpTarget) return pushToast("Enter your email or mobile number first", "error");
     try {
       const res = await api.post("/auth/otp/verify", {
-        target: guestPhone.trim(),
+        target: guestOtpTarget,
         purpose: "guest_checkout",
         code: otpCode.trim(),
       });
       setOtpVerifiedToken(res.data.verification_token);
-      pushToast("Mobile verified!", "success");
+      pushToast("Verified for guest checkout!", "success");
     } catch (err) {
       pushToast(getApiError(err, "Invalid OTP"), "error");
     }
@@ -145,7 +149,8 @@ export const CheckoutPage: React.FC = () => {
         redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
         idempotency_key: idemKey,
         guest_name: !user ? guestName : null,
-        guest_phone: !user ? guestPhone : null,
+        guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
+        guest_email: !user && guestEmail.trim() ? guestEmail.trim() : null,
         guest_otp_verification_token: !user ? otpVerifiedToken : null,
         accepted_policy: acceptedPolicy,
       });
@@ -157,56 +162,30 @@ export const CheckoutPage: React.FC = () => {
       qc.invalidateQueries({ queryKey: ["cart", activeCanteen.id] });
 
       if (paymentMethod === "razorpay") {
-        if (ord.razorpay_key_id && ord.razorpay_key_id !== "rzp_test_collegebites_local") {
-          const loaded = await new Promise<boolean>((resolve) => {
-            if ((window as any).Razorpay) return resolve(true);
-            const script = document.createElement("script");
-            script.src = "https://checkout.razorpay.com/v1/checkout.js";
-            script.onload = () => resolve(true);
-            script.onerror = () => resolve(false);
-            document.body.appendChild(script);
+        if (ord.razorpay_order_id && ord.razorpay_key_id) {
+          const opened = await openRazorpayModal({
+            order: ord,
+            prefill: !user
+              ? { name: guestName.trim() || undefined, email: guestEmail.trim() || undefined, contact: guestPhone.trim() || undefined }
+              : { name: user.full_name, email: user.email || undefined, contact: user.phone || undefined },
+            description: `${college?.college_name || "CollegeBites"} • ${ord.order_number}`,
+            onVerified: (verified) => {
+              pushToast(`Payment Verified! Token: ${verified.pickup_token_code}`, "success");
+              setPendingOrder(null);
+              navigate(`/orders/${verified.order_number}`);
+            },
+            onError: (err) => pushToast(getApiError(err, "Razorpay signature verification failed"), "error"),
+            onDismiss: () => navigate(`/orders/${ord.order_number}`),
           });
-          if (loaded && (window as any).Razorpay) {
-            const rzp = new (window as any).Razorpay({
-              key: ord.razorpay_key_id,
-              order_id: ord.razorpay_order_id,
-              name: college?.college_name || "CollegeBites",
-              description: `Order ${ord.order_number}`,
-              handler: async (response: any) => {
-                try {
-                  const verified = await api.post<Order>("/payments/razorpay/verify", {
-                    order_id: ord.id,
-                    razorpay_order_id: response.razorpay_order_id,
-                    razorpay_payment_id: response.razorpay_payment_id,
-                    razorpay_signature: response.razorpay_signature,
-                    payment_method: "upi",
-                  });
-                  pushToast(`Payment Verified! Token: ${verified.data.pickup_token_code}`, "success");
-                  navigate(`/orders/${verified.data.order_number}`);
-                } catch (err) {
-                  pushToast(getApiError(err, "Razorpay signature verification failed"), "error");
-                }
-              },
-              modal: {
-                ondismiss: () => navigate(`/orders/${ord.order_number}`),
-              },
-            });
-            rzp.open();
-            return;
-          }
+          if (opened) return;
         }
-        setRzpMethod("upi");
         setPendingOrder(ord);
-      } else if (paymentMethod === "stripe") {
+      } else {
         if (ord.stripe_checkout_url) {
           window.location.href = ord.stripe_checkout_url;
           return;
         }
-        setRzpMethod("card");
         setPendingOrder(ord);
-      } else {
-        pushToast("Order placed! Complete payment at counter to generate pickup token.", "info");
-        navigate(`/orders/${ord.order_number}`);
       }
     } catch (err) {
       pushToast(getApiError(err, "Checkout failed"), "error");
@@ -215,57 +194,26 @@ export const CheckoutPage: React.FC = () => {
     }
   };
 
-  const signHmacHex = async (secret: string, message: string): Promise<string> => {
-    const enc = new TextEncoder();
-    const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const sigBuf = await crypto.subtle.sign("HMAC", key, enc.encode(message));
-    return Array.from(new Uint8Array(sigBuf))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-  };
-
-  const completeGatewayTestVerification = async () => {
+  const launchGatewayCheckout = async () => {
     if (!pendingOrder) return;
-    setBusy(true);
-    try {
-      let verified: { data: Order };
-      if (pendingOrder.payment_method === "stripe" && pendingOrder.stripe_session_id) {
-        const piId = "pi_web_" + Date.now();
-        const sigHex = await signHmacHex(
-          import.meta.env.VITE_STRIPE_TEST_SECRET || "sk_test_collegebites_local",
-          `${pendingOrder.stripe_session_id}|${piId}`
-        );
-        verified = await api.post<Order>("/payments/stripe/verify", {
-          order_id: pendingOrder.id,
-          stripe_session_id: pendingOrder.stripe_session_id,
-          stripe_payment_intent_id: piId,
-          stripe_signature: sigHex,
-          payment_method: rzpMethod,
-        });
-      } else if (pendingOrder.razorpay_order_id) {
-        const paymentId = "pay_web_" + Date.now();
-        const sigHex = await signHmacHex(
-          import.meta.env.VITE_RAZORPAY_TEST_SECRET || "rzp_test_secret_collegebites_local",
-          `${pendingOrder.razorpay_order_id}|${paymentId}`
-        );
-        verified = await api.post<Order>("/payments/razorpay/verify", {
-          order_id: pendingOrder.id,
-          razorpay_order_id: pendingOrder.razorpay_order_id,
-          razorpay_payment_id: paymentId,
-          razorpay_signature: sigHex,
-          payment_method: rzpMethod,
-        });
-      } else {
-        throw new Error("Missing gateway payment reference");
-      }
-      pushToast(`Payment Verified! Pickup Token: ${verified.data.pickup_token_code}`, "success");
-      setPendingOrder(null);
-      navigate(`/orders/${verified.data.order_number}`);
-    } catch (err) {
-      pushToast(getApiError(err, "Payment verification failed"), "error");
-    } finally {
-      setBusy(false);
+    if (pendingOrder.payment_method === "stripe" && pendingOrder.stripe_checkout_url) {
+      window.location.href = pendingOrder.stripe_checkout_url;
+      return;
     }
+    if (pendingOrder.razorpay_order_id && pendingOrder.razorpay_key_id) {
+      const opened = await openRazorpayModal({
+        order: pendingOrder,
+        description: `${college?.college_name || "CollegeBites"} • ${pendingOrder.order_number}`,
+        onVerified: (verified) => {
+          pushToast(`Payment Verified! Pickup Token: ${verified.pickup_token_code}`, "success");
+          setPendingOrder(null);
+          navigate(`/orders/${verified.order_number}`);
+        },
+        onError: (err) => pushToast(getApiError(err, "Payment verification failed"), "error"),
+      });
+      if (opened) return;
+    }
+    pushToast("Gateway checkout URL/key is not configured in this environment.", "error");
   };
 
   const simulatePaymentFailure = async () => {
@@ -377,10 +325,14 @@ export const CheckoutPage: React.FC = () => {
                 <h2 className="font-bold text-slate-900">Guest Ordering Details</h2>
                 <Badge tone="blue">No Registration Needed</Badge>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-3">
                 <div>
                   <label className="mb-1 block text-xs font-bold text-slate-700">Your Name *</label>
                   <Input value={guestName} onChange={(e) => setGuestName(e.target.value)} placeholder="Visitor / Student Name" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-slate-700">Email (For OTP)</label>
+                  <Input type="email" value={guestEmail} onChange={(e) => setGuestEmail(e.target.value)} placeholder="you@college.edu" />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-bold text-slate-700">Mobile Number *</label>
@@ -396,7 +348,7 @@ export const CheckoutPage: React.FC = () => {
               {college?.guest_otp_required && otpSent && !otpVerifiedToken && (
                 <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 space-y-2">
                   <div className="text-xs font-semibold text-amber-900">
-                    Enter 6-digit OTP to verify mobile {devOtpHint ? `(Dev OTP: ${devOtpHint})` : ""}
+                    Enter 6-digit OTP to verify contact {devOtpHint ? `(Dev OTP: ${devOtpHint})` : ""}
                   </div>
                   <div className="flex gap-2 max-w-xs">
                     <Input value={otpCode} onChange={(e) => setOtpCode(e.target.value)} placeholder="123456" maxLength={6} />
@@ -440,8 +392,11 @@ export const CheckoutPage: React.FC = () => {
             </div>
 
             <div>
-              <label className="mb-2 block text-xs font-bold text-slate-700">Payment Method</label>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="mb-2 flex items-center justify-between">
+                <label className="text-xs font-bold text-slate-700">Online Payment Gateway</label>
+                <Badge tone="green">Online Only • No Cash</Badge>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
                 {activeCanteen?.allow_online_payment && (
                   <>
                     {(college?.razorpay_enabled ?? true) && (
@@ -471,31 +426,6 @@ export const CheckoutPage: React.FC = () => {
                       </button>
                     )}
                   </>
-                )}
-                {activeCanteen?.allow_cash_at_counter && (
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod("cash")}
-                    className={`rounded-xl border p-3 text-left text-xs font-bold ${
-                      paymentMethod === "cash" ? "border-orange-600 bg-orange-50 text-orange-900" : "border-slate-200"
-                    }`}
-                  >
-                    <Smartphone className="h-4 w-4 mb-1 text-slate-700" />
-                    Cash at Counter
-                    <div className="font-normal text-slate-500">Token issued after cashier confirms</div>
-                  </button>
-                )}
-                {activeCanteen?.allow_pay_at_pickup && (
-                  <button
-                    type="button"
-                    onClick={() => setPaymentMethod("pay_at_pickup")}
-                    className={`rounded-xl border p-3 text-left text-xs font-bold ${
-                      paymentMethod === "pay_at_pickup" ? "border-orange-600 bg-orange-50 text-orange-900" : "border-slate-200"
-                    }`}
-                  >
-                    Pay at Pickup
-                    <div className="font-normal text-slate-500">Token issued on payment</div>
-                  </button>
                 )}
               </div>
             </div>
@@ -597,14 +527,14 @@ export const CheckoutPage: React.FC = () => {
     </div>
       )}
 
-      {/* Razorpay / Stripe Payment Verification Sheet */}
+      {/* Gateway Checkout Modal */}
       <Modal
         open={Boolean(pendingOrder)}
         onClose={() => {}}
         title={pendingOrder?.payment_method === "stripe" ? "Stripe Checkout" : "Razorpay Checkout"}
       >
         {pendingOrder && (
-          <div className="space-y-4">
+          <div className="space-y-4" data-order-id={pendingOrder.id} data-order-number={pendingOrder.order_number}>
             <div className="rounded-xl bg-slate-900 p-4 text-white flex items-center justify-between">
               <div>
                 <div className="text-xs text-slate-400">CollegeBites • {pendingOrder.order_number}</div>
@@ -617,50 +547,30 @@ export const CheckoutPage: React.FC = () => {
               </Badge>
             </div>
 
-            <div>
-              <label className="mb-1.5 block text-xs font-bold text-slate-700">
-                {pendingOrder.payment_method === "stripe" ? "Select Stripe Method" : "Select Razorpay Method"}
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                {(pendingOrder.payment_method === "stripe"
-                  ? [
-                      { id: "card", label: "Credit / Debit Card" },
-                      { id: "apple_pay", label: "Apple Pay / Express" },
-                      { id: "google_pay", label: "Google Pay" },
-                      { id: "link", label: "Stripe Link" },
-                    ]
-                  : [
-                      { id: "upi", label: "UPI (GPay / PhonePe)" },
-                      { id: "card", label: "Debit / Credit Card" },
-                      { id: "netbanking", label: "Net Banking" },
-                      { id: "wallet", label: "Supported Wallets" },
-                    ]
-                ).map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => setRzpMethod(m.id)}
-                    className={`rounded-xl border px-3 py-2 text-xs font-bold ${
-                      rzpMethod === m.id ? "border-orange-600 bg-orange-50 text-orange-900" : "border-slate-200"
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs text-slate-600 flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
               <span>
-                Backend verifies cryptographic HMAC signature before generating your Pickup Token, QR code & printable receipt.
+                {pendingOrder.stripe_checkout_url || pendingOrder.razorpay_key_id
+                  ? "Backend verifies cryptographic gateway HMAC/webhook signature before generating your Pickup Token, QR code & printable receipt."
+                  : "Live gateway credentials are not configured in this environment. Track your pending order or cancel to retry."}
               </span>
             </div>
 
-            <div className="flex gap-2">
-              <Button variant="success" className="flex-1" disabled={busy} onClick={completeGatewayTestVerification}>
-                Complete & Verify Payment
-              </Button>
+            <div className="flex flex-wrap gap-2">
+              {(pendingOrder.stripe_checkout_url || pendingOrder.razorpay_key_id) ? (
+                <Button variant="success" className="flex-1" disabled={busy} onClick={launchGatewayCheckout}>
+                  Launch {pendingOrder.payment_method === "stripe" ? "Stripe" : "Razorpay"} Checkout
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  className="flex-1"
+                  disabled={busy}
+                  onClick={() => navigate(`/orders/${pendingOrder.order_number}`)}
+                >
+                  View Order Status
+                </Button>
+              )}
               <Button variant="outline" disabled={busy} onClick={simulatePaymentFailure}>
                 Cancel / Fail
               </Button>

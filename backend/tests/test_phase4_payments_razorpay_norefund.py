@@ -117,9 +117,13 @@ def test_razorpay_verification_webhook_idempotency_and_no_refunds(client: TestCl
     assert cancel_res.json()["payment_status"] == "CONFIRMED"
 
 
-def test_payment_failure_and_cash_counter_collection(client: TestClient):
+def test_payment_failure_and_online_only_policy(client: TestClient):
     student = login_as(client, "student@collegebites.edu", "Student@12345")
     cashier = login_as(client, "cashier@collegebites.edu", "Staff@12345")
+    admin = login_as(client, "admin@collegebites.edu", "Admin@12345")
+    main = next(c for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
+    items = client.get(f"/api/v1/menus/canteens/{main['id']}/items").json()
+    biryani = next(i for i in items if "Biryani" in i["name"])
 
     order_fail = _create_student_order(client, student["headers"], "razorpay", "idem-fail-1")
     unauth_fail = client.post(
@@ -136,19 +140,71 @@ def test_payment_failure_and_cash_counter_collection(client: TestClient):
     assert fail_res.json()["status"] == "PAYMENT_FAILED"
     assert fail_res.json()["pickup_token_code"] is None
 
-    # Cash at counter: student cannot confirm cash payment; cashier can
-    order_cash = _create_student_order(client, student["headers"], "cash", "idem-cash-1")
-    assert order_cash["pickup_token_code"] is None
-    assert client.post(
-        "/api/v1/payments/counter/collect",
-        headers=student["headers"],
-        json={"order_id": order_cash["id"], "payment_method": "cash"},
-    ).status_code == 403
+    # Strict Online-Only Policy: cash & pay_at_pickup MUST be rejected across Checkout, POS, Counter Collect, Admin & Canteen toggles
+    for bad_method in ("cash", "pay_at_pickup"):
+        bad_co = client.post(
+            "/api/v1/orders/checkout",
+            headers=student["headers"],
+            json={
+                "canteen_id": main["id"],
+                "payment_method": bad_method,
+                "idempotency_key": f"idem-bad-{bad_method}",
+                "use_cart": False,
+                "accepted_policy": True,
+                "direct_items": [{"food_item_id": biryani["id"], "quantity": 1}],
+            },
+        )
+        assert bad_co.status_code == 400
+
+    assert (
+        client.post(
+            "/api/v1/pos/orders",
+            headers=cashier["headers"],
+            json={"canteen_id": main["id"], "payment_method": "cash", "items": [{"food_item_id": biryani["id"], "quantity": 1}]},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/api/v1/payments/counter/collect",
+            headers=cashier["headers"],
+            json={"order_id": order_fail["id"], "payment_method": "cash"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/api/v1/admin/college",
+            headers=admin["headers"],
+            json={"cash_at_counter_enabled": True},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.patch(
+            f"/api/v1/admin/canteens/{main['id']}",
+            headers=admin["headers"],
+            json={"allow_pay_at_pickup": True},
+        ).status_code
+        == 400
+    )
+
+    # Counter digital POS (upi_pos / card_pos): student cannot confirm counter payment; cashier can
+    order_pending = _create_student_order(client, student["headers"], "razorpay", "idem-pos-digital-1")
+    assert order_pending["pickup_token_code"] is None
+    assert (
+        client.post(
+            "/api/v1/payments/counter/collect",
+            headers=student["headers"],
+            json={"order_id": order_pending["id"], "payment_method": "upi_pos"},
+        ).status_code
+        == 403
+    )
 
     collected = client.post(
         "/api/v1/payments/counter/collect",
         headers=cashier["headers"],
-        json={"order_id": order_cash["id"], "payment_method": "cash"},
+        json={"order_id": order_pending["id"], "payment_method": "upi_pos"},
     )
     assert collected.status_code == 200
     assert collected.json()["payment_status"] == "CONFIRMED"

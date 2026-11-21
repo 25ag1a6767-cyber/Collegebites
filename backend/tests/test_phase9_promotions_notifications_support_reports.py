@@ -49,7 +49,7 @@ def test_promotions_notifications_reviews_support_and_reports(client: TestClient
     order = client.post(
         "/api/v1/pos/orders",
         headers=cashier["headers"],
-        json={"canteen_id": canteen["id"], "payment_method": "cash", "items": [{"food_item_id": biryani["id"], "quantity": 2}]},
+        json={"canteen_id": canteen["id"], "payment_method": "upi_pos", "items": [{"food_item_id": biryani["id"], "quantity": 2}]},
     ).json()
 
     # 3. Review updates item rating

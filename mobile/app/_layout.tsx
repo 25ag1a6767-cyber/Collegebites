@@ -27,8 +27,8 @@ const ONBOARDING_SLIDES = [
   },
   {
     icon: "card-outline" as const,
-    title: "Pay Online or at Counter",
-    body: "Checkout as a student or OTP-verified guest using Razorpay, Stripe, Counter Cash, or Pay at Pickup — backed by server validation.",
+    title: "Pay Online Instantly",
+    body: "Checkout as a student or OTP-verified guest using Razorpay or Stripe — backed by server verification.",
   },
   {
     icon: "qr-code-outline" as const,

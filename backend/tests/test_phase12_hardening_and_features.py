@@ -259,7 +259,7 @@ def test_rbac_canteen_isolation_ssrf_printing_holidays_and_schedules(client: Tes
         headers=student["headers"],
         json={
             "canteen_id": main["id"],
-            "payment_method": "cash",
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": coffee["id"], "quantity": 1}],
             "accepted_policy": True,
@@ -303,7 +303,7 @@ def test_rbac_canteen_isolation_ssrf_printing_holidays_and_schedules(client: Tes
     pos_ord = client.post(
         "/api/v1/pos/orders",
         headers=cashier["headers"],
-        json={"canteen_id": main["id"], "payment_method": "cash", "items": [{"food_item_id": coffee["id"], "quantity": 1}]},
+        json={"canteen_id": main["id"], "payment_method": "upi_pos", "items": [{"food_item_id": coffee["id"], "quantity": 1}]},
     )
     assert pos_ord.status_code == 201
     ono = pos_ord.json()["order_number"]
@@ -632,7 +632,7 @@ def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: 
     pos = client.post(
         "/api/v1/pos/orders",
         headers=cashier["headers"],
-        json={"canteen_id": mid, "payment_method": "cash", "items": [{"food_item_id": coffee["id"], "quantity": 1}]},
+        json={"canteen_id": mid, "payment_method": "upi_pos", "items": [{"food_item_id": coffee["id"], "quantity": 1}]},
     )
     assert pos.status_code == 201
     basil_after = next(

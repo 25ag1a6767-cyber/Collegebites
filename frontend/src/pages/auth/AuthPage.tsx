@@ -5,15 +5,17 @@ import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
-const DEMO_USERS = [
-  { label: "Student (Customer)", id: "student@collegebites.edu", pw: "Student@12345", dest: "/" },
-  { label: "Kitchen Staff", id: "kitchen@collegebites.edu", pw: "Staff@12345", dest: "/kitchen" },
-  { label: "Cashier POS", id: "cashier@collegebites.edu", pw: "Staff@12345", dest: "/cashier" },
-  { label: "Pickup Scanner", id: "pickup@collegebites.edu", pw: "Staff@12345", dest: "/pickup" },
-  { label: "Inventory Manager", id: "inventory@collegebites.edu", pw: "Staff@12345", dest: "/inventory" },
-  { label: "Canteen Manager", id: "manager@collegebites.edu", pw: "Staff@12345", dest: "/admin" },
-  { label: "College Admin", id: "admin@collegebites.edu", pw: "Admin@12345", dest: "/admin" },
-];
+const DEMO_USERS = import.meta.env.DEV
+  ? [
+      { label: "Student (Customer)", id: "student@collegebites.edu", pw: "Student@12345", dest: "/" },
+      { label: "Kitchen Staff", id: "kitchen@collegebites.edu", pw: "Staff@12345", dest: "/kitchen" },
+      { label: "Cashier POS", id: "cashier@collegebites.edu", pw: "Staff@12345", dest: "/cashier" },
+      { label: "Pickup Scanner", id: "pickup@collegebites.edu", pw: "Staff@12345", dest: "/pickup" },
+      { label: "Inventory Manager", id: "inventory@collegebites.edu", pw: "Staff@12345", dest: "/inventory" },
+      { label: "Canteen Manager", id: "manager@collegebites.edu", pw: "Staff@12345", dest: "/admin" },
+      { label: "College Admin", id: "admin@collegebites.edu", pw: "Admin@12345", dest: "/admin" },
+    ]
+  : [];
 
 export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ initialMode = "login" }) => {
   const [mode, setMode] = useState<"login" | "register">(initialMode);
@@ -71,7 +73,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
       const res = await api.post("/auth/otp/request", { target: identifier.trim(), purpose: "login" });
       setOtpSent(true);
       setDevOtpHint(res.data.dev_otp || null);
-      pushToast("Login OTP sent!", "success");
+      pushToast(res.data.message || "Login OTP sent!", "success");
     } catch (err) {
       pushToast(getApiError(err, "Could not request OTP"), "error");
     } finally {
@@ -122,7 +124,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
-      <div className="grid gap-6 md:grid-cols-2">
+      <div className={import.meta.env.DEV ? "grid gap-6 md:grid-cols-2" : "mx-auto max-w-lg"}>
         <Card className="p-6 md:p-8">
           <div className="flex items-center gap-3 mb-6">
             <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-orange-600 text-white">
@@ -341,38 +343,40 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
           )}
 
           <div className="mt-5 rounded-xl bg-orange-50 p-3 text-xs text-orange-900">
-            <strong>Visiting campus?</strong> You can also skip login and order directly as a <strong>Guest</strong> at checkout with quick mobile OTP verification.
+            <strong>Visiting campus?</strong> You can also skip login and order directly as a <strong>Guest</strong> at checkout with quick email or mobile OTP verification.
           </div>
         </Card>
 
-        <Card className="p-6 md:p-8 bg-slate-900 text-white border-slate-800">
-          <div className="flex items-center gap-2 mb-3">
-            <ShieldCheck className="h-5 w-5 text-orange-400" />
-            <h2 className="text-lg font-extrabold">Role Workspaces (Seeded Dev Accounts)</h2>
-          </div>
-          <p className="text-xs text-slate-400 mb-5">
-            One-click sign-in for local testing across customer, kitchen, cashier POS, pickup verification, inventory & administration roles.
-          </p>
-          <div className="space-y-2.5">
-            {DEMO_USERS.map((d) => (
-              <button
-                key={d.id}
-                type="button"
-                disabled={loading}
-                onClick={() => doLogin(d.id, d.pw, d.dest)}
-                className="flex w-full items-center justify-between rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-left transition hover:border-orange-500 hover:bg-slate-800"
-              >
-                <div>
-                  <div className="text-sm font-bold text-white">{d.label}</div>
-                  <div className="text-[11px] text-slate-400">{d.id}</div>
-                </div>
-                <Badge tone="default" className="bg-orange-500/20 text-orange-300 border-orange-500/40">
-                  <Sparkles className="h-3 w-3" /> Launch
-                </Badge>
-              </button>
-            ))}
-          </div>
-        </Card>
+        {import.meta.env.DEV && (
+          <Card className="p-6 md:p-8 bg-slate-900 text-white border-slate-800">
+            <div className="flex items-center gap-2 mb-3">
+              <ShieldCheck className="h-5 w-5 text-orange-400" />
+              <h2 className="text-lg font-extrabold">Role Workspaces (Seeded Dev Accounts)</h2>
+            </div>
+            <p className="text-xs text-slate-400 mb-5">
+              One-click sign-in for local testing across customer, kitchen, cashier POS, pickup verification, inventory & administration roles.
+            </p>
+            <div className="space-y-2.5">
+              {DEMO_USERS.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  disabled={loading}
+                  onClick={() => doLogin(d.id, d.pw, d.dest)}
+                  className="flex w-full items-center justify-between rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-left transition hover:border-orange-500 hover:bg-slate-800"
+                >
+                  <div>
+                    <div className="text-sm font-bold text-white">{d.label}</div>
+                    <div className="text-[11px] text-slate-400">{d.id}</div>
+                  </div>
+                  <Badge tone="default" className="bg-orange-500/20 text-orange-300 border-orange-500/40">
+                    <Sparkles className="h-3 w-3" /> Launch
+                  </Badge>
+                </button>
+              ))}
+            </div>
+          </Card>
+        )}
       </div>
     </div>
   );

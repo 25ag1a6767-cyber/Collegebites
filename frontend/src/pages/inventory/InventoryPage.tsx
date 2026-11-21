@@ -15,13 +15,15 @@ import {
   Search,
   ShieldAlert,
   Truck,
+  Upload,
+  UtensilsCrossed,
 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 
-type SectionTab = "all" | "items" | "stock" | "pricing" | "suppliers" | "recipes" | "audit";
+type SectionTab = "all" | "items" | "menu" | "stock" | "pricing" | "suppliers" | "recipes" | "audit";
 
 export const InventoryPage: React.FC = () => {
   const { user, selectedCanteenId } = useAppStore();
@@ -94,6 +96,12 @@ export const InventoryPage: React.FC = () => {
     queryFn: async () => (await api.get(`/menus/canteens/${activeId}/items?include_inactive=true`)).data,
   });
 
+  const { data: foodCategories = [], refetch: refetchFoodCategories } = useQuery<any[]>({
+    queryKey: ["inv-food-categories", activeId],
+    enabled: Boolean(activeId),
+    queryFn: async () => (await api.get(`/menus/canteens/${activeId}/categories?include_inactive=true`)).data,
+  });
+
   const { data: movements = [], refetch: refetchMovements } = useQuery<any[]>({
     queryKey: ["inv-movements", activeId],
     enabled: Boolean(activeId),
@@ -121,6 +129,7 @@ export const InventoryPage: React.FC = () => {
     refetchPrices();
     refetchAudit();
     refetchMenu();
+    refetchFoodCategories();
   };
 
   // Add Item Form State (Section 3.3)
@@ -153,6 +162,24 @@ export const InventoryPage: React.FC = () => {
   const [editAvail, setEditAvail] = useState(true);
   const [editAllergen, setEditAllergen] = useState(false);
   const [editReason, setEditReason] = useState("");
+
+  // Customer Menu Management State (Inventory Manager menu ops; selling price updates remain approval-gated)
+  const [newMenuCatName, setNewMenuCatName] = useState("");
+  const [newFoodCatId, setNewFoodCatId] = useState("");
+  const [newFoodName, setNewFoodName] = useState("");
+  const [newFoodDesc, setNewFoodDesc] = useState("");
+  const [newFoodPrice, setNewFoodPrice] = useState("");
+  const [newFoodPrepMins, setNewFoodPrepMins] = useState("10");
+  const [newFoodVeg, setNewFoodVeg] = useState(true);
+  const [editFood, setEditFood] = useState<any | null>(null);
+  const [editFoodName, setEditFoodName] = useState("");
+  const [editFoodCatId, setEditFoodCatId] = useState("");
+  const [editFoodDesc, setEditFoodDesc] = useState("");
+  const [editFoodPrepMins, setEditFoodPrepMins] = useState("10");
+  const [editFoodVeg, setEditFoodVeg] = useState(true);
+  const [editFoodAvail, setEditFoodAvail] = useState(true);
+  const [editFoodActive, setEditFoodActive] = useState(true);
+  const [uploadingFoodId, setUploadingFoodId] = useState<string | null>(null);
 
   // Item History Drawer / Modal
   const [historyItem, setHistoryItem] = useState<any | null>(null);
@@ -324,6 +351,7 @@ export const InventoryPage: React.FC = () => {
           [
             { k: "all", l: "All Modules" },
             { k: "items", l: `All Inventory Items (${dashboard?.total_inventory_items ?? 0})` },
+            { k: "menu", l: `Customer Menu (${menuItems.length})` },
             { k: "stock", l: "Stock Ops, Loss & Transfers" },
             {
               k: "pricing",
@@ -1280,6 +1308,335 @@ export const InventoryPage: React.FC = () => {
           </Card>
         )}
       </div>
+
+      {/* Customer-Facing Menu Management (Add Items, Categories, Images & Availability; Selling Prices Approval-Gated) */}
+      {showBlock("menu") && (
+        <div className="grid gap-6 lg:grid-cols-3">
+          <Card className="p-5 lg:col-span-2 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <UtensilsCrossed className="h-4 w-4 text-orange-600" />
+                <h2 className="font-bold text-slate-900">Customer Menu Catalog ({menuItems.length})</h2>
+              </div>
+              <Badge tone="amber">Selling Price Changes Approval-Gated</Badge>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 text-left text-slate-500">
+                  <tr>
+                    <th className="p-2">Dish</th>
+                    <th className="p-2">Category</th>
+                    <th className="p-2">Live Selling Price</th>
+                    <th className="p-2">Status</th>
+                    <th className="p-2">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {menuItems.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="p-4 text-center text-slate-500">
+                        No food items configured for this canteen yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    menuItems.map((m) => (
+                      <tr key={m.id}>
+                        <td className="p-2">
+                          <div className="flex items-center gap-2">
+                            {m.images?.[0]?.image_url ? (
+                              <img
+                                src={m.images[0].image_url}
+                                alt={m.name}
+                                className="h-8 w-8 rounded-lg object-cover border border-slate-200"
+                              />
+                            ) : (
+                              <div className="h-8 w-8 rounded-lg bg-slate-100 flex items-center justify-center text-[10px] text-slate-400">
+                                No Img
+                              </div>
+                            )}
+                            <div>
+                              <div className="font-bold text-slate-900">{m.name}</div>
+                              <div className="text-[10px] text-slate-500">
+                                {m.is_veg ? "Veg" : "Non-Veg"} • {m.prep_time_minutes}m prep
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="p-2">{m.category_name || "—"}</td>
+                        <td className="p-2 font-extrabold text-slate-900">₹{m.base_price}</td>
+                        <td className="p-2">
+                          <Badge tone={m.is_active && m.is_available ? "green" : "red"}>
+                            {!m.is_active ? "Archived" : m.is_available ? "Available" : "Out of Stock"}
+                          </Badge>
+                        </td>
+                        <td className="p-2">
+                          <div className="flex flex-wrap gap-1.5">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setEditFood(m);
+                                setEditFoodName(m.name);
+                                setEditFoodCatId(m.category_id);
+                                setEditFoodDesc(m.description || "");
+                                setEditFoodPrepMins(String(m.prep_time_minutes || 10));
+                                setEditFoodVeg(Boolean(m.is_veg));
+                                setEditFoodAvail(Boolean(m.is_available));
+                                setEditFoodActive(Boolean(m.is_active));
+                              }}
+                            >
+                              <Edit3 className="h-3 w-3" /> Edit
+                            </Button>
+                            <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50">
+                              <Upload className="h-3 w-3" />
+                              {uploadingFoodId === m.id ? "Uploading..." : "Photo"}
+                              <input
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                className="hidden"
+                                disabled={uploadingFoodId === m.id}
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  e.target.value = "";
+                                  if (!file) return;
+                                  setUploadingFoodId(m.id);
+                                  try {
+                                    const fd = new FormData();
+                                    fd.append("file", file);
+                                    await api.post(`/menus/items/${m.id}/upload-image`, fd, {
+                                      headers: { "Content-Type": "multipart/form-data" },
+                                    });
+                                    pushToast(`Updated image for ${m.name}`, "success");
+                                    refreshAll();
+                                  } catch (err) {
+                                    pushToast(getApiError(err, "Image upload failed"), "error");
+                                  } finally {
+                                    setUploadingFoodId(null);
+                                  }
+                                }}
+                              />
+                            </label>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={async () => {
+                                try {
+                                  await api.patch(`/menus/items/${m.id}`, { is_available: !m.is_available });
+                                  pushToast(`${m.name} marked ${!m.is_available ? "Available" : "Unavailable"}`, "success");
+                                  refreshAll();
+                                } catch (err) {
+                                  pushToast(getApiError(err), "error");
+                                }
+                              }}
+                            >
+                              {m.is_available ? "Pause" : "Enable"}
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          <Card className="p-5 space-y-4">
+            <div className="space-y-2 border-b border-slate-100 pb-3">
+              <div className="text-xs font-extrabold uppercase text-slate-600">Add Menu Category</div>
+              <div className="flex gap-2">
+                <Input
+                  value={newMenuCatName}
+                  onChange={(e) => setNewMenuCatName(e.target.value)}
+                  placeholder="e.g. Beverages"
+                />
+                <Button
+                  size="sm"
+                  disabled={!newMenuCatName.trim()}
+                  onClick={async () => {
+                    const slug = newMenuCatName
+                      .trim()
+                      .toLowerCase()
+                      .replace(/[^a-z0-9]+/g, "-")
+                      .replace(/^-|-$/g, "");
+                    try {
+                      const created = await api.post("/menus/categories", {
+                        canteen_id: activeId,
+                        name: newMenuCatName.trim(),
+                        slug: slug || `cat-${Date.now()}`,
+                      });
+                      setNewMenuCatName("");
+                      setNewFoodCatId(created.data.id);
+                      pushToast("Menu category created", "success");
+                      refreshAll();
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
+                  }}
+                >
+                  Add
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2.5 text-xs">
+              <div className="font-extrabold uppercase text-slate-600">Add Customer Menu Item</div>
+              <Select value={newFoodCatId || foodCategories[0]?.id || ""} onChange={(e) => setNewFoodCatId(e.target.value)}>
+                <option value="">Select Category</option>
+                {foodCategories.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </Select>
+              <Input value={newFoodName} onChange={(e) => setNewFoodName(e.target.value)} placeholder="Dish Name *" />
+              <Input value={newFoodDesc} onChange={(e) => setNewFoodDesc(e.target.value)} placeholder="Short description" />
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  type="number"
+                  min="1"
+                  step="0.01"
+                  value={newFoodPrice}
+                  onChange={(e) => setNewFoodPrice(e.target.value)}
+                  placeholder="Initial Price ₹ *"
+                />
+                <Input
+                  type="number"
+                  min="1"
+                  max="180"
+                  value={newFoodPrepMins}
+                  onChange={(e) => setNewFoodPrepMins(e.target.value)}
+                  placeholder="Prep mins"
+                />
+              </div>
+              <label className="flex items-center gap-2 font-semibold text-slate-700">
+                <input type="checkbox" checked={newFoodVeg} onChange={(e) => setNewFoodVeg(e.target.checked)} />
+                Vegetarian Dish
+              </label>
+              <Button
+                className="w-full"
+                disabled={!newFoodName.trim() || !newFoodPrice || !(newFoodCatId || foodCategories[0]?.id)}
+                onClick={async () => {
+                  const catId = newFoodCatId || foodCategories[0]?.id;
+                  if (!catId) return;
+                  const slug = `${newFoodName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${Date.now().toString().slice(-4)}`;
+                  try {
+                    await api.post("/menus/items", {
+                      canteen_id: activeId,
+                      category_id: catId,
+                      name: newFoodName.trim(),
+                      slug,
+                      description: newFoodDesc.trim() || null,
+                      base_price: newFoodPrice,
+                      prep_time_minutes: Number(newFoodPrepMins) || 10,
+                      is_veg: newFoodVeg,
+                    });
+                    setNewFoodName("");
+                    setNewFoodDesc("");
+                    setNewFoodPrice("");
+                    pushToast("Food item added to customer menu", "success");
+                    refreshAll();
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                <Plus className="h-3.5 w-3.5" /> Add Menu Item
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Edit Menu Item Modal (Non-Price Fields; Selling Price Redirects to Approval Workflow) */}
+      <Modal
+        open={Boolean(editFood)}
+        onClose={() => setEditFood(null)}
+        title={`Edit Menu Dish: ${editFood?.name || ""}`}
+        maxWidth="max-w-md"
+      >
+        {editFood && (
+          <div className="space-y-3 text-xs">
+            <div>
+              <label className="font-bold text-slate-600 block mb-1">Dish Name</label>
+              <Input value={editFoodName} onChange={(e) => setEditFoodName(e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="font-bold text-slate-600 block mb-1">Category</label>
+                <Select value={editFoodCatId} onChange={(e) => setEditFoodCatId(e.target.value)}>
+                  {foodCategories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </Select>
+              </div>
+              <div>
+                <label className="font-bold text-slate-600 block mb-1">Prep Time (mins)</label>
+                <Input type="number" min={1} max={180} value={editFoodPrepMins} onChange={(e) => setEditFoodPrepMins(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <label className="font-bold text-slate-600 block mb-1">Description</label>
+              <Input value={editFoodDesc} onChange={(e) => setEditFoodDesc(e.target.value)} />
+            </div>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5 flex items-center justify-between">
+              <div>
+                <div className="font-bold text-amber-900">Selling Price: ₹{editFood.base_price}</div>
+                <div className="text-[11px] text-amber-800">Changes require Canteen Manager / Admin approval</div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setSellFoodId(editFood.id);
+                  setEditFood(null);
+                  setSection("pricing");
+                }}
+              >
+                Request Price Change
+              </Button>
+            </div>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={editFoodVeg} onChange={(e) => setEditFoodVeg(e.target.checked)} />
+                Veg
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={editFoodAvail} onChange={(e) => setEditFoodAvail(e.target.checked)} />
+                Available
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={editFoodActive} onChange={(e) => setEditFoodActive(e.target.checked)} />
+                Active (Uncheck to Archive)
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button size="sm" variant="outline" onClick={() => setEditFood(null)}>Cancel</Button>
+              <Button
+                size="sm"
+                onClick={async () => {
+                  try {
+                    await api.patch(`/menus/items/${editFood.id}`, {
+                      name: editFoodName.trim(),
+                      category_id: editFoodCatId,
+                      description: editFoodDesc.trim() || null,
+                      prep_time_minutes: Number(editFoodPrepMins) || 10,
+                      is_veg: editFoodVeg,
+                      is_available: editFoodAvail,
+                      is_active: editFoodActive,
+                    });
+                    setEditFood(null);
+                    pushToast("Menu item updated", "success");
+                    refreshAll();
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                Save Menu Item
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* Edit Item Modal (Section 3.4) */}
       <Modal

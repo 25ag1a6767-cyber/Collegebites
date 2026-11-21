@@ -85,7 +85,7 @@ class FoodImage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     food_item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("food_items.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    image_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    image_url: Mapped[str] = mapped_column(Text, nullable=False)
     alt_text: Mapped[Optional[str]] = mapped_column(String(160))
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

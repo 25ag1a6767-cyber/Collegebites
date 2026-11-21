@@ -78,11 +78,31 @@ def upgrade() -> None:
     op.execute("UPDATE promotions SET coupon_code = NULL WHERE coupon_code IS NOT NULL")
     op.execute("DELETE FROM coupons")
 
-    # Seed website QR management permission for college_admin on existing databases
+    # Allow uploaded data URI images to persist without 500-char truncation
+    op.alter_column(
+        "food_images",
+        "image_url",
+        existing_type=sa.String(length=500),
+        type_=sa.Text(),
+        existing_nullable=False,
+    )
+
+    # Enforce online-only payments across existing college settings and canteens
+    op.execute("UPDATE college_settings SET cash_at_counter_enabled = false, pay_at_pickup_enabled = false")
+    op.execute("UPDATE canteens SET allow_cash_at_counter = false, allow_pay_at_pickup = false")
+
+    # Seed website QR management permission for college_admin and menu:manage_inventory for inventory_manager
     op.execute(
         """
         INSERT INTO permissions (id, created_at, updated_at, code, resource, action, description)
         VALUES ('9f1e2d3c-4b5a-6789-8abc-def012345678', NOW(), NOW(), 'qr:website_manage', 'qr', 'website_manage', 'qr:website_manage')
+        ON CONFLICT (code) DO NOTHING
+        """
+    )
+    op.execute(
+        """
+        INSERT INTO permissions (id, created_at, updated_at, code, resource, action, description)
+        VALUES ('8e2d1c3b-5a49-6789-8abc-def012345679', NOW(), NOW(), 'menu:manage_inventory', 'menu', 'manage_inventory', 'menu:manage_inventory')
         ON CONFLICT (code) DO NOTHING
         """
     )
@@ -95,9 +115,26 @@ def upgrade() -> None:
         ON CONFLICT DO NOTHING
         """
     )
+    op.execute(
+        """
+        INSERT INTO role_permissions (role_id, permission_id)
+        SELECT r.id, p.id
+        FROM roles r, permissions p
+        WHERE r.name = 'inventory_manager' AND p.code = 'menu:manage_inventory'
+        ON CONFLICT DO NOTHING
+        """
+    )
 
 
 def downgrade() -> None:
+    op.alter_column(
+        "food_images",
+        "image_url",
+        existing_type=sa.Text(),
+        type_=sa.String(length=500),
+        existing_nullable=False,
+        postgresql_using="LEFT(image_url, 500)",
+    )
     op.drop_index("ix_price_change_canteen_status", table_name="price_change_requests")
     op.drop_table("price_change_requests")
     op.drop_index("ix_inv_audit_canteen_item", table_name="inventory_audit_logs")

@@ -1,14 +1,18 @@
+import base64
+import io
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_COLLEGE_ADMIN,
+    ROLE_INVENTORY_MANAGER,
     ROLE_KITCHEN_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
@@ -47,7 +51,9 @@ def get_categories(canteen_id: UUID, include_inactive: bool = False, db: Session
 @router.post("/categories", response_model=FoodCategoryOut, status_code=status.HTTP_201_CREATED)
 def create_category(
     payload: FoodCategoryCreate,
-    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, payload.canteen_id)
@@ -58,7 +64,9 @@ def create_category(
 def update_category(
     category_id: UUID,
     payload: FoodCategoryUpdate,
-    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
     db: Session = Depends(get_db),
 ):
     cat = db.get(FoodCategory, category_id)
@@ -71,7 +79,9 @@ def update_category(
 @router.delete("/categories/{category_id}")
 def delete_category(
     category_id: UUID,
-    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
     db: Session = Depends(get_db),
 ):
     cat = db.get(FoodCategory, category_id)
@@ -126,7 +136,9 @@ def get_item(item_id: UUID, db: Session = Depends(get_db)):
 @router.post("/items", response_model=FoodItemOut, status_code=status.HTTP_201_CREATED)
 def create_item(
     payload: FoodItemCreate,
-    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, payload.canteen_id)
@@ -138,7 +150,13 @@ def update_item(
     item_id: UUID,
     payload: FoodItemUpdate,
     principal: AuthenticatedPrincipal = Depends(
-        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_KITCHEN_STAFF)
+        require_roles(
+            ROLE_SUPER_ADMIN,
+            ROLE_COLLEGE_ADMIN,
+            ROLE_CANTEEN_MANAGER,
+            ROLE_INVENTORY_MANAGER,
+            ROLE_KITCHEN_STAFF,
+        )
     ),
     db: Session = Depends(get_db),
 ):
@@ -146,15 +164,57 @@ def update_item(
     if not item:
         raise HTTPException(status_code=404, detail="Food item not found")
     enforce_canteen_scope(principal, item.canteen_id)
-    # Kitchen staff can only toggle availability
-    if ROLE_KITCHEN_STAFF in principal.roles and not principal.has_role(
-        ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER
-    ):
-        if payload.is_available is None:
-            raise HTTPException(status_code=400, detail="is_available boolean is required")
-        restricted = FoodItemUpdate(is_available=payload.is_available)
-        return menu_service.update_food_item(db, item_id, restricted, principal.user.id)
+    is_manager_or_admin = principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
+    if not is_manager_or_admin:
+        if principal.has_role(ROLE_INVENTORY_MANAGER):
+            if payload.base_price is not None and Decimal(str(payload.base_price)) != item.base_price:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Inventory managers must request selling price changes through manager approval (/inventory/price-changes)",
+                )
+            return menu_service.update_food_item(db, item_id, payload, principal.user.id)
+        if ROLE_KITCHEN_STAFF in principal.roles:
+            # Kitchen staff can only toggle availability
+            if payload.is_available is None:
+                raise HTTPException(status_code=400, detail="is_available boolean is required")
+            restricted = FoodItemUpdate(is_available=payload.is_available)
+            return menu_service.update_food_item(db, item_id, restricted, principal.user.id)
     return menu_service.update_food_item(db, item_id, payload, principal.user.id)
+
+
+@router.post("/items/{item_id}/upload-image", response_model=FoodItemOut)
+async def upload_item_image(
+    item_id: UUID,
+    file: UploadFile = File(...),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
+    db: Session = Depends(get_db),
+):
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, item.canteen_id)
+    max_bytes = 512 * 1024
+    raw = await file.read(max_bytes + 1)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded image file is empty")
+    if len(raw) > max_bytes:
+        raise HTTPException(status_code=400, detail="Image exceeds maximum allowed size of 512 KB")
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            img.verify()
+        with Image.open(io.BytesIO(raw)) as img2:
+            fmt = (img2.format or "").upper()
+    except (UnidentifiedImageError, OSError, SyntaxError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid or corrupted image file") from exc
+
+    mime_map = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+    mime = mime_map.get(fmt)
+    if not mime:
+        raise HTTPException(status_code=400, detail="Unsupported image format; allowed formats are PNG, JPEG, WEBP")
+    data_uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    return menu_service.set_food_item_primary_image(db, item_id, data_uri, principal.user.id)
 
 
 @router.post("/items/{item_id}/variants", response_model=FoodVariantOut, status_code=status.HTTP_201_CREATED)

@@ -8,7 +8,6 @@ import { ordersApi } from "../../src/api/orders.api";
 import { paymentsApi } from "../../src/api/payments.api";
 import { tokensApi } from "../../src/api/tokens.api";
 import { useMobileStore } from "../../src/store/useMobileStore";
-import { hmacSha256Hex } from "../../src/utils/hmacSha256";
 
 const STEPS = [
   { key: "CREATED", label: "Created" },
@@ -100,30 +99,7 @@ export default function OrderDetailScreen() {
     );
   }
 
-  const verifyTestStripe = async () => {
-    if (!order.stripe_session_id) return;
-    setPaying(true);
-    setErrMsg("");
-    try {
-      const piId = `pi_mob_${Date.now()}`;
-      const secret = process.env.EXPO_PUBLIC_STRIPE_TEST_SECRET || "sk_test_collegebites_local";
-      const sig = hmacSha256Hex(secret, `${order.stripe_session_id}|${piId}`);
-      await paymentsApi.verifyStripe({
-        order_id: order.id,
-        stripe_session_id: order.stripe_session_id,
-        stripe_payment_intent_id: piId,
-        stripe_signature: sig,
-        payment_method: "card",
-      });
-      await refetch();
-    } catch (e: unknown) {
-      setErrMsg(getMobileApiError(e, "Stripe payment verification failed"));
-    } finally {
-      setPaying(false);
-    }
-  };
-
-  const failTestStripe = async () => {
+  const cancelStripePayment = async () => {
     setPaying(true);
     setErrMsg("");
     try {
@@ -139,30 +115,7 @@ export default function OrderDetailScreen() {
     }
   };
 
-  const verifyTestRazorpay = async () => {
-    if (!order.razorpay_order_id) return;
-    setPaying(true);
-    setErrMsg("");
-    try {
-      const paymentId = `pay_mob_${Date.now()}`;
-      const secret = process.env.EXPO_PUBLIC_RAZORPAY_TEST_SECRET || "rzp_test_secret_collegebites_local";
-      const sig = hmacSha256Hex(secret, `${order.razorpay_order_id}|${paymentId}`);
-      await paymentsApi.verifyRazorpay({
-        order_id: order.id,
-        razorpay_order_id: order.razorpay_order_id,
-        razorpay_payment_id: paymentId,
-        razorpay_signature: sig,
-        payment_method: "upi",
-      });
-      await refetch();
-    } catch (e: unknown) {
-      setErrMsg(getMobileApiError(e, "Payment verification failed"));
-    } finally {
-      setPaying(false);
-    }
-  };
-
-  const failTestRazorpay = async () => {
+  const cancelRazorpayPayment = async () => {
     setPaying(true);
     setErrMsg("");
     try {
@@ -303,18 +256,12 @@ export default function OrderDetailScreen() {
               <Text style={{ color: "#fff", fontWeight: "800" }}>Open Stripe Checkout</Text>
             </Pressable>
           ) : (
-            <Pressable
-              disabled={paying}
-              onPress={verifyTestStripe}
-              style={[styles.payBtn, { backgroundColor: "#4f46e5" }]}
-            >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>
-                {paying ? "Verifying..." : "Pay & Verify Stripe Card (Test Mode)"}
-              </Text>
-            </Pressable>
+            <Text style={{ color: "#64748b", fontSize: 12 }}>
+              Live Stripe Checkout credentials are not configured on the server for this environment.
+            </Text>
           )}
-          <Pressable disabled={paying} onPress={failTestStripe} style={styles.cancelBtn}>
-            <Text style={{ color: "#0f172a", fontWeight: "700" }}>Simulate Payment Failure</Text>
+          <Pressable disabled={paying} onPress={cancelStripePayment} style={styles.cancelBtn}>
+            <Text style={{ color: "#0f172a", fontWeight: "700" }}>Cancel Payment</Text>
           </Pressable>
         </View>
       )}
@@ -323,7 +270,7 @@ export default function OrderDetailScreen() {
         <View style={styles.payBox}>
           <Text style={styles.secTitle}>Complete Razorpay Payment (₹{order.total_amount})</Text>
           {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{errMsg}</Text>}
-          {order.razorpay_key_id && order.razorpay_key_id !== "rzp_test_collegebites_local" ? (
+          {order.razorpay_key_id ? (
             <Pressable
               onPress={() => {
                 const webUrl = API_BASE_URL.replace(/\/api\/v1$/, "").replace(":8000", ":5173");
@@ -331,17 +278,15 @@ export default function OrderDetailScreen() {
               }}
               style={styles.payBtn}
             >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Live Razorpay Checkout</Text>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Razorpay Checkout</Text>
             </Pressable>
           ) : (
-            <Pressable disabled={paying} onPress={verifyTestRazorpay} style={styles.payBtn}>
-              <Text style={{ color: "#fff", fontWeight: "800" }}>
-                {paying ? "Verifying..." : "Pay & Verify UPI Payment (Test Mode)"}
-              </Text>
-            </Pressable>
+            <Text style={{ color: "#64748b", fontSize: 12 }}>
+              Live Razorpay checkout credentials are not configured on the server for this environment.
+            </Text>
           )}
-          <Pressable disabled={paying} onPress={failTestRazorpay} style={styles.cancelBtn}>
-            <Text style={{ color: "#0f172a", fontWeight: "700" }}>Simulate Payment Failure</Text>
+          <Pressable disabled={paying} onPress={cancelRazorpayPayment} style={styles.cancelBtn}>
+            <Text style={{ color: "#0f172a", fontWeight: "700" }}>Cancel Payment</Text>
           </Pressable>
         </View>
       )}

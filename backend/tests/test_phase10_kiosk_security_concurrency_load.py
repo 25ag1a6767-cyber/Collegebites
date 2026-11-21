@@ -73,7 +73,7 @@ def test_security_sqli_headers_and_concurrent_handover_and_tokens(client: TestCl
                 POSWalkInOrderRequest(
                     canteen_id=UUID(canteen["id"]),
                     customer_name=f"Concurrent {idx}",
-                    payment_method="cash",
+                    payment_method="upi_pos",
                     items=[CheckoutItemDirectIn(food_item_id=UUID(dosa["id"]), quantity=1)],
                 ),
                 cashier_user_id=UUID(cashier["user"]["id"]),

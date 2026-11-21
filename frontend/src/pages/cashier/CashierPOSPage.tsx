@@ -52,7 +52,7 @@ export const CashierPOSPage: React.FC = () => {
   const [posLines, setPosLines] = useState<PosLine[]>([]);
   const [customerName, setCustomerName] = useState("Walk-in Customer");
   const [customerPhone, setCustomerPhone] = useState("");
-  const [payMethod, setPayMethod] = useState<"cash" | "upi_pos" | "card_pos">("cash");
+  const [payMethod, setPayMethod] = useState<"upi_pos" | "card_pos">("upi_pos");
   const [busy, setBusy] = useState(false);
 
   // Order search & receipt modal
@@ -123,13 +123,13 @@ export const CashierPOSPage: React.FC = () => {
     }
   };
 
-  const collectPendingCash = async (orderId: string) => {
+  const collectCounterDigital = async (orderId: string, method: "upi_pos" | "card_pos") => {
     try {
       const res = await api.post<Order>("/payments/counter/collect", {
         order_id: orderId,
-        payment_method: "cash",
+        payment_method: method,
       });
-      pushToast(`Cash collected! Token: ${res.data.pickup_token_code}`, "success");
+      pushToast(`Digital payment confirmed! Token: ${res.data.pickup_token_code}`, "success");
       const recRes = await api.get<ReceiptSnapshot>(`/tokens/receipts/${res.data.order_number}`);
       setActiveReceipt(recRes.data);
       searchOrders();
@@ -150,7 +150,7 @@ export const CashierPOSPage: React.FC = () => {
           <div>
             <h1 className="text-xl font-extrabold">Cashier Point of Sale (POS)</h1>
             <p className="text-xs text-slate-400">
-              Walk-in billing, counter cash collection, instant tokens & thermal receipt reprinting
+              Digital UPI/Card walk-in billing, instant tokens & thermal receipt reprinting (online-only policy)
             </p>
           </div>
         </div>
@@ -168,7 +168,7 @@ export const CashierPOSPage: React.FC = () => {
           </Select>
           {(["pos", "orders", "shift"] as const).map((t) => (
             <Button key={t} size="sm" variant={tab === t ? "primary" : "outline"} onClick={() => setTab(t)}>
-              {t === "pos" ? "Walk-in POS" : t === "orders" ? "Search & Reprint" : "Cash Shift"}
+              {t === "pos" ? "Digital Walk-in POS" : t === "orders" ? "Search & Reprint" : "POS Shift"}
             </Button>
           ))}
         </div>
@@ -269,8 +269,8 @@ export const CashierPOSPage: React.FC = () => {
               )}
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
-              {(["cash", "upi_pos", "card_pos"] as const).map((m) => (
+            <div className="grid grid-cols-2 gap-2">
+              {(["upi_pos", "card_pos"] as const).map((m) => (
                 <button
                   key={m}
                   type="button"
@@ -279,7 +279,7 @@ export const CashierPOSPage: React.FC = () => {
                     payMethod === m ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 text-slate-700"
                   }`}
                 >
-                  {m.replace("_pos", "")}
+                  {m === "upi_pos" ? "UPI Terminal" : "Card Terminal"}
                 </button>
               ))}
             </div>
@@ -306,10 +306,10 @@ export const CashierPOSPage: React.FC = () => {
         <div className="space-y-5">
           <Card className="p-5 space-y-3">
             <h2 className="font-bold text-slate-900">
-              Pending Cash / Pay-at-Pickup Queue ({pendingCounterOrders.length})
+              Pending Counter Digital Collection ({pendingCounterOrders.length})
             </h2>
             {pendingCounterOrders.length === 0 ? (
-              <div className="text-xs text-slate-500">No orders awaiting counter payment in this canteen.</div>
+              <div className="text-xs text-slate-500">No orders awaiting counter collection in this canteen.</div>
             ) : (
               <div className="space-y-2">
                 {pendingCounterOrders.map((o) => (
@@ -322,9 +322,14 @@ export const CashierPOSPage: React.FC = () => {
                         {o.guest_name || "Registered Customer"} • ₹{o.total_amount}
                       </div>
                     </div>
-                    <Button size="sm" variant="success" onClick={() => collectPendingCash(o.id)}>
-                      Collect Cash & Issue Token
-                    </Button>
+                    <div className="flex gap-1.5">
+                      <Button size="sm" variant="success" onClick={() => collectCounterDigital(o.id, "upi_pos")}>
+                        Collect UPI & Issue Token
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => collectCounterDigital(o.id, "card_pos")}>
+                        Collect Card
+                      </Button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -359,8 +364,8 @@ export const CashierPOSPage: React.FC = () => {
                 </div>
                 <div className="flex gap-2">
                   {o.payment_status !== "CONFIRMED" && o.status === "PAYMENT_PENDING" && (
-                    <Button size="sm" variant="success" onClick={() => collectPendingCash(o.id)}>
-                      Accept Cash & Issue Token
+                    <Button size="sm" variant="success" onClick={() => collectCounterDigital(o.id, "upi_pos")}>
+                      Accept UPI & Issue Token
                     </Button>
                   )}
                   {o.payment_status === "CONFIRMED" && (
@@ -389,11 +394,11 @@ export const CashierPOSPage: React.FC = () => {
 
       {tab === "shift" && (
         <Card className="p-6 max-w-xl space-y-4">
-          <h2 className="text-lg font-extrabold text-slate-900">Cashier Shift Drawer</h2>
+          <h2 className="text-lg font-extrabold text-slate-900">Cashier POS Terminal Shift</h2>
           {!currentShift ? (
             <div className="space-y-3">
-              <p className="text-xs text-slate-500">No active cash shift open. Enter your opening cash float to begin.</p>
-              <Input value={openingCash} onChange={(e) => setOpeningCash(e.target.value)} placeholder="500.00" />
+              <p className="text-xs text-slate-500">No active POS shift open. Enter opening settlement balance (e.g. 0.00) to begin.</p>
+              <Input value={openingCash} onChange={(e) => setOpeningCash(e.target.value)} placeholder="0.00" />
               <Button
                 onClick={async () => {
                   try {
@@ -401,36 +406,36 @@ export const CashierPOSPage: React.FC = () => {
                       canteen_id: activeCanteenId,
                       opening_cash_amount: openingCash,
                     });
-                    pushToast("Cashier shift opened", "success");
+                    pushToast("POS shift opened", "success");
                     refetchShift();
                   } catch (err) {
                     pushToast(getApiError(err), "error");
                   }
                 }}
               >
-                Open Cash Shift
+                Open POS Shift
               </Button>
             </div>
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded-xl bg-slate-50 p-3">
-                  <div className="text-xs text-slate-500">Opening Cash</div>
+                  <div className="text-xs text-slate-500">Opening Terminal Balance</div>
                   <div className="font-extrabold">₹{currentShift.opening_cash_amount}</div>
                 </div>
                 <div className="rounded-xl bg-emerald-50 p-3">
-                  <div className="text-xs text-emerald-700">Expected Cash in Drawer</div>
+                  <div className="text-xs text-emerald-700">Reconciled POS Settlement</div>
                   <div className="font-extrabold text-emerald-900">
                     ₹{currentShift.shift_sales_summary?.expected_cash_in_drawer || "0.00"}
                   </div>
                 </div>
               </div>
               <div className="text-xs text-slate-600">
-                Total Collected Across All Methods: ₹{currentShift.shift_sales_summary?.total_collected || "0.00"}
+                Total Collected Across Digital POS Methods: ₹{currentShift.shift_sales_summary?.total_collected || "0.00"}
               </div>
               <div className="space-y-2 border-t border-slate-100 pt-3">
-                <label className="block text-xs font-bold text-slate-700">Counted Closing Cash (₹)</label>
-                <Input value={closingCash} onChange={(e) => setClosingCash(e.target.value)} placeholder="Enter counted cash" />
+                <label className="block text-xs font-bold text-slate-700">Closing Settlement Amount (₹)</label>
+                <Input value={closingCash} onChange={(e) => setClosingCash(e.target.value)} placeholder="Enter closing settlement total" />
                 <Input value={closingNotes} onChange={(e) => setClosingNotes(e.target.value)} placeholder="Shift closing notes" />
                 <Button
                   variant="danger"

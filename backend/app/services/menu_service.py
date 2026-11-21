@@ -403,6 +403,30 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
     return get_food_item(db, item.id)
 
 
+def set_food_item_primary_image(db: Session, item_id: UUID, image_url: str, actor_user_id: UUID) -> FoodItemOut:
+    """Replace or set the primary image for a food item and record an audit entry."""
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    existing_primary = db.scalar(
+        select(FoodImage).where(FoodImage.food_item_id == item.id, FoodImage.is_primary.is_(True))
+    )
+    if existing_primary:
+        existing_primary.image_url = image_url
+    else:
+        db.add(FoodImage(food_item_id=item.id, image_url=image_url, alt_text=item.name, is_primary=True))
+    record_audit_log(
+        db,
+        action="food_item.image_uploaded",
+        entity_type="food_item",
+        entity_id=str(item.id),
+        actor_user_id=actor_user_id,
+        details={"is_data_uri": image_url.startswith("data:")},
+    )
+    db.commit()
+    return get_food_item(db, item.id)
+
+
 def create_addon(db: Session, payload: FoodAddonCreate, actor_user_id: UUID) -> FoodAddon:
     addon = FoodAddon(**payload.model_dump())
     db.add(addon)

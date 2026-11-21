@@ -236,22 +236,7 @@ export const SystemTab: React.FC<{
                   />
                   Stripe Enabled
                 </label>
-                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(college.cash_at_counter_enabled)}
-                    onChange={() => void toggleSetting("cash_at_counter_enabled", !college.cash_at_counter_enabled, "Cash at Counter")}
-                  />
-                  Cash at Counter
-                </label>
-                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(college.pay_at_pickup_enabled)}
-                    onChange={() => void toggleSetting("pay_at_pickup_enabled", !college.pay_at_pickup_enabled, "Pay at Pickup")}
-                  />
-                  Pay at Pickup
-                </label>
+                <Badge tone="green">Online Only (No Cash)</Badge>
                 <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
                   <input
                     type="checkbox"

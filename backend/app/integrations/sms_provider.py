@@ -10,13 +10,13 @@ logger = logging.getLogger("collegebites.sms")
 
 def send_sms_or_whatsapp(phone: str, message: str, channel: str = "sms") -> tuple[bool, str]:
     """Dispatch SMS or WhatsApp via Twilio REST API, webhook, or dev log (no fake delivery in prod)."""
-    provider = settings.WHATSAPP_PROVIDER if channel == "whatsapp" else settings.SMS_PROVIDER
+    provider = (settings.WHATSAPP_PROVIDER if channel == "whatsapp" else settings.SMS_PROVIDER or "").strip().lower()
     if not phone:
         return False, "missing_phone"
 
-    if provider == "log":
-        if settings.is_production:
-            logger.warning("[%s] provider=log in production; not dispatched to %s", channel.upper(), phone)
+    if provider in ("", "log", "none", "disabled"):
+        if settings.is_production or provider in ("", "none", "disabled"):
+            logger.warning("[%s] provider=%r not configured; not dispatched to %s", channel.upper(), provider, phone)
             return False, "sms_provider_not_configured"
         logger.info("[%s provider=%s] to=%s msg=%s", channel.upper(), provider, phone, message)
         return True, "logged"
@@ -63,5 +63,8 @@ def send_sms_or_whatsapp(phone: str, message: str, channel: str = "sms") -> tupl
             logger.error("Webhook SMS dispatch failed for %s: %s", phone, exc)
             return False, str(exc)
 
+    if settings.is_production:
+        logger.error("[%s] unsupported provider=%r in production", channel.upper(), provider)
+        return False, f"unsupported_sms_provider:{provider}"
     logger.info("[%s custom-provider=%s] to=%s msg=%s", channel.upper(), provider, phone, message)
     return True, "logged"

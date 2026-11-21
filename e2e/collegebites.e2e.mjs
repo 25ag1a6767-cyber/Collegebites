@@ -1,9 +1,11 @@
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 const FRONTEND_URL = process.env.E2E_FRONTEND_URL || "http://127.0.0.1:5173";
+const API_URL = process.env.E2E_API_URL || "http://127.0.0.1:8000";
 
 function findBrowserExecutable() {
   const candidates = [
@@ -117,7 +119,27 @@ async function main() {
     await page.getByText("Razorpay Online").waitFor();
     await page.locator('input[type="checkbox"]').check();
     await page.getByRole("button", { name: /Pay ₹/i }).click();
-    await page.getByRole("button", { name: /Complete & Verify Payment/i }).click();
+
+    const rzpModal = page.locator("[data-order-id]").first();
+    await rzpModal.waitFor({ timeout: 10000 });
+    const rzpOrderBadge = await rzpModal.getByText(/RZP: order_test_/).textContent({ timeout: 10000 });
+    const rzpOrderId = rzpOrderBadge.replace("RZP:", "").trim();
+    const rzpPayId = `pay_e2e_${Date.now()}`;
+    const rzpBody = JSON.stringify({
+      event_id: `evt_e2e_rzp_${Date.now()}`,
+      event: "payment.captured",
+      payload: { payment: { entity: { id: rzpPayId, order_id: rzpOrderId, method: "upi" } } },
+    });
+    const rzpSig = crypto
+      .createHmac("sha256", process.env.RAZORPAY_WEBHOOK_SECRET || "rzp_webhook_secret_collegebites_local")
+      .update(rzpBody)
+      .digest("hex");
+    const rzpWhRes = await custCtx.request.post(`${API_URL}/api/v1/payments/razorpay/webhook`, {
+      data: rzpBody,
+      headers: { "Content-Type": "application/json", "X-Razorpay-Signature": rzpSig },
+    });
+    assert.equal(rzpWhRes.status(), 200, "Razorpay webhook should confirm payment");
+    await page.getByRole("button", { name: /View Order Status/i }).click();
 
     await page.waitForURL(/\/orders\/CB-/, { timeout: 15000 });
     await page.getByText("Official Digital Token Slip & Payment Receipt").waitFor({ timeout: 10000 });
@@ -144,8 +166,26 @@ async function main() {
     await stripePage.getByRole("button", { name: /Stripe Checkout/i }).click();
     await stripePage.locator('input[type="checkbox"]').check();
     await stripePage.getByRole("button", { name: /Pay ₹/i }).click();
-    await stripePage.getByText(/Stripe: cs_test_/).waitFor({ timeout: 10000 });
-    await stripePage.getByRole("button", { name: /Complete & Verify Payment/i }).click();
+    const stripeModal = stripePage.locator("[data-order-id]").first();
+    await stripeModal.waitFor({ timeout: 10000 });
+    const stripeSidBadge = await stripeModal.getByText(/Stripe: cs_test_/).textContent({ timeout: 10000 });
+    const stripeSid = stripeSidBadge.replace("Stripe:", "").trim();
+    const ts = Math.floor(Date.now() / 1000);
+    const stripeBody = JSON.stringify({
+      id: `evt_e2e_stripe_${Date.now()}`,
+      type: "checkout.session.completed",
+      data: { object: { id: stripeSid, payment_intent: `pi_e2e_${Date.now()}` } },
+    });
+    const stripeSig = crypto
+      .createHmac("sha256", process.env.STRIPE_WEBHOOK_SECRET || "whsec_collegebites_local")
+      .update(`${ts}.${stripeBody}`)
+      .digest("hex");
+    const stripeWhRes = await stripeCtx.request.post(`${API_URL}/api/v1/payments/stripe/webhook`, {
+      data: stripeBody,
+      headers: { "Content-Type": "application/json", "Stripe-Signature": `t=${ts},v1=${stripeSig}` },
+    });
+    assert.equal(stripeWhRes.status(), 200, "Stripe webhook should confirm payment");
+    await stripePage.getByRole("button", { name: /View Order Status/i }).click();
     await stripePage.waitForURL(/\/orders\/CB-/, { timeout: 15000 });
     await stripePage.getByText("Official Digital Token Slip & Payment Receipt").waitFor({ timeout: 10000 });
     console.log("E2E_STRIPE_ORDER_URL:", stripePage.url());

@@ -6,6 +6,7 @@ import { api, getApiError } from "../../api/client";
 import type { Canteen, FoodItem, Order, ReceiptSnapshot } from "../../types";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Button, Card, useToast } from "../../components/ui/Primitives";
+import { openRazorpayModal } from "../../utils/razorpay";
 
 const LABELS: Record<string, { title: string; pay: string; empty: string }> = {
   en: { title: "Self-Service Ordering Kiosk", pay: "Pay & Print Token", empty: "Tap dishes to begin" },
@@ -16,7 +17,7 @@ const LABELS: Record<string, { title: string; pay: string; empty: string }> = {
 export const KioskPage: React.FC = () => {
   const { pushToast } = useToast();
   const [lang, setLang] = useState<"en" | "hi" | "te">("en");
-  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe" | "cash">("razorpay");
+  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe">("razorpay");
   const [cartLines, setCartLines] = useState<{ item: FoodItem; quantity: number }[]>([]);
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
   const [receipt, setReceipt] = useState<ReceiptSnapshot | null>(null);
@@ -106,11 +107,6 @@ export const KioskPage: React.FC = () => {
       });
       const ord = res.data;
       setCartLines([]);
-      if (payMethod === "cash") {
-        pushToast(`Order ${ord.order_number} placed! Pay ₹${ord.total_amount} at counter.`, "info");
-        setPendingOrder(ord);
-        return;
-      }
       setPendingOrder(ord);
     } catch (err) {
       pushToast(getApiError(err), "error");
@@ -123,28 +119,29 @@ export const KioskPage: React.FC = () => {
     if (!pendingOrder) return;
     setBusy(true);
     try {
-      let confirmed: Order = pendingOrder;
-      if (pendingOrder.payment_method === "stripe" && pendingOrder.stripe_session_id) {
-        const res = await api.post<Order>("/payments/stripe/verify", {
-          order_id: pendingOrder.id,
-          stripe_session_id: pendingOrder.stripe_session_id,
-        });
-        confirmed = res.data;
-      } else if (pendingOrder.razorpay_order_id) {
-        const res = await api.post<Order>("/payments/razorpay/verify", {
-          order_id: pendingOrder.id,
-          razorpay_order_id: pendingOrder.razorpay_order_id,
-          razorpay_payment_id: `pay_kiosk_${Date.now()}`,
-          razorpay_signature: "test_mode_signature",
-          method_detail: "upi",
-        });
-        confirmed = res.data;
+      if (pendingOrder.payment_method === "stripe") {
+        if (pendingOrder.stripe_checkout_url) {
+          window.location.href = pendingOrder.stripe_checkout_url;
+          return;
+        }
+        throw new Error("Stripe gateway session URL is unavailable in this environment.");
       }
-      await fetchReceiptForOrder(confirmed);
-      setPendingOrder(null);
-      pushToast(`Token ${confirmed.pickup_token_code || ""} ready! Printing slip.`, "success");
+      if (pendingOrder.razorpay_order_id && pendingOrder.razorpay_key_id) {
+        const opened = await openRazorpayModal({
+          order: pendingOrder,
+          description: `Kiosk Order ${pendingOrder.order_number}`,
+          onVerified: async (confirmed) => {
+            await fetchReceiptForOrder(confirmed);
+            setPendingOrder(null);
+            pushToast(`Token ${confirmed.pickup_token_code || ""} ready! Printing slip.`, "success");
+          },
+          onError: (err) => pushToast(getApiError(err, "Payment verification failed"), "error"),
+        });
+        if (opened) return;
+      }
+      throw new Error("Live payment gateway keys are not configured for kiosk checkout.");
     } catch (err) {
-      pushToast(getApiError(err, "Payment verification failed"), "error");
+      pushToast(getApiError(err, "Payment gateway unavailable"), "error");
     } finally {
       setBusy(false);
     }
@@ -197,20 +194,14 @@ export const KioskPage: React.FC = () => {
           <div className="text-xs font-bold uppercase text-slate-500">Kiosk Order Created</div>
           <div className="text-2xl font-black text-slate-900">{pendingOrder.order_number}</div>
           <div className="text-3xl font-black text-orange-600">₹{pendingOrder.total_amount}</div>
-          {pendingOrder.payment_method === "cash" ? (
-            <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-sm text-amber-900">
-              Please pay ₹{pendingOrder.total_amount} at the cashier counter quoting <strong>{pendingOrder.order_number}</strong> to generate your pickup token.
+          <div className="space-y-3">
+            <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
+              Complete {pendingOrder.payment_method.toUpperCase()} online payment to generate your printable pickup slip.
             </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
-                Complete {pendingOrder.payment_method.toUpperCase()} payment verification to generate your printable pickup slip.
-              </div>
-              <Button size="lg" className="w-full" disabled={busy} onClick={completeKioskPayment}>
-                {busy ? "Verifying..." : "Verify Payment & Print Token Slip"}
-              </Button>
-            </div>
-          )}
+            <Button size="lg" className="w-full" disabled={busy} onClick={completeKioskPayment}>
+              {busy ? "Launching Gateway..." : "Launch Online Checkout & Print Slip"}
+            </Button>
+          </div>
           <Button
             variant="outline"
             onClick={() => {
@@ -264,7 +255,7 @@ export const KioskPage: React.FC = () => {
                   </div>
                 ))}
                 <div className="flex flex-wrap gap-1.5 pt-2">
-                  {(["razorpay", "stripe", "cash"] as const).map((m) => (
+                  {(["razorpay", "stripe"] as const).map((m) => (
                     <button
                       key={m}
                       type="button"

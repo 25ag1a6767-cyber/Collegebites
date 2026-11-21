@@ -34,7 +34,7 @@ def test_coupons_completely_removed_everywhere(client: TestClient):
         headers=student["headers"],
         json={
             "canteen_id": cid,
-            "payment_method": "cash",
+            "payment_method": "razorpay",
             "coupon_code": "CAMPUS10",
             "use_cart": False,
             "direct_items": [{"food_item_id": biryani["id"], "quantity": 1}],
@@ -48,7 +48,7 @@ def test_coupons_completely_removed_everywhere(client: TestClient):
         headers=cashier["headers"],
         json={
             "canteen_id": cid,
-            "payment_method": "cash",
+            "payment_method": "upi_pos",
             "coupon_code": "CAMPUS10",
             "items": [{"food_item_id": biryani["id"], "quantity": 1}],
         },
@@ -192,7 +192,7 @@ def test_inventory_manager_full_lifecycle_price_approvals_and_rbac(client: TestC
     pos_ord = client.post(
         "/api/v1/pos/orders",
         headers=cashier["headers"],
-        json={"canteen_id": cid, "payment_method": "cash", "items": [{"food_item_id": biryani["id"], "quantity": 1}]},
+        json={"canteen_id": cid, "payment_method": "upi_pos", "items": [{"food_item_id": biryani["id"], "quantity": 1}]},
     ).json()
     assert Decimal(pos_ord["items"][0]["unit_price"]) == orig_price
 
@@ -299,3 +299,66 @@ def test_inventory_manager_full_lifecycle_price_approvals_and_rbac(client: TestC
     inv_pdf = client.get(f"/api/v1/inventory/canteens/{cid}/reports/pdf", headers=inv_mgr["headers"])
     assert inv_pdf.status_code == 200
     assert inv_pdf.content.startswith(b"%PDF")
+
+    # 11. Inventory Manager Customer-Facing Menu Ops (Category, Add Food, Non-Price Edit, Image Upload Validation; direct base_price edit still 403)
+    import io
+    from PIL import Image
+
+    cat_res = client.post(
+        "/api/v1/menus/categories",
+        headers=inv_mgr["headers"],
+        json={"canteen_id": cid, "name": "Inv Fruit Bowls", "slug": "inv-fruit-bowls", "display_order": 99},
+    )
+    assert cat_res.status_code == 201, cat_res.text
+    cat_id = cat_res.json()["id"]
+
+    new_dish = client.post(
+        "/api/v1/menus/items",
+        headers=inv_mgr["headers"],
+        json={
+            "canteen_id": cid,
+            "category_id": cat_id,
+            "name": "Fresh Watermelon Bowl",
+            "slug": "fresh-watermelon-bowl",
+            "description": "Chilled seasonal cubes",
+            "base_price": "55.00",
+            "is_veg": True,
+        },
+    )
+    assert new_dish.status_code == 201, new_dish.text
+    dish_id = new_dish.json()["id"]
+
+    edit_ok = client.patch(
+        f"/api/v1/menus/items/{dish_id}",
+        headers=inv_mgr["headers"],
+        json={"description": "Chilled seedless watermelon cubes", "is_available": True},
+    )
+    assert edit_ok.status_code == 200
+
+    # Inventory manager CANNOT alter base_price directly
+    assert (
+        client.patch(
+            f"/api/v1/menus/items/{dish_id}",
+            headers=inv_mgr["headers"],
+            json={"base_price": "65.00"},
+        ).status_code
+        == 403
+    )
+
+    # Valid PNG upload succeeds; non-image bytes rejected with 400
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), color=(255, 120, 40)).save(buf, format="PNG")
+    img_ok = client.post(
+        f"/api/v1/menus/items/{dish_id}/upload-image",
+        headers=inv_mgr["headers"],
+        files={"file": ("bowl.png", buf.getvalue(), "image/png")},
+    )
+    assert img_ok.status_code == 200, img_ok.text
+    assert img_ok.json()["images"][0]["image_url"].startswith("data:image/png;base64,")
+
+    img_bad = client.post(
+        f"/api/v1/menus/items/{dish_id}/upload-image",
+        headers=inv_mgr["headers"],
+        files={"file": ("fake.png", b"not-a-valid-image-payload", "image/png")},
+    )
+    assert img_bad.status_code == 400

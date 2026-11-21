@@ -7,6 +7,7 @@ import { useAppStore } from "../../store/useAppStore";
 import type { Order, ReceiptSnapshot } from "../../types";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
+import { openRazorpayModal } from "../../utils/razorpay";
 
 const STEPS = [
   { key: "PAYMENT_CONFIRMED", label: "Payment Verified" },
@@ -125,28 +126,26 @@ export const OrderTrackingPage: React.FC = () => {
     setBusy(true);
     try {
       const res = await api.post<Order>(`/payments/retry/${order.id}${querySuffix}`, { payment_method: method });
-      if (method === "stripe" && res.data.stripe_checkout_url && res.data.stripe_checkout_url.startsWith("http") && !res.data.stripe_checkout_url.includes("test-checkout")) {
-        window.location.href = res.data.stripe_checkout_url;
-        return;
+      if (method === "stripe") {
+        if (res.data.stripe_checkout_url) {
+          window.location.href = res.data.stripe_checkout_url;
+          return;
+        }
+        throw new Error("Stripe Checkout session URL is not available in this environment.");
       }
-      if (method === "stripe" && res.data.stripe_session_id) {
-        await api.post("/payments/stripe/verify", {
-          order_id: res.data.id,
-          stripe_session_id: res.data.stripe_session_id,
-          payment_method: "card",
+      if (res.data.razorpay_order_id && res.data.razorpay_key_id) {
+        const opened = await openRazorpayModal({
+          order: res.data,
+          onVerified: () => {
+            pushToast("Payment verified! Pickup token issued.", "success");
+            refetch();
+            refetchReceipt();
+          },
+          onError: (err) => pushToast(getApiError(err, "Razorpay signature verification failed"), "error"),
         });
-      } else if (res.data.razorpay_order_id) {
-        await api.post("/payments/razorpay/verify", {
-          order_id: res.data.id,
-          razorpay_order_id: res.data.razorpay_order_id,
-          razorpay_payment_id: `pay_retry_${Date.now()}`,
-          razorpay_signature: "test_mode_signature",
-          method_detail: "upi",
-        });
+        if (opened) return;
       }
-      pushToast("Payment verified! Pickup token issued.", "success");
-      refetch();
-      refetchReceipt();
+      throw new Error("Live Razorpay checkout credentials are not configured in this environment.");
     } catch (err) {
       pushToast(getApiError(err, "Retry failed"), "error");
     } finally {

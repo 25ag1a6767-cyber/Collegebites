@@ -11,10 +11,15 @@ import { ordersApi } from "../src/api/orders.api";
 import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
 
-const guestSchema = z.object({
-  guestName: z.string().trim().min(2, "Guest name must be at least 2 characters."),
-  guestPhone: z.string().trim().min(8, "Enter a valid mobile number (e.g. +919876543210)."),
-});
+const guestSchema = z
+  .object({
+    guestName: z.string().trim().min(2, "Guest name must be at least 2 characters."),
+    guestPhone: z.string().trim().optional().default(""),
+    guestEmail: z.string().trim().optional().default(""),
+  })
+  .refine((v) => v.guestPhone.length >= 8 || (v.guestEmail.includes("@") && v.guestEmail.length >= 5), {
+    message: "Enter a valid email address or mobile number.",
+  });
 
 export default function CheckoutScreen() {
   const router = useRouter();
@@ -60,12 +65,14 @@ export default function CheckoutScreen() {
   const [redeemPoints, setRedeemPoints] = useState(0);
   const [selectedCounterId, setSelectedCounterId] = useState<string>("");
   const [selectedSlotId, setSelectedSlotId] = useState<string>("");
-  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe" | "cash" | "pay_at_pickup">("razorpay");
+  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe">("razorpay");
   const [guestName, setGuestName] = useState("");
+  const [guestEmail, setGuestEmail] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [otpCode, setOtpCode] = useState("");
   const [otpToken, setOtpToken] = useState<string | null>(null);
   const [devOtp, setDevOtp] = useState<string | null>(null);
+  const [otpNotice, setOtpNotice] = useState<string | null>(null);
   const [acceptedPolicy, setAcceptedPolicy] = useState(false);
   const [orderNotes, setOrderNotes] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
@@ -81,16 +88,19 @@ export default function CheckoutScreen() {
     }
   };
 
+  const otpTarget = guestEmail.trim() || guestPhone.trim();
+
   const requestOtp = async () => {
     setErrorMsg("");
-    const parsed = guestSchema.safeParse({ guestName: guestName || "Guest User", guestPhone });
-    if (!parsed.success) {
-      setErrorMsg(parsed.error.issues[0]?.message || "Enter a valid mobile number");
+    setOtpNotice(null);
+    if (!otpTarget) {
+      setErrorMsg("Enter your email or mobile number first.");
       return;
     }
     try {
-      const res = await authApi.requestOtp({ target: guestPhone.trim(), purpose: "guest_checkout" });
+      const res = await authApi.requestOtp({ target: otpTarget, purpose: "guest_checkout" });
       setDevOtp(res.dev_otp || null);
+      setOtpNotice(res.message || "OTP sent.");
     } catch (e: unknown) {
       setErrorMsg(getMobileApiError(e, "Failed to send OTP"));
     }
@@ -100,7 +110,7 @@ export default function CheckoutScreen() {
     setErrorMsg("");
     try {
       const res = await authApi.verifyOtp({
-        target: guestPhone.trim(),
+        target: otpTarget,
         purpose: "guest_checkout",
         code: otpCode.trim(),
       });
@@ -121,9 +131,9 @@ export default function CheckoutScreen() {
       return;
     }
     if (!user) {
-      const parsed = guestSchema.safeParse({ guestName, guestPhone });
+      const parsed = guestSchema.safeParse({ guestName, guestPhone, guestEmail });
       if (!parsed.success) {
-        setErrorMsg(parsed.error.issues[0]?.message || "Enter valid guest name and mobile number.");
+        setErrorMsg(parsed.error.issues[0]?.message || "Enter valid guest details.");
         return;
       }
       if (college?.guest_otp_required && !otpToken) {
@@ -144,7 +154,8 @@ export default function CheckoutScreen() {
           redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
           idempotency_key: idemKey,
           guest_name: !user ? guestName.trim() : null,
-          guest_phone: !user ? guestPhone.trim() : null,
+          guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
+          guest_email: !user && guestEmail.trim() ? guestEmail.trim() : null,
           guest_otp_verification_token: !user ? otpToken : null,
           notes: orderNotes.trim() || null,
           accepted_policy: true,
@@ -294,7 +305,7 @@ export default function CheckoutScreen() {
 
       {/* Payment Method */}
       <View style={styles.box}>
-        <Text style={styles.sub}>Payment Method</Text>
+        <Text style={styles.sub}>Online Payment Method (Cash Disabled)</Text>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
           {[
             ...(activeCanteen?.allow_online_payment !== false && college?.razorpay_enabled !== false
@@ -303,8 +314,6 @@ export default function CheckoutScreen() {
             ...(activeCanteen?.allow_online_payment !== false && college?.stripe_enabled !== false
               ? [{ id: "stripe", label: "Stripe Card" }]
               : []),
-            ...(activeCanteen?.allow_cash_at_counter !== false ? [{ id: "cash", label: "Counter Cash" }] : []),
-            ...(activeCanteen?.allow_pay_at_pickup ? [{ id: "pay_at_pickup", label: "Pay at Pickup" }] : []),
           ].map((m) => (
             <Pressable
               key={m.id}
@@ -323,14 +332,23 @@ export default function CheckoutScreen() {
 
       {!user && (
         <View style={styles.box}>
-          <Text style={styles.sub}>Guest Ordering (OTP Required)</Text>
+          <Text style={styles.sub}>Guest Ordering (Email / Mobile OTP Required)</Text>
           <TextInput style={styles.input} value={guestName} onChangeText={setGuestName} placeholder="Full Name" />
+          <TextInput
+            style={styles.input}
+            value={guestEmail}
+            onChangeText={setGuestEmail}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            placeholder="Email (recommended for OTP)"
+          />
           <View style={{ flexDirection: "row", gap: 8 }}>
             <TextInput style={[styles.input, { flex: 1 }]} value={guestPhone} onChangeText={setGuestPhone} placeholder="+919876543210" />
             <Pressable onPress={requestOtp} style={styles.btnSec}>
               <Text style={{ color: "#fff", fontWeight: "700" }}>Send OTP</Text>
             </Pressable>
           </View>
+          {otpNotice && <Text style={{ fontSize: 12, color: "#047857" }}>{otpNotice}</Text>}
           {devOtp && <Text style={{ fontSize: 12, color: "#b45309" }}>Dev OTP: {devOtp}</Text>}
           <View style={{ flexDirection: "row", gap: 8 }}>
             <TextInput style={[styles.input, { flex: 1 }]} value={otpCode} onChangeText={setOtpCode} placeholder="6-digit OTP" />

@@ -33,7 +33,7 @@ def test_kitchen_lifecycle_qr_verification_cases_handover_and_digital_board(clie
             "canteen_id": canteen["id"],
             "counter_id": c2["id"],
             "customer_name": "Walk-in Student",
-            "payment_method": "cash",
+            "payment_method": "upi_pos",
             "items": [{"food_item_id": biryani["id"], "quantity": 1}],
         },
     )

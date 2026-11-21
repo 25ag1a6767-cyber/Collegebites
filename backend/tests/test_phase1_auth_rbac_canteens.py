@@ -122,3 +122,35 @@ def test_rbac_enforced_on_admin_and_canteen_routes(client: TestClient):
     detail_after = client.get(f"/api/v1/canteens/{canteen_id}").json()
     assert detail_after["is_open_now"] is False
     assert detail_after["crowd_level"] == "TEMPORARILY_UNAVAILABLE"
+
+
+def test_email_otp_delivery_and_prod_sms_guard(client: TestClient, monkeypatch):
+    from app.core.config import settings
+    from app.services import auth_service
+
+    sent_emails = []
+    monkeypatch.setattr(
+        auth_service,
+        "send_email",
+        lambda to_email, subject, body: sent_emails.append((to_email, subject, body)) or (True, "sent_smtp"),
+    )
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(settings, "SMS_PROVIDER", "none")
+
+    email_res = client.post(
+        "/api/v1/auth/otp/request",
+        json={"target": "student@collegebites.edu", "purpose": "login"},
+    )
+    assert email_res.status_code == 200, email_res.text
+    payload = email_res.json()
+    assert payload["delivery_channel"] == "email"
+    assert payload["dev_otp"] is None
+    assert len(sent_emails) == 1
+    assert sent_emails[0][0] == "student@collegebites.edu"
+
+    # Phone OTP in production without SMS provider MUST fail explicitly with 503
+    sms_res = client.post(
+        "/api/v1/auth/otp/request",
+        json={"target": "+919988776611", "purpose": "guest_checkout"},
+    )
+    assert sms_res.status_code == 503

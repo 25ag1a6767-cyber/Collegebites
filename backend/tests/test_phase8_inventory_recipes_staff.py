@@ -21,7 +21,7 @@ def test_inventory_deduction_no_duplicate_po_wastage_and_auto_unavailability(cli
     order = client.post(
         "/api/v1/pos/orders",
         headers=cashier["headers"],
-        json={"canteen_id": cid, "payment_method": "cash", "items": [{"food_item_id": biryani["id"], "quantity": 2}]},
+        json={"canteen_id": cid, "payment_method": "upi_pos", "items": [{"food_item_id": biryani["id"], "quantity": 2}]},
     ).json()
     assert order["payment_status"] == "CONFIRMED"
 
@@ -33,7 +33,7 @@ def test_inventory_deduction_no_duplicate_po_wastage_and_auto_unavailability(cli
     client.post(
         "/api/v1/payments/counter/collect",
         headers=cashier["headers"],
-        json={"order_id": order["id"], "payment_method": "cash"},
+        json={"order_id": order["id"], "payment_method": "upi_pos"},
     )
     inv_after2 = client.get(f"/api/v1/inventory/canteens/{cid}/items", headers=inv_mgr["headers"]).json()
     rice_after2 = next(i for i in inv_after2 if i["sku"] == "RICE-BAS")

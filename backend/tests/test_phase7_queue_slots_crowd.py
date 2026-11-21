@@ -63,7 +63,7 @@ def test_queue_dashboard_slot_capacity_throttling_and_pause(client: TestClient):
     client.post(
         "/api/v1/pos/orders",
         headers=cashier["headers"],
-        json={"canteen_id": cid, "payment_method": "cash", "items": [{"food_item_id": biryani["id"], "quantity": 2}]},
+        json={"canteen_id": cid, "payment_method": "upi_pos", "items": [{"food_item_id": biryani["id"], "quantity": 2}]},
     )
     q = client.get(f"/api/v1/queue/canteens/{cid}").json()
     assert q["active_order_count"] >= 1

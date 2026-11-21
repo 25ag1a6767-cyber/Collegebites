@@ -101,6 +101,10 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
             contact_email="canteen@aceec.ac.in",
             default_tax_rate_percent=Decimal("5.00"),
             kiosk_enabled=False,
+            razorpay_enabled=True,
+            stripe_enabled=True,
+            cash_at_counter_enabled=False,
+            pay_at_pickup_enabled=False,
         )
         db.add(college)
         db.flush()
@@ -124,6 +128,9 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         max_concurrent_orders=80,
         orders_per_slot_capacity=40,
         default_prep_time_minutes=12,
+        allow_online_payment=True,
+        allow_cash_at_counter=False,
+        allow_pay_at_pickup=False,
     )
     snacks_canteen = Canteen(
         name="Snacks & Bakery Counter",
@@ -138,6 +145,9 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         max_concurrent_orders=60,
         orders_per_slot_capacity=35,
         default_prep_time_minutes=7,
+        allow_online_payment=True,
+        allow_cash_at_counter=False,
+        allow_pay_at_pickup=False,
     )
     juice_canteen = Canteen(
         name="Fresh Juice & Shake Bar",
@@ -152,6 +162,9 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         max_concurrent_orders=50,
         orders_per_slot_capacity=30,
         default_prep_time_minutes=5,
+        allow_online_payment=True,
+        allow_cash_at_counter=False,
+        allow_pay_at_pickup=False,
     )
     db.add_all([main_canteen, snacks_canteen, juice_canteen])
     db.flush()
