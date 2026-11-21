@@ -33,6 +33,7 @@ interface MobileState {
   selectedCanteenId: string | null;
   scannedQrCode: string | null;
   guestOrderTokens: Record<string, string>;
+  cachedOrders: Record<string, any>;
   hydrated: boolean;
 
   hydrate: () => Promise<void>;
@@ -40,9 +41,10 @@ interface MobileState {
   logout: () => Promise<void>;
   setCanteen: (canteenId: string, qrCode?: string | null) => void;
   saveGuestOrderToken: (orderNumber: string, token: string) => void;
+  saveCachedOrder: (orderNumber: string, orderObj: any) => void;
 }
 
-export const useMobileStore = create<MobileState>((set) => ({
+export const useMobileStore = create<MobileState>((set, get) => ({
   accessToken: null,
   refreshToken: null,
   user: null,
@@ -50,16 +52,23 @@ export const useMobileStore = create<MobileState>((set) => ({
   selectedCanteenId: null,
   scannedQrCode: null,
   guestOrderTokens: {},
+  cachedOrders: {},
   hydrated: false,
 
   hydrate: async () => {
-    const access = await getSecure("cb_access");
-    const refresh = await getSecure("cb_refresh");
-    const userRaw = await getSecure("cb_user");
+    const [access, refresh, userRaw, guestTokRaw, cachedRaw] = await Promise.all([
+      getSecure("cb_access"),
+      getSecure("cb_refresh"),
+      getSecure("cb_user"),
+      getSecure("cb_guest_tokens"),
+      getSecure("cb_cached_orders"),
+    ]);
     set({
       accessToken: access,
       refreshToken: refresh,
       user: userRaw ? JSON.parse(userRaw) : null,
+      guestOrderTokens: guestTokRaw ? JSON.parse(guestTokRaw) : {},
+      cachedOrders: cachedRaw ? JSON.parse(cachedRaw) : {},
       hydrated: true,
     });
   },
@@ -76,6 +85,14 @@ export const useMobileStore = create<MobileState>((set) => ({
     set({ accessToken: null, refreshToken: null, user: null });
   },
   setCanteen: (selectedCanteenId, scannedQrCode = null) => set({ selectedCanteenId, scannedQrCode }),
-  saveGuestOrderToken: (orderNumber, token) =>
-    set((s) => ({ guestOrderTokens: { ...s.guestOrderTokens, [orderNumber]: token } })),
+  saveGuestOrderToken: (orderNumber, token) => {
+    const next = { ...get().guestOrderTokens, [orderNumber]: token };
+    set({ guestOrderTokens: next });
+    setSecure("cb_guest_tokens", JSON.stringify(next)).catch(() => {});
+  },
+  saveCachedOrder: (orderNumber, orderObj) => {
+    const next = { ...get().cachedOrders, [orderNumber]: orderObj };
+    set({ cachedOrders: next });
+    setSecure("cb_cached_orders", JSON.stringify(next)).catch(() => {});
+  },
 }));

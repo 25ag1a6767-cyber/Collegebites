@@ -144,6 +144,7 @@ async function main() {
     await adminPage.getByRole("button", { name: /College Admin/i }).click();
     await adminPage.waitForURL(/\/admin/);
     for (const tabName of [
+      "Orders & Users",
       "Locations, Counters & Hours",
       "Menus & CSV",
       "Location QR Codes",
@@ -154,6 +155,9 @@ async function main() {
       "Settings, Reconcile & Audits",
     ]) {
       await adminPage.getByRole("button", { name: tabName }).click();
+      if (tabName === "Orders & Users") {
+        await adminPage.getByText(pickupToken).first().waitFor({ timeout: 10000 });
+      }
       await adminPage.waitForTimeout(250);
     }
 

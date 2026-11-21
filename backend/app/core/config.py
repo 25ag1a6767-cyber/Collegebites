@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = "noreply@collegebites.edu"
     SMS_PROVIDER: str = "log"
     WHATSAPP_PROVIDER: str = "log"
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_FROM_NUMBER: str = ""
+    TWILIO_WHATSAPP_FROM: str = ""
+    SMS_WEBHOOK_URL: str = ""
 
     NETWORK_PRINTER_ENABLED: bool = False
     DEFAULT_PRINTER_IP: str = "192.168.1.200"

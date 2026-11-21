@@ -1,9 +1,10 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request, status
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel
+from sqlalchemy import func, or_, select, text
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
 from app.core.permissions import (
@@ -17,10 +18,11 @@ from app.core.permissions import (
 )
 from app.core.redis_client import get_redis
 from app.models.auth import User
-from app.models.order import Order
-from app.models.payment import Payment
+from app.models.order import Order, OrderItem
+from app.models.payment import Payment, PickupToken
 from app.models.system import AuditLog
 from app.schemas.auth import StaffCreateRequest, UserOut, UserRoleAssignRequest
+from app.schemas.order import OrderOut
 from app.schemas.college import (
     CanteenCreate,
     CanteenOut,
@@ -39,7 +41,8 @@ from app.schemas.college import (
     OperatingHourOut,
 )
 from app.schemas.common import AuditLogOut
-from app.services import auth_service, college_service
+from app.services import auth_service, college_service, order_service
+from app.services.audit_service import record_audit_log
 
 router = APIRouter(prefix="/admin", tags=["Administration"])
 
@@ -165,6 +168,81 @@ def assign_roles(
     db: Session = Depends(get_db),
 ):
     return auth_service.assign_user_roles(db, user_id, payload, principal.user.id, client_ip_from_request(request))
+
+
+class UserStatusUpdateIn(BaseModel):
+    is_active: bool
+
+
+@router.patch("/users/{user_id}/status", response_model=UserOut)
+def update_user_status(
+    user_id: UUID,
+    payload: UserStatusUpdateIn,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    if user_id == principal.user.id and not payload.is_active:
+        raise HTTPException(status_code=400, detail="Cannot deactivate your own active admin account")
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    target.is_active = payload.is_active
+    record_audit_log(
+        db,
+        action="user.status_updated",
+        entity_type="user",
+        entity_id=str(target.id),
+        actor_user_id=principal.user.id,
+        ip_address=client_ip_from_request(request),
+        details={"is_active": payload.is_active},
+    )
+    db.commit()
+    db.refresh(target)
+    return auth_service.build_user_out(db, target)
+
+
+@router.get("/orders", response_model=list[OrderOut])
+def list_all_orders(
+    canteen_id: Optional[UUID] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    payment_status: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
+    ),
+    db: Session = Depends(get_db),
+):
+    scoped_canteen = canteen_id
+    if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        enforce_canteen_scope(principal, canteen_id or principal.assigned_canteen_id)
+        scoped_canteen = canteen_id or principal.assigned_canteen_id
+
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .order_by(Order.created_at.desc())
+        .limit(limit)
+    )
+    if scoped_canteen:
+        stmt = stmt.where(Order.canteen_id == scoped_canteen)
+    if status_filter:
+        stmt = stmt.where(Order.status == status_filter)
+    if payment_status:
+        stmt = stmt.where(Order.payment_status == payment_status)
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        stmt = stmt.outerjoin(PickupToken, PickupToken.order_id == Order.id).where(
+            or_(
+                Order.order_number.ilike(like),
+                Order.guest_name.ilike(like),
+                Order.guest_phone.ilike(like),
+                PickupToken.token_code.ilike(like),
+            )
+        )
+    orders = db.scalars(stmt).all()
+    return [order_service.serialize_order(db, o) for o in orders]
 
 
 @router.get("/audit-logs", response_model=list[AuditLogOut])

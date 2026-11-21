@@ -10,12 +10,13 @@ import { LocationsTab } from "./components/LocationsTab";
 import { MenuTab, QRTab } from "./components/MenuQrTab";
 import { QueueTab, StaffTab } from "./components/QueueStaffTab";
 import { PromotionsTab, SystemTab } from "./components/PromotionsSystemTab";
+import { OrdersUsersTab } from "./components/OrdersUsersTab";
 
 export const AdminConsolePage: React.FC = () => {
   const { pushToast } = useToast();
   const { user, selectedCanteenId } = useAppStore();
   const [tab, setTab] = useState<
-    "analytics" | "locations" | "menu" | "qr" | "queue" | "staff" | "promotions" | "support" | "system"
+    "analytics" | "orders" | "locations" | "menu" | "qr" | "queue" | "staff" | "promotions" | "support" | "system"
   >("analytics");
 
   const { data: college, refetch: refetchCollege } = useQuery<CollegeSettings>({
@@ -123,6 +124,7 @@ export const AdminConsolePage: React.FC = () => {
       <div className="flex flex-wrap gap-2">
         {[
           { k: "analytics", l: "Analytics & Reports" },
+          { k: "orders", l: "Orders & Users" },
           { k: "locations", l: "Locations, Counters & Hours" },
           { k: "menu", l: "Menus & CSV" },
           { k: "qr", l: "Location QR Codes" },
@@ -209,6 +211,8 @@ export const AdminConsolePage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {tab === "orders" && <OrdersUsersTab activeCanteenId={activeCanteenId} />}
 
       {tab === "locations" && (
         <LocationsTab canteens={canteens} activeCanteenId={activeCanteenId} refetchCanteens={refetchCanteens} />

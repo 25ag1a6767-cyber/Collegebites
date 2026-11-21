@@ -36,3 +36,14 @@ async def ws_board(websocket: WebSocket, canteen_id: str):
             await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect(room, websocket)
+
+
+@router.websocket("/ws/notifications/{user_id}")
+async def ws_notifications(websocket: WebSocket, user_id: str):
+    room = f"user:{user_id}"
+    await ws_manager.connect(room, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        ws_manager.disconnect(room, websocket)

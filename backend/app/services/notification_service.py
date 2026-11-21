@@ -11,6 +11,7 @@ from app.integrations.sms_provider import send_sms_or_whatsapp
 from app.models.auth import User
 from app.models.engagement import Announcement, Notification, NotificationPreference
 from app.models.order import Order
+from app.websockets import emit_user_notification_sync
 
 
 def _create_notification(
@@ -37,6 +38,8 @@ def _create_notification(
         delivery_status="sent",
     )
     db.add(n)
+    if user_id:
+        emit_user_notification_sync(str(user_id), event_type, {"title": title, "message": message})
     return n
 
 

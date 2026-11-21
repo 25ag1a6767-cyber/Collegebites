@@ -1,26 +1,67 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useLocalSearchParams } from "expo-router";
-import { useQuery } from "@tanstack/react-query";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "react-native-qrcode-svg";
 import { API_BASE_URL, mobileApi } from "../../src/api/client";
 import { useMobileStore } from "../../src/store/useMobileStore";
 import { hmacSha256Hex } from "../../src/utils/hmacSha256";
 
+const STEPS = [
+  { key: "PAYMENT_CONFIRMED", label: "Paid" },
+  { key: "PLACED", label: "Placed" },
+  { key: "ACCEPTED", label: "Accepted" },
+  { key: "PREPARING", label: "Cooking" },
+  { key: "READY", label: "Ready" },
+  { key: "COMPLETED", label: "Collected" },
+];
+
 export default function OrderDetailScreen() {
   const { orderNumber } = useLocalSearchParams<{ orderNumber: string }>();
-  const guestTokens = useMobileStore((s) => s.guestOrderTokens);
-  const gToken = orderNumber ? guestTokens[orderNumber] : undefined;
+  const router = useRouter();
+  const qc = useQueryClient();
+  const { guestOrderTokens, cachedOrders, saveCachedOrder } = useMobileStore();
+  const gToken = orderNumber ? guestOrderTokens[orderNumber] : undefined;
   const suffix = gToken ? `?guest_token=${encodeURIComponent(gToken)}` : "";
   const [paying, setPaying] = useState(false);
   const [errMsg, setErrMsg] = useState("");
 
-  const { data: order, refetch } = useQuery<any>({
+  const { data: liveOrder, refetch } = useQuery<any>({
     queryKey: ["m-order", orderNumber],
     enabled: Boolean(orderNumber),
-    queryFn: async () => (await mobileApi.get(`/orders/${orderNumber}${suffix}`)).data,
+    queryFn: async () => {
+      const data = (await mobileApi.get(`/orders/${orderNumber}${suffix}`)).data;
+      if (orderNumber) saveCachedOrder(orderNumber, data);
+      return data;
+    },
     refetchInterval: 4000,
   });
+
+  const order = liveOrder || (orderNumber ? cachedOrders[orderNumber] : null);
+  const isOfflineCache = !liveOrder && Boolean(order);
+
+  const { data: receipt } = useQuery<any>({
+    queryKey: ["m-receipt", orderNumber],
+    enabled: Boolean(order?.payment_status === "CONFIRMED"),
+    queryFn: async () => (await mobileApi.get(`/tokens/receipts/${orderNumber}${suffix}`)).data,
+  });
+
+  // Real-time WebSocket updates
+  useEffect(() => {
+    if (!order?.id) return;
+    const wsBase = API_BASE_URL.replace(/^http/i, "ws").replace(/\/api\/v1$/, "");
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(`${wsBase}/api/v1/ws/orders/${order.id}`);
+      ws.onmessage = () => {
+        qc.invalidateQueries({ queryKey: ["m-order", orderNumber] });
+        qc.invalidateQueries({ queryKey: ["m-receipt", orderNumber] });
+      };
+    } catch {
+      // polling fallback handles it
+    }
+    return () => ws?.close();
+  }, [order?.id, orderNumber, qc]);
 
   if (!order) {
     return (
@@ -66,10 +107,32 @@ export default function OrderDetailScreen() {
     }
   };
 
+  const cancelOrder = async () => {
+    setErrMsg("");
+    try {
+      await mobileApi.post(`/orders/${order.id}/cancel${suffix}`, {
+        reason: "Cancelled by customer from mobile app",
+      });
+      await refetch();
+    } catch (e: any) {
+      setErrMsg(e?.response?.data?.detail || "Cannot cancel order at this stage");
+    }
+  };
+
+  const stepIdx = STEPS.findIndex((s) => s.key === order.status);
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ gap: 12, paddingBottom: 40 }}>
+      {isOfflineCache && (
+        <View style={styles.offlineBanner}>
+          <Text style={{ color: "#92400e", fontSize: 12, fontWeight: "700" }}>
+            Showing cached offline token slip (network unavailable).
+          </Text>
+        </View>
+      )}
+
       <View style={styles.tokenBox}>
-        <Text style={styles.smallLabel}>COLLEGEBITES • {order.canteen_name}</Text>
+        <Text style={styles.smallLabel}>COLLEGEBITES • {receipt?.college_name || order.canteen_name}</Text>
         <Text style={styles.ordNo}>{order.order_number}</Text>
         {order.pickup_token_code ? (
           <>
@@ -88,13 +151,41 @@ export default function OrderDetailScreen() {
         )}
       </View>
 
+      {/* Step Timeline */}
+      {!["CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(order.status) && (
+        <View style={styles.timelineRow}>
+          {STEPS.map((st, idx) => {
+            const reached = stepIdx >= idx || (order.status === "PLACED" && idx === 0);
+            return (
+              <View key={st.key} style={[styles.stepPill, reached && styles.stepReached]}>
+                <Text style={[styles.stepTxt, reached && { color: "#065f46" }]}>{st.label}</Text>
+              </View>
+            );
+          })}
+        </View>
+      )}
+
       {order.status === "PAYMENT_PENDING" && order.razorpay_order_id && (
         <View style={styles.payBox}>
           <Text style={styles.secTitle}>Complete Razorpay Payment (₹{order.total_amount})</Text>
           {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{errMsg}</Text>}
-          <Pressable disabled={paying} onPress={verifyTestRazorpay} style={styles.payBtn}>
-            <Text style={{ color: "#fff", fontWeight: "800" }}>{paying ? "Verifying..." : "Pay & Verify UPI Payment"}</Text>
-          </Pressable>
+          {order.razorpay_key_id && order.razorpay_key_id !== "rzp_test_collegebites_local" ? (
+            <Pressable
+              onPress={() => {
+                const webUrl = API_BASE_URL.replace(/\/api\/v1$/, "").replace(":8000", ":5173");
+                Linking.openURL(`${webUrl}/orders/${order.order_number}${suffix}`);
+              }}
+              style={styles.payBtn}
+            >
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Live Razorpay Checkout</Text>
+            </Pressable>
+          ) : (
+            <Pressable disabled={paying} onPress={verifyTestRazorpay} style={styles.payBtn}>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>
+                {paying ? "Verifying..." : "Pay & Verify UPI Payment (Test Mode)"}
+              </Text>
+            </Pressable>
+          )}
           <Pressable disabled={paying} onPress={failTestRazorpay} style={styles.cancelBtn}>
             <Text style={{ color: "#0f172a", fontWeight: "700" }}>Simulate Payment Failure</Text>
           </Pressable>
@@ -102,32 +193,66 @@ export default function OrderDetailScreen() {
       )}
 
       <View style={styles.card}>
-        <Text style={styles.secTitle}>Ordered Items</Text>
+        <Text style={styles.secTitle}>Complete Receipt Summary</Text>
+        <Text style={{ fontSize: 11, color: "#64748b" }}>
+          Customer: {receipt?.customer_name || order.guest_name || "Guest"} • Ref:{" "}
+          {receipt?.payment_reference || order.payment_method}
+        </Text>
         {order.items?.map((it: any) => (
-          <View key={it.id} style={styles.itemRow}>
-            <Text style={{ fontWeight: "700" }}>
-              {it.quantity}× {it.item_name} {it.variant_name ? `(${it.variant_name})` : ""}
-            </Text>
-            <Text style={{ fontWeight: "700" }}>₹{it.line_subtotal}</Text>
+          <View key={it.id} style={{ gap: 2 }}>
+            <View style={styles.itemRow}>
+              <Text style={{ fontWeight: "700", flex: 1 }}>
+                {it.quantity}× {it.item_name} {it.variant_name ? `(${it.variant_name})` : ""}
+              </Text>
+              <Text style={{ fontWeight: "700" }}>₹{it.line_subtotal}</Text>
+            </View>
+            {it.customizations?.map((c: any, idx: number) => (
+              <Text key={idx} style={{ fontSize: 11, color: "#64748b", paddingLeft: 10 }}>
+                • {c.option_name}: {c.option_value}
+              </Text>
+            ))}
           </View>
         ))}
         <View style={styles.divider} />
         <View style={styles.itemRow}>
+          <Text style={{ fontSize: 12, color: "#64748b" }}>Subtotal / Discount / Tax</Text>
+          <Text style={{ fontSize: 12, color: "#64748b" }}>
+            ₹{order.subtotal_amount} / -₹{order.discount_amount} / ₹{order.tax_amount}
+          </Text>
+        </View>
+        <View style={styles.itemRow}>
           <Text style={{ fontWeight: "900", fontSize: 16 }}>Total Paid</Text>
           <Text style={{ fontWeight: "900", fontSize: 16 }}>₹{order.total_amount}</Text>
         </View>
+        <Text style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
+          No in-app refunds per college policy.
+        </Text>
       </View>
+
+      {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontWeight: "700", fontSize: 12 }}>{errMsg}</Text>}
 
       {order.payment_status === "CONFIRMED" && (
         <Pressable
-          onPress={() =>
-            Linking.openURL(`${API_BASE_URL}/tokens/receipts/${order.order_number}/pdf${suffix}`)
-          }
+          onPress={() => Linking.openURL(`${API_BASE_URL}/tokens/receipts/${order.order_number}/pdf${suffix}`)}
           style={styles.pdfBtn}
         >
           <Text style={{ color: "#fff", fontWeight: "800" }}>Download Printable PDF Receipt</Text>
         </Pressable>
       )}
+
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        {["PAYMENT_PENDING", "PLACED", "ACCEPTED"].includes(order.status) && (
+          <Pressable onPress={cancelOrder} style={[styles.cancelBtn, { flex: 1 }]}>
+            <Text style={{ fontWeight: "700", color: "#991b1b" }}>Cancel Order</Text>
+          </Pressable>
+        )}
+        <Pressable
+          onPress={() => router.push(`/support?order_id=${order.id}`)}
+          style={[styles.cancelBtn, { flex: 1 }]}
+        >
+          <Text style={{ fontWeight: "700", color: "#0f172a" }}>Report Issue</Text>
+        </Pressable>
+      </View>
     </ScrollView>
   );
 }
@@ -135,17 +260,22 @@ export default function OrderDetailScreen() {
 const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   container: { flex: 1, backgroundColor: "#f8fafc", padding: 16 },
+  offlineBanner: { backgroundColor: "#fef3c7", borderRadius: 10, padding: 10 },
   tokenBox: { backgroundColor: "#0f172a", borderRadius: 18, padding: 20, alignItems: "center" },
   smallLabel: { color: "#fdba74", fontSize: 11, fontWeight: "800" },
   ordNo: { color: "#fff", fontSize: 14, fontWeight: "700", marginTop: 4 },
   tokenBig: { color: "#fff", fontSize: 44, fontWeight: "900", marginVertical: 10, letterSpacing: 2 },
   counterSub: { color: "#86efac", fontSize: 12, fontWeight: "700", marginTop: 10 },
   qrWrap: { backgroundColor: "#fff", padding: 12, borderRadius: 12 },
+  timelineRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  stepPill: { flex: 1, minWidth: 65, paddingVertical: 6, borderRadius: 8, backgroundColor: "#e2e8f0", alignItems: "center" },
+  stepReached: { backgroundColor: "#d1fae5" },
+  stepTxt: { fontSize: 11, fontWeight: "700", color: "#475569" },
   payBox: { backgroundColor: "#fff", borderRadius: 14, padding: 16, gap: 10, borderWidth: 1, borderColor: "#fed7aa" },
   payBtn: { backgroundColor: "#059669", borderRadius: 10, padding: 12, alignItems: "center" },
-  cancelBtn: { backgroundColor: "#e2e8f0", borderRadius: 10, padding: 10, alignItems: "center" },
+  cancelBtn: { backgroundColor: "#e2e8f0", borderRadius: 10, padding: 11, alignItems: "center" },
   pdfBtn: { backgroundColor: "#ea580c", borderRadius: 12, padding: 14, alignItems: "center" },
-  card: { backgroundColor: "#fff", borderRadius: 14, padding: 16, gap: 8 },
+  card: { backgroundColor: "#fff", borderRadius: 14, padding: 16, gap: 8, borderWidth: 1, borderColor: "#e2e8f0" },
   secTitle: { fontWeight: "800", fontSize: 15, marginBottom: 4 },
   itemRow: { flexDirection: "row", justifyContent: "space-between" },
   divider: { height: 1, backgroundColor: "#e2e8f0", marginVertical: 6 },

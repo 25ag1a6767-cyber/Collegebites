@@ -26,6 +26,8 @@ export default function RootLayout() {
         <Tabs.Screen name="checkout" options={{ title: "Checkout", tabBarLabel: "Cart" }} />
         <Tabs.Screen name="orders" options={{ title: "Orders", tabBarLabel: "Orders" }} />
         <Tabs.Screen name="profile" options={{ title: "Account", tabBarLabel: "Profile" }} />
+        <Tabs.Screen name="board" options={{ href: null, title: "Live Token Board" }} />
+        <Tabs.Screen name="support" options={{ href: null, title: "Customer Support" }} />
         <Tabs.Screen name="order/[orderNumber]" options={{ href: null, title: "Order Token & Receipt" }} />
       </Tabs>
     </QueryClientProvider>

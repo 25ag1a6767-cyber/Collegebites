@@ -1,6 +1,6 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
   ChefHat,
@@ -24,7 +24,25 @@ import { Badge, Button, crowdBadgeTone } from "../ui/Primitives";
 export const Navbar: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const { user, logout, selectedCanteenId, setSelectedCanteen } = useAppStore();
+  const [notifOpen, setNotifOpen] = useState(false);
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(`${proto}://${window.location.host}/api/v1/ws/notifications/${user.id}`);
+      ws.onmessage = () => {
+        qc.invalidateQueries({ queryKey: ["notifications-my"] });
+        qc.invalidateQueries({ queryKey: ["my-orders"] });
+      };
+    } catch {
+      // polling fallback handles it
+    }
+    return () => ws?.close();
+  }, [user?.id, qc]);
 
   const { data: college } = useQuery<CollegeSettings>({
     queryKey: ["college-settings"],
@@ -178,14 +196,62 @@ export const Navbar: React.FC = () => {
 
           {user ? (
             <>
-              <Button variant="ghost" size="sm" onClick={() => navigate("/profile")} className="relative">
-                <Bell className="h-4 w-4" />
-                {unreadCount > 0 && (
-                  <span className="absolute -right-0.5 -top-0.5 h-4 w-4 rounded-full bg-red-600 text-[10px] font-bold text-white flex items-center justify-center">
-                    {unreadCount}
-                  </span>
+              <div className="relative">
+                <Button variant="ghost" size="sm" onClick={() => setNotifOpen((o) => !o)} className="relative" aria-label="Notifications">
+                  <Bell className="h-4 w-4" />
+                  {unreadCount > 0 && (
+                    <span className="absolute -right-0.5 -top-0.5 h-4 w-4 rounded-full bg-red-600 text-[10px] font-bold text-white flex items-center justify-center">
+                      {unreadCount}
+                    </span>
+                  )}
+                </Button>
+                {notifOpen && (
+                  <div className="absolute right-0 mt-2 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl z-50">
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-2">
+                      <span className="text-xs font-extrabold text-slate-900">Notifications ({unreadCount} unread)</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNotifOpen(false);
+                          navigate("/profile");
+                        }}
+                        className="text-[11px] font-bold text-orange-600"
+                      >
+                        Manage
+                      </button>
+                    </div>
+                    <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
+                      {notifications.length === 0 ? (
+                        <div className="py-3 text-center text-slate-400">No notifications yet.</div>
+                      ) : (
+                        notifications.slice(0, 6).map((n) => (
+                          <div
+                            key={n.id}
+                            className={`rounded-xl border p-2 ${
+                              n.is_read ? "border-slate-100 bg-white" : "border-orange-200 bg-orange-50/50"
+                            }`}
+                          >
+                            <div className="font-bold text-slate-900">{n.title}</div>
+                            <div className="text-slate-600 mt-0.5 line-clamp-2">{n.message}</div>
+                            {!n.is_read && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  await api.post(`/notifications/${n.id}/read`);
+                                  qc.invalidateQueries({ queryKey: ["notifications-my"] });
+                                }}
+                                className="mt-1 text-[10px] font-bold text-orange-700"
+                              >
+                                Mark read
+                              </button>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
                 )}
-              </Button>
+              </div>
               <Button variant="ghost" size="sm" onClick={() => navigate("/profile")}>
                 <UserIcon className="h-4 w-4" />
                 <span className="hidden sm:inline">{user.full_name.split(" ")[0]}</span>

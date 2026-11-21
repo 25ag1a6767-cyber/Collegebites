@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -11,4 +12,14 @@ celery_app.conf.update(
     timezone="Asia/Kolkata",
     enable_utc=True,
     task_acks_late=True,
+    beat_schedule={
+        "cleanup-expired-auth-artifacts-hourly": {
+            "task": "app.workers.tasks.cleanup_expired_auth_artifacts_task",
+            "schedule": crontab(minute=0),
+        },
+        "scan-inventory-alerts-every-15m": {
+            "task": "app.workers.tasks.scan_inventory_alerts_task",
+            "schedule": crontab(minute="*/15"),
+        },
+    },
 )

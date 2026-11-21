@@ -78,6 +78,18 @@ export const CheckoutPage: React.FC = () => {
     }
   };
 
+  const updateItemNote = async (cartItemId: string, currentNote: string) => {
+    const next = window.prompt("Update special preparation note (kitchen instructions):", currentNote);
+    if (next === null) return;
+    try {
+      await api.patch(`/carts/items/${cartItemId}`, { special_instructions: next.trim() || "" });
+      refetchCart();
+      pushToast("Item customization updated", "success");
+    } catch (err) {
+      pushToast(getApiError(err), "error");
+    }
+  };
+
   const applyCoupon = async () => {
     if (!activeCanteen) return;
     try {
@@ -304,6 +316,13 @@ export const CheckoutPage: React.FC = () => {
                   {it.special_instructions && (
                     <div className="text-[11px] italic text-slate-500">Note: {it.special_instructions}</div>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => updateItemNote(it.id, it.special_instructions || "")}
+                    className="mt-0.5 text-[11px] font-semibold text-orange-600 hover:underline"
+                  >
+                    {it.special_instructions ? "Edit note" : "+ Add kitchen note"}
+                  </button>
                 </div>
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2 rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold">
