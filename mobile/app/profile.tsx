@@ -525,6 +525,7 @@ export default function ProfileScreen() {
                     try {
                       const r = await authApi.requestOtp({ target: identifier.trim(), purpose: "password_reset" });
                       setDevOtp(r.dev_otp || null);
+                      if (r.message) setMsg(r.message);
                     } catch (e: unknown) {
                       setMsg(getMobileApiError(e));
                     } finally {
@@ -592,6 +593,7 @@ export default function ProfileScreen() {
                     try {
                       const r = await authApi.requestOtp({ target: identifier.trim(), purpose: "login" });
                       setDevOtp(r.dev_otp || null);
+                      if (r.message) setMsg(r.message);
                     } catch (e: unknown) {
                       setMsg(getMobileApiError(e));
                     } finally {

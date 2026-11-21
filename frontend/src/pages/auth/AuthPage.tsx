@@ -24,6 +24,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
   const [password, setPassword] = useState("");
   const [otpCode, setOtpCode] = useState("");
   const [otpSent, setOtpSent] = useState(false);
+  const [otpStatusMsg, setOtpStatusMsg] = useState<string | null>(null);
   const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
@@ -69,13 +70,17 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
   const requestLoginOtp = async () => {
     if (!identifier.trim()) return pushToast("Enter your email or mobile number first", "error");
     setLoading(true);
+    setOtpStatusMsg(null);
     try {
       const res = await api.post("/auth/otp/request", { target: identifier.trim(), purpose: "login" });
       setOtpSent(true);
       setDevOtpHint(res.data.dev_otp || null);
+      setOtpStatusMsg(res.data.message || "Login OTP sent!");
       pushToast(res.data.message || "Login OTP sent!", "success");
     } catch (err) {
-      pushToast(getApiError(err, "Could not request OTP"), "error");
+      const msg = getApiError(err, "Could not request OTP");
+      setOtpStatusMsg(msg);
+      pushToast(msg, "error");
     } finally {
       setLoading(false);
     }
@@ -261,11 +266,19 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                     {otpSent ? "Resend" : "Send OTP"}
                   </Button>
                 </div>
+                {otpStatusMsg && (
+                  <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-1.5 text-xs text-amber-900">
+                    {otpStatusMsg}
+                  </div>
+                )}
                 {devOtpHint && (
                   <div className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs text-slate-700">
                     Dev/Test OTP: <strong className="font-mono">{devOtpHint}</strong>
                   </div>
                 )}
+                <p className="text-[11px] text-slate-500">
+                  Email OTP delivers directly via SMTP. Requesting with a registered phone falls back to your linked account email unless SMS gateway is enabled.
+                </p>
               </div>
             )}
 

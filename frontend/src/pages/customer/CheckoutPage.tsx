@@ -70,6 +70,18 @@ export const CheckoutPage: React.FC = () => {
   const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [otpVerifiedToken, setOtpVerifiedToken] = useState<string | null>(null);
   const [otpSent, setOtpSent] = useState(false);
+  const [otpStatusMsg, setOtpStatusMsg] = useState<string | null>(null);
+  const [otpErrorMsg, setOtpErrorMsg] = useState<string | null>(null);
+
+  const { data: otpCaps } = useQuery<{
+    email_otp_enabled: boolean;
+    sms_otp_enabled: boolean;
+    dev_echo_enabled: boolean;
+  }>({
+    queryKey: ["otp-capabilities"],
+    enabled: !user,
+    queryFn: async () => (await api.get("/auth/otp/capabilities")).data,
+  });
 
   // Gateway Checkout Sheet / Note modal state
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
@@ -104,18 +116,24 @@ export const CheckoutPage: React.FC = () => {
   const guestOtpTarget = guestEmail.trim() || guestPhone.trim();
 
   const sendGuestOtp = async () => {
+    setOtpErrorMsg(null);
+    setOtpStatusMsg(null);
     if (!guestOtpTarget) return pushToast("Enter your email address or mobile number first", "error");
     try {
       const res = await api.post("/auth/otp/request", { target: guestOtpTarget, purpose: "guest_checkout" });
       setOtpSent(true);
       setDevOtpHint(res.data.dev_otp || null);
+      setOtpStatusMsg(res.data.message || "OTP sent!");
       pushToast(res.data.message || "OTP sent!", "success");
     } catch (err) {
-      pushToast(getApiError(err, "Failed to send OTP"), "error");
+      const msg = getApiError(err, "Failed to send OTP");
+      setOtpErrorMsg(msg);
+      pushToast(msg, "error");
     }
   };
 
   const verifyGuestOtp = async () => {
+    setOtpErrorMsg(null);
     if (!guestOtpTarget) return pushToast("Enter your email or mobile number first", "error");
     try {
       const res = await api.post("/auth/otp/verify", {
@@ -124,9 +142,12 @@ export const CheckoutPage: React.FC = () => {
         code: otpCode.trim(),
       });
       setOtpVerifiedToken(res.data.verification_token);
+      setOtpStatusMsg(null);
       pushToast("Verified for guest checkout!", "success");
     } catch (err) {
-      pushToast(getApiError(err, "Invalid OTP"), "error");
+      const msg = getApiError(err, "Invalid OTP");
+      setOtpErrorMsg(msg);
+      pushToast(msg, "error");
     }
   };
 
@@ -321,34 +342,48 @@ export const CheckoutPage: React.FC = () => {
           {/* Guest Details + OTP */}
           {!user && (
             <Card className="p-5 space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="font-bold text-slate-900">Guest Ordering Details</h2>
-                <Badge tone="blue">No Registration Needed</Badge>
+                <Badge tone="blue">
+                  {otpCaps && !otpCaps.sms_otp_enabled && !otpCaps.dev_echo_enabled
+                    ? "Email OTP Active (SMS Gateway Unconfigured)"
+                    : "No Registration Needed"}
+                </Badge>
               </div>
-              <div className="grid gap-3 sm:grid-cols-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-xs font-bold text-slate-700">Your Name *</label>
                   <Input value={guestName} onChange={(e) => setGuestName(e.target.value)} placeholder="Visitor / Student Name" />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-bold text-slate-700">Email (For OTP)</label>
-                  <Input type="email" value={guestEmail} onChange={(e) => setGuestEmail(e.target.value)} placeholder="you@college.edu" />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-bold text-slate-700">Mobile Number *</label>
-                  <div className="flex gap-2">
-                    <Input value={guestPhone} onChange={(e) => setGuestPhone(e.target.value)} placeholder="+919876543210" />
-                    <Button type="button" size="sm" variant="outline" onClick={sendGuestOtp}>
-                      Send OTP
-                    </Button>
-                  </div>
+                  <label className="mb-1 block text-xs font-bold text-slate-700">Mobile Number (Order Contact) *</label>
+                  <Input value={guestPhone} onChange={(e) => setGuestPhone(e.target.value)} placeholder="+919876543210" />
                 </div>
               </div>
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="flex-1 min-w-[220px]">
+                  <label className="mb-1 block text-xs font-bold text-slate-700">
+                    Email Address for Verification OTP {otpCaps && !otpCaps.sms_otp_enabled ? "*" : "(Optional if using SMS)"}
+                  </label>
+                  <Input type="email" value={guestEmail} onChange={(e) => setGuestEmail(e.target.value)} placeholder="you@college.edu" />
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={sendGuestOtp}>
+                  {otpSent ? "Resend OTP" : "Send OTP"}
+                </Button>
+              </div>
+              {otpCaps && !otpCaps.sms_otp_enabled && !otpCaps.dev_echo_enabled && (
+                <div className="text-[11px] text-slate-500">
+                  Real Email OTP is active via college SMTP. Direct SMS OTP requires Twilio / SMS gateway credentials in server config.
+                </div>
+              )}
+              {otpErrorMsg && (
+                <div className="rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800">{otpErrorMsg}</div>
+              )}
 
               {college?.guest_otp_required && otpSent && !otpVerifiedToken && (
                 <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 space-y-2">
                   <div className="text-xs font-semibold text-amber-900">
-                    Enter 6-digit OTP to verify contact {devOtpHint ? `(Dev OTP: ${devOtpHint})` : ""}
+                    {otpStatusMsg || "Enter 6-digit OTP to verify"} {devOtpHint ? `(Dev OTP: ${devOtpHint})` : ""}
                   </div>
                   <div className="flex gap-2 max-w-xs">
                     <Input value={otpCode} onChange={(e) => setOtpCode(e.target.value)} placeholder="123456" maxLength={6} />

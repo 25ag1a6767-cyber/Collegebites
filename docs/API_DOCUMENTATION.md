@@ -22,7 +22,8 @@ Authentication: Bearer JWT access token (`Authorization: Bearer <access_token>`)
 ## 2. Authentication & OTP (`/api/v1/auth`)
 - `POST /api/v1/auth/register` — Universal account signup (`customer` role).
 - `POST /api/v1/auth/login` — Password login with email or phone.
-- `POST /api/v1/auth/otp/request` — Request 6-digit OTP (`login`, `guest_checkout`, `password_reset`, `phone_verify`). Dispatches SMTP email OTP for email targets; SMS targets dispatch via configured SMS provider (`503` in production if neither SMS nor linked email delivery is configured).
+- `GET /api/v1/auth/otp/capabilities` — Reports live Email SMTP OTP, SMS OTP, and dev-echo availability booleans.
+- `POST /api/v1/auth/otp/request` — Request 6-digit OTP (`login`, `guest_checkout`, `password_reset`, `phone_verify`). Dispatches SMTP email OTP for email targets; phone targets dispatch via SMS gateway if configured or fall back to registered account email (`400`/`503` in production if neither channel is configured).
 - `POST /api/v1/auth/otp/verify` — Verify OTP and receive signed `OTPVER.*` verification token.
 - `POST /api/v1/auth/otp/login` — Passwordless OTP login returning JWT tokens.
 - `POST /api/v1/auth/refresh` — Refresh token rotation with replay revocation.

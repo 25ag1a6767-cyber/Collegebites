@@ -169,15 +169,15 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
     db.add_all([main_canteen, snacks_canteen, juice_canteen])
     db.flush()
 
-    # Operating hours (00:00 - 23:59 default open in dev/test so checkout works at any hour; admins can adjust)
+    # Operating hours (00:00 - 23:59 default open so dev/test checkout works at any hour; admins can adjust)
     for c in (main_canteen, snacks_canteen, juice_canteen):
         for day in range(7):
             db.add(
                 OperatingHour(
                     canteen_id=c.id,
                     day_of_week=day,
-                    open_time=time(7, 0),
-                    close_time=time(22, 30),
+                    open_time=time(0, 0),
+                    close_time=time(23, 59),
                     is_closed=False,
                 )
             )

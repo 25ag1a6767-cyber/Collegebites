@@ -148,9 +148,14 @@ def test_email_otp_delivery_and_prod_sms_guard(client: TestClient, monkeypatch):
     assert len(sent_emails) == 1
     assert sent_emails[0][0] == "student@collegebites.edu"
 
-    # Phone OTP in production without SMS provider MUST fail explicitly with 503
+    # Phone OTP in production without SMS provider MUST fail explicitly with 400/503
     sms_res = client.post(
         "/api/v1/auth/otp/request",
         json={"target": "+919988776611", "purpose": "guest_checkout"},
     )
-    assert sms_res.status_code == 503
+    assert sms_res.status_code in (400, 503)
+
+    caps = client.get("/api/v1/auth/otp/capabilities")
+    assert caps.status_code == 200
+    assert caps.json()["sms_otp_enabled"] is False
+    assert caps.json()["dev_echo_enabled"] is False

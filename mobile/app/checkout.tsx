@@ -14,11 +14,8 @@ import { useMobileStore } from "../src/store/useMobileStore";
 const guestSchema = z
   .object({
     guestName: z.string().trim().min(2, "Guest name must be at least 2 characters."),
-    guestPhone: z.string().trim().optional().default(""),
+    guestPhone: z.string().trim().min(8, "Enter a valid mobile number (e.g. +919876543210)."),
     guestEmail: z.string().trim().optional().default(""),
-  })
-  .refine((v) => v.guestPhone.length >= 8 || (v.guestEmail.includes("@") && v.guestEmail.length >= 5), {
-    message: "Enter a valid email address or mobile number.",
   });
 
 export default function CheckoutScreen() {

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from uuid import UUID
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import (
     AuthenticatedPrincipal,
@@ -55,6 +56,19 @@ def logout(
 ):
     auth_service.logout_session(db, principal.session_id, principal.user.id, ip_address=client_ip_from_request(request))
     return MessageResponse(message="Logged out successfully")
+
+
+@router.get("/otp/capabilities")
+def get_otp_capabilities():
+    sms_prov = (settings.SMS_PROVIDER or "").strip().lower()
+    sms_ok = (sms_prov == "twilio" and bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN)) or (
+        sms_prov == "webhook" and bool(settings.SMS_WEBHOOK_URL)
+    )
+    return {
+        "email_otp_enabled": bool((settings.SMTP_HOST or "").strip()),
+        "sms_otp_enabled": bool(sms_ok),
+        "dev_echo_enabled": bool(not settings.is_production and settings.OTP_TEST_ECHO),
+    }
 
 
 @router.post("/otp/request", response_model=OTPRequestResponse)
