@@ -1,0 +1,360 @@
+from datetime import date, datetime, timezone
+from typing import Optional
+from uuid import UUID
+
+from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
+
+from app.core.security import sha256_hex, verify_signed_qr_token_format
+from app.models.college import Canteen, Counter
+from app.models.order import Order, OrderItem, SlotReservation
+from app.models.payment import (
+    OrderHandoverRecord,
+    OrderQRCode,
+    PickupToken,
+    QRVerificationEvent,
+)
+from app.schemas.operations import (
+    DigitalBoardResponse,
+    HandoverConfirmRequest,
+    PickupVerifyRequest,
+    PickupVerifyResponse,
+    TokenBoardItem,
+)
+from app.services.audit_service import record_audit_log
+from app.services.order_service import transition_order_status
+from app.websockets import emit_order_event_sync
+
+
+def _extract_qr_token(raw_payload: str) -> str:
+    txt = raw_payload.strip()
+    if "#token=" in txt:
+        return txt.split("#token=", 1)[1].split("&", 1)[0].strip()
+    if "token=" in txt:
+        return txt.split("token=", 1)[1].split("&", 1)[0].strip()
+    return txt
+
+
+def _log_verification(
+    db: Session,
+    *,
+    order: Optional[Order],
+    token_row: Optional[PickupToken],
+    staff_user_id: UUID,
+    canteen_id: Optional[UUID],
+    counter_id: Optional[UUID],
+    method: str,
+    presented: Optional[str],
+    result_code: str,
+    is_valid: bool,
+    details: str,
+) -> None:
+    masked = (presented[:12] + "...") if presented and len(presented) > 12 else presented
+    db.add(
+        QRVerificationEvent(
+            order_id=order.id if order else None,
+            pickup_token_id=token_row.id if token_row else None,
+            staff_user_id=staff_user_id,
+            canteen_id=canteen_id,
+            counter_id=counter_id,
+            verification_method=method,
+            presented_code_masked=masked,
+            result_code=result_code,
+            is_valid=is_valid,
+            details=details,
+        )
+    )
+    db.commit()
+
+
+def verify_pickup(db: Session, payload: PickupVerifyRequest, staff_user_id: UUID) -> PickupVerifyResponse:
+    """
+    Verify QR code, manual pickup token, or order number WITHOUT marking the order completed.
+    Never exposes private order details for invalid/unrecognized QR codes.
+    """
+    order: Optional[Order] = None
+    token_row: Optional[PickupToken] = None
+    method = "qr_scan"
+    presented = ""
+
+    if payload.qr_payload:
+        method = "qr_scan"
+        raw_token = _extract_qr_token(payload.qr_payload)
+        presented = raw_token
+        if not verify_signed_qr_token_format(raw_token):
+            _log_verification(
+                db,
+                order=None,
+                token_row=None,
+                staff_user_id=staff_user_id,
+                canteen_id=payload.canteen_id,
+                counter_id=payload.counter_id,
+                method=method,
+                presented=presented,
+                result_code="INVALID_QR",
+                is_valid=False,
+                details="QR token signature format failed",
+            )
+            return PickupVerifyResponse(
+                valid=False,
+                can_handover=False,
+                result_code="INVALID_QR",
+                message="Invalid or tampered QR code.",
+            )
+        token_hash = sha256_hex(raw_token)
+        qr_rec = db.scalar(select(OrderQRCode).where(OrderQRCode.token_hash == token_hash))
+        if not qr_rec or qr_rec.revoked_at is not None or (qr_rec.expires_at and qr_rec.expires_at <= datetime.now(timezone.utc)):
+            _log_verification(
+                db,
+                order=None,
+                token_row=None,
+                staff_user_id=staff_user_id,
+                canteen_id=payload.canteen_id,
+                counter_id=payload.counter_id,
+                method=method,
+                presented=presented,
+                result_code="INVALID_QR",
+                is_valid=False,
+                details="QR token not found, revoked, or expired",
+            )
+            return PickupVerifyResponse(
+                valid=False,
+                can_handover=False,
+                result_code="INVALID_QR",
+                message="QR code is invalid, expired, or revoked.",
+            )
+        order = db.scalar(
+            select(Order)
+            .options(selectinload(Order.items).selectinload(OrderItem.customizations))
+            .where(Order.id == qr_rec.order_id)
+        )
+        token_row = db.get(PickupToken, qr_rec.pickup_token_id)
+
+    elif payload.pickup_token:
+        method = "manual_token"
+        presented = payload.pickup_token.strip().upper()
+        stmt = select(PickupToken).where(PickupToken.token_code == presented, PickupToken.service_date == date.today())
+        if payload.canteen_id:
+            stmt = stmt.where(PickupToken.canteen_id == payload.canteen_id)
+        token_row = db.scalar(stmt.order_by(PickupToken.created_at.desc()))
+        if token_row:
+            order = db.scalar(
+                select(Order)
+                .options(selectinload(Order.items).selectinload(OrderItem.customizations))
+                .where(Order.id == token_row.order_id)
+            )
+    elif payload.order_number:
+        method = "order_number"
+        presented = payload.order_number.strip().upper()
+        order = db.scalar(
+            select(Order)
+            .options(selectinload(Order.items).selectinload(OrderItem.customizations))
+            .where(Order.order_number == presented)
+        )
+        if order:
+            token_row = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
+    else:
+        raise HTTPException(status_code=400, detail="Provide qr_payload, pickup_token, or order_number")
+
+    if not order:
+        _log_verification(
+            db,
+            order=None,
+            token_row=None,
+            staff_user_id=staff_user_id,
+            canteen_id=payload.canteen_id,
+            counter_id=payload.counter_id,
+            method=method,
+            presented=presented,
+            result_code="INVALID_QR",
+            is_valid=False,
+            details="No matching order found",
+        )
+        return PickupVerifyResponse(
+            valid=False,
+            can_handover=False,
+            result_code="INVALID_QR",
+            message="Order or token not found.",
+        )
+
+    canteen = db.get(Canteen, order.canteen_id)
+    counter = db.get(Counter, order.counter_id)
+    items_list = [
+        {
+            "item_name": it.item_name,
+            "variant_name": it.variant_name,
+            "quantity": it.quantity,
+            "special_instructions": it.special_instructions,
+            "customizations": [f"{c.option_name}: {c.option_value}" for c in it.customizations],
+        }
+        for it in order.items
+    ]
+
+    def _resp(valid: bool, can_handover: bool, code: str, msg: str, prev_ho: Optional[datetime] = None) -> PickupVerifyResponse:
+        _log_verification(
+            db,
+            order=order,
+            token_row=token_row,
+            staff_user_id=staff_user_id,
+            canteen_id=order.canteen_id,
+            counter_id=payload.counter_id or order.counter_id,
+            method=method,
+            presented=presented,
+            result_code=code,
+            is_valid=valid,
+            details=msg,
+        )
+        return PickupVerifyResponse(
+            valid=valid,
+            can_handover=can_handover,
+            result_code=code,
+            message=msg,
+            order_id=order.id,
+            order_number=order.order_number,
+            pickup_token=token_row.token_code if token_row else None,
+            order_status=order.status,
+            payment_status=order.payment_status,
+            canteen_name=canteen.name if canteen else None,
+            counter_id=order.counter_id,
+            counter_name=counter.name if counter else None,
+            previous_handover_at=prev_ho,
+            items=items_list if valid or code in ("ORDER_NOT_READY", "WRONG_COUNTER", "ALREADY_COLLECTED") else [],
+        )
+
+    if order.status in ("CANCELLED", "REJECTED"):
+        return _resp(False, False, "CANCELLED_OR_REJECTED", f"Order has been {order.status.lower()}. Reject pickup.")
+
+    if order.payment_status != "CONFIRMED":
+        return _resp(False, False, "PAYMENT_NOT_CONFIRMED", "Payment is not confirmed. Reject pickup.")
+
+    existing_ho = db.scalar(select(OrderHandoverRecord).where(OrderHandoverRecord.order_id == order.id))
+    if order.status == "COMPLETED" or existing_ho:
+        prev_time = existing_ho.handed_over_at if existing_ho else order.completed_at
+        return _resp(False, False, "ALREADY_COLLECTED", "Order already collected. Duplicate handover rejected.", prev_ho=prev_time)
+
+    if payload.canteen_id and payload.canteen_id != order.canteen_id:
+        return _resp(False, False, "WRONG_CANTEEN", f"Wrong canteen. Order belongs to {canteen.name if canteen else 'another canteen'}.")
+
+    if payload.counter_id and payload.counter_id != order.counter_id:
+        return _resp(False, False, "WRONG_COUNTER", f"Wrong counter. Direct customer to {counter.name if counter else 'assigned counter'}.")
+
+    if order.status != "READY":
+        return _resp(False, False, "ORDER_NOT_READY", f"Food is still being prepared (status: {order.status}).")
+
+    return _resp(True, True, "VALID_ORDER", "Verified! Ready for food handover.")
+
+
+def confirm_handover(db: Session, payload: HandoverConfirmRequest, staff_user_id: UUID) -> OrderHandoverRecord:
+    """
+    Atomically confirm food handover.
+    Prevents concurrent or duplicate handover using SELECT ... FOR UPDATE and unique DB constraint.
+    """
+    order = db.scalar(select(Order).where(Order.id == payload.order_id).with_for_update())
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.payment_status != "CONFIRMED":
+        raise HTTPException(status_code=409, detail="Payment not confirmed for this order")
+
+    existing_ho = db.scalar(select(OrderHandoverRecord).where(OrderHandoverRecord.order_id == order.id))
+    if existing_ho or order.status == "COMPLETED":
+        raise HTTPException(status_code=409, detail="Order has already been collected; duplicate handover rejected")
+
+    if order.status != "READY":
+        raise HTTPException(status_code=409, detail=f"Order cannot be handed over while in status {order.status}")
+
+    if payload.counter_id and payload.counter_id != order.counter_id:
+        counter = db.get(Counter, order.counter_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Wrong counter. Please complete handover at {counter.name if counter else 'assigned counter'}",
+        )
+
+    token_row = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id).with_for_update())
+    if not token_row:
+        raise HTTPException(status_code=409, detail="Pickup token missing for order")
+
+    now = datetime.now(timezone.utc)
+    transition_order_status(db, order, "COMPLETED", actor_user_id=staff_user_id, reason="Food handed over at pickup counter")
+    token_row.status = "HANDED_OVER"
+
+    resv = db.scalar(select(SlotReservation).where(SlotReservation.order_id == order.id))
+    if resv and resv.status == "reserved":
+        resv.status = "fulfilled"
+
+    handover = OrderHandoverRecord(
+        order_id=order.id,
+        pickup_token_id=token_row.id,
+        counter_id=order.counter_id,
+        handed_over_by_user_id=staff_user_id,
+        verification_method=payload.verification_method,
+        handed_over_at=now,
+        notes=payload.notes,
+    )
+    db.add(handover)
+    record_audit_log(
+        db,
+        action="pickup.handover_confirmed",
+        entity_type="order",
+        entity_id=order.order_number,
+        actor_user_id=staff_user_id,
+        details={"pickup_token": token_row.token_code, "method": payload.verification_method},
+    )
+    db.commit()
+    db.refresh(handover)
+
+    try:
+        from app.services.notification_service import notify_order_completed
+        notify_order_completed(db, order)
+        db.commit()
+    except ImportError:
+        pass
+
+    emit_order_event_sync(
+        str(order.canteen_id),
+        str(order.id),
+        "order.completed",
+        {"pickup_token": token_row.token_code, "status": "COMPLETED"},
+    )
+    return handover
+
+
+def get_digital_token_board(db: Session, canteen_id: UUID) -> DigitalBoardResponse:
+    """Publicly safe display board for TV/Monitor — never exposes private customer PII."""
+    canteen = db.get(Canteen, canteen_id)
+    if not canteen:
+        raise HTTPException(status_code=404, detail="Canteen not found")
+
+    rows = db.execute(
+        select(PickupToken.token_code, Counter.name, Order.status, Order.ready_at, Order.completed_at)
+        .join(Order, Order.id == PickupToken.order_id)
+        .join(Counter, Counter.id == PickupToken.counter_id)
+        .where(
+            Order.canteen_id == canteen_id,
+            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY", "COMPLETED")),
+        )
+        .order_by(Order.updated_at.desc())
+        .limit(80)
+    ).all()
+
+    preparing: list[TokenBoardItem] = []
+    ready: list[TokenBoardItem] = []
+    completed: list[TokenBoardItem] = []
+    for token_code, counter_name, status_val, ready_at, _completed_at in rows:
+        item = TokenBoardItem(token_code=token_code, counter_name=counter_name, order_status=status_val, ready_at=ready_at)
+        if status_val in ("PLACED", "ACCEPTED", "PREPARING"):
+            preparing.append(item)
+        elif status_val == "READY":
+            ready.append(item)
+        elif status_val == "COMPLETED" and len(completed) < 10:
+            completed.append(item)
+
+    return DigitalBoardResponse(
+        canteen_id=canteen.id,
+        canteen_name=canteen.name,
+        now_preparing=preparing,
+        ready_for_pickup=ready,
+        recently_completed=completed,
+        updated_at=datetime.now(timezone.utc),
+    )

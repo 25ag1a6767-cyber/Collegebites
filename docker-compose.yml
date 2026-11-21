@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: collegebites_dev_password
+      POSTGRES_DB: collegebites
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+psycopg://postgres:collegebites_dev_password@postgres:5432/collegebites
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: change-me-in-production-min-64-chars-secret-key-collegebites-docker
+      QR_SIGNING_SECRET: change-me-in-production-min-64-chars-qr-secret-collegebites-docker
+      RAZORPAY_TEST_MODE: "true"
+      OTP_TEST_ECHO: "true"
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "alembic upgrade head && python -m app.cli.seed_demo && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build: ./backend
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:collegebites_dev_password@postgres:5432/collegebites
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.workers.celery_app worker --loglevel=info
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  pg_data:

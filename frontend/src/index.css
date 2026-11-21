@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .print-receipt-58mm {
+    width: 58mm !important;
+    max-width: 58mm !important;
+    font-size: 10px !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 2mm !important;
+  }
+  .print-receipt-80mm {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    font-size: 11px !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 3mm !important;
+  }
+  .print-receipt-a4 {
+    width: 100% !important;
+    max-width: 190mm !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 auto !important;
+  }
+}

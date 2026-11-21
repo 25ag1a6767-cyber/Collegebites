@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "CollegeBites",
+    "slug": "collegebites",
+    "version": "1.0.0",
+    "scheme": "collegebites",
+    "orientation": "portrait",
+    "platforms": ["ios", "android", "web"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "edu.collegebites.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scan canteen table, counter, and order pickup QR codes."
+      }
+    },
+    "android": {
+      "package": "edu.collegebites.app",
+      "permissions": ["CAMERA", "NOTIFICATIONS"]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      ["expo-camera", { "cameraPermission": "Allow CollegeBites to scan canteen and order QR codes." }],
+      "expo-notifications"
+    ]
+  }
+}
