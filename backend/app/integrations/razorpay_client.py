@@ -4,33 +4,39 @@ import secrets
 from decimal import Decimal
 from typing import Any, Optional
 
-import razorpay
+import httpx
 
 from app.core.config import settings
 
+RAZORPAY_API_BASE = "https://api.razorpay.com/v1"
+
 
 class RazorpayGateway:
-    """Razorpay integration supporting real live/sandbox keys and deterministic local HMAC test mode."""
+    """Razorpay integration supporting real live/sandbox REST orders and deterministic local HMAC test mode."""
 
     def __init__(self) -> None:
         self.key_id = settings.RAZORPAY_KEY_ID or "rzp_test_collegebites_local"
         self.key_secret = settings.RAZORPAY_KEY_SECRET or "rzp_test_secret_collegebites_local"
         self.webhook_secret = settings.RAZORPAY_WEBHOOK_SECRET or "rzp_webhook_secret_collegebites_local"
         self.use_live_api = bool(settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET and not settings.RAZORPAY_TEST_MODE)
-        self._client = razorpay.Client(auth=(self.key_id, self.key_secret)) if self.use_live_api else None
 
     def create_order(self, *, amount_inr: Decimal, receipt_ref: str, notes: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         amount_paise = int((amount_inr * 100).quantize(Decimal("1")))
-        if self._client is not None:
-            return self._client.order.create(
-                {
+        if self.use_live_api:
+            resp = httpx.post(
+                f"{RAZORPAY_API_BASE}/orders",
+                auth=(self.key_id, self.key_secret),
+                json={
                     "amount": amount_paise,
                     "currency": "INR",
                     "receipt": receipt_ref[:40],
                     "payment_capture": 1,
                     "notes": notes or {},
-                }
+                },
+                timeout=15.0,
             )
+            resp.raise_for_status()
+            return resp.json()
         return {
             "id": f"order_test_{secrets.token_hex(8)}",
             "entity": "order",

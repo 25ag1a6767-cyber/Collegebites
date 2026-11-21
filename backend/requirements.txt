@@ -10,7 +10,7 @@ psycopg2-binary==2.9.10
 redis==5.1.1
 fakeredis==2.26.2
 celery==5.4.0
-razorpay==1.4.2
+setuptools>=68.0,<81.0
 qrcode[pil]==8.0
 reportlab==4.2.5
 pillow==11.0.0
