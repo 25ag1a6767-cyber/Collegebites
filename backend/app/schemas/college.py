@@ -23,8 +23,10 @@ class CollegeSettingsOut(ORMModel):
     kiosk_enabled: bool
     guest_otp_required: bool
     razorpay_enabled: bool
+    stripe_enabled: bool = True
     cash_at_counter_enabled: bool
     pay_at_pickup_enabled: bool
+    college_timezone: str = "Asia/Kolkata"
 
 
 class CollegeSettingsUpdate(BaseModel):
@@ -39,8 +41,10 @@ class CollegeSettingsUpdate(BaseModel):
     kiosk_enabled: Optional[bool] = None
     guest_otp_required: Optional[bool] = None
     razorpay_enabled: Optional[bool] = None
+    stripe_enabled: Optional[bool] = None
     cash_at_counter_enabled: Optional[bool] = None
     pay_at_pickup_enabled: Optional[bool] = None
+    college_timezone: Optional[str] = Field(default=None, max_length=64)
 
 
 class CounterCreate(BaseModel):
@@ -62,6 +66,14 @@ class CounterOut(ORMModel):
     max_queue_capacity: int
 
 
+class CounterUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    counter_type: Optional[str] = Field(default=None, pattern="^(pickup|cashier|express|both)$")
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+    max_queue_capacity: Optional[int] = Field(default=None, ge=1, le=500)
+
+
 class KitchenCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     code: str = Field(min_length=1, max_length=32)
@@ -79,11 +91,53 @@ class KitchenOut(ORMModel):
     is_active: bool
 
 
+class KitchenUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    description: Optional[str] = None
+    max_active_orders: Optional[int] = Field(default=None, ge=1, le=500)
+    is_active: Optional[bool] = None
+
+
+class KitchenStationCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    station_type: str = Field(default="general", max_length=64)
+
+
+class KitchenStationOut(ORMModel):
+    id: UUID
+    kitchen_id: UUID
+    name: str
+    station_type: str
+    is_active: bool
+
+
+class PickupLocationCreate(BaseModel):
+    counter_id: UUID
+    name: str = Field(min_length=2, max_length=120)
+    display_code: str = Field(min_length=1, max_length=32)
+
+
+class PickupLocationOut(ORMModel):
+    id: UUID
+    canteen_id: UUID
+    counter_id: UUID
+    name: str
+    display_code: str
+    is_active: bool
+
+
 class DiningTableCreate(BaseModel):
     table_number: str = Field(min_length=1, max_length=32)
     counter_id: Optional[UUID] = None
     zone_label: Optional[str] = Field(default=None, max_length=80)
     capacity: int = Field(default=4, ge=1, le=30)
+
+
+class DiningTableUpdate(BaseModel):
+    counter_id: Optional[UUID] = None
+    zone_label: Optional[str] = Field(default=None, max_length=80)
+    capacity: Optional[int] = Field(default=None, ge=1, le=30)
+    is_active: Optional[bool] = None
 
 
 class DiningTableOut(ORMModel):
@@ -119,6 +173,15 @@ class HolidayCreate(BaseModel):
     is_full_day: bool = True
     start_time: Optional[time] = None
     end_time: Optional[time] = None
+
+
+class HolidayUpdate(BaseModel):
+    holiday_date: Optional[date] = None
+    title: Optional[str] = Field(default=None, min_length=2, max_length=160)
+    is_full_day: Optional[bool] = None
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    is_active: Optional[bool] = None
 
 
 class HolidayOut(ORMModel):

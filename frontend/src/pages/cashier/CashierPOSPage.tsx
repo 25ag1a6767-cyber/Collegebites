@@ -40,6 +40,14 @@ export const CashierPOSPage: React.FC = () => {
   });
 
   const [tab, setTab] = useState<"pos" | "orders" | "shift">("pos");
+
+  const { data: pendingCounterOrders = [], refetch: refetchPendingCounter } = useQuery<Order[]>({
+    queryKey: ["pos-pending-counter", activeCanteenId],
+    enabled: Boolean(activeCanteenId && tab === "orders"),
+    queryFn: async () => (await api.get(`/pos/orders/pending-counter?canteen_id=${activeCanteenId}`)).data,
+    refetchInterval: 5000,
+  });
+
   const [searchMenu, setSearchMenu] = useState("");
   const [posLines, setPosLines] = useState<PosLine[]>([]);
   const [customerName, setCustomerName] = useState("Walk-in Customer");
@@ -128,6 +136,7 @@ export const CashierPOSPage: React.FC = () => {
       const recRes = await api.get<ReceiptSnapshot>(`/tokens/receipts/${res.data.order_number}`);
       setActiveReceipt(recRes.data);
       searchOrders();
+      refetchPendingCounter();
       refetchShift();
     } catch (err) {
       pushToast(getApiError(err), "error");
@@ -299,7 +308,35 @@ export const CashierPOSPage: React.FC = () => {
       )}
 
       {tab === "orders" && (
-        <Card className="p-5 space-y-4">
+        <div className="space-y-5">
+          <Card className="p-5 space-y-3">
+            <h2 className="font-bold text-slate-900">
+              Pending Cash / Pay-at-Pickup Queue ({pendingCounterOrders.length})
+            </h2>
+            {pendingCounterOrders.length === 0 ? (
+              <div className="text-xs text-slate-500">No orders awaiting counter payment in this canteen.</div>
+            ) : (
+              <div className="space-y-2">
+                {pendingCounterOrders.map((o) => (
+                  <div key={o.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50/50 p-3 text-xs">
+                    <div>
+                      <div className="font-bold text-sm">
+                        {o.order_number} <Badge tone="amber">{o.payment_method}</Badge>
+                      </div>
+                      <div className="text-slate-600 mt-0.5">
+                        {o.guest_name || "Registered Customer"} • ₹{o.total_amount}
+                      </div>
+                    </div>
+                    <Button size="sm" variant="success" onClick={() => collectPendingCash(o.id)}>
+                      Collect Cash & Issue Token
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card className="p-5 space-y-4">
           <form onSubmit={searchOrders} className="flex gap-2 max-w-xl">
             <Input
               value={orderSearchQ}
@@ -336,8 +373,12 @@ export const CashierPOSPage: React.FC = () => {
                       size="sm"
                       variant="outline"
                       onClick={async () => {
-                        const rec = await api.get<ReceiptSnapshot>(`/tokens/receipts/${o.order_number}`);
-                        setActiveReceipt(rec.data);
+                        try {
+                          const rec = await api.get<ReceiptSnapshot>(`/tokens/receipts/${o.order_number}`);
+                          setActiveReceipt(rec.data);
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
                       }}
                     >
                       <Printer className="h-3.5 w-3.5" /> View / Reprint Slip
@@ -347,7 +388,8 @@ export const CashierPOSPage: React.FC = () => {
               </div>
             ))}
           </div>
-        </Card>
+          </Card>
+        </div>
       )}
 
       {tab === "shift" && (
@@ -359,12 +401,16 @@ export const CashierPOSPage: React.FC = () => {
               <Input value={openingCash} onChange={(e) => setOpeningCash(e.target.value)} placeholder="500.00" />
               <Button
                 onClick={async () => {
-                  await api.post("/pos/shifts/open", {
-                    canteen_id: activeCanteenId,
-                    opening_cash_amount: openingCash,
-                  });
-                  pushToast("Cashier shift opened", "success");
-                  refetchShift();
+                  try {
+                    await api.post("/pos/shifts/open", {
+                      canteen_id: activeCanteenId,
+                      opening_cash_amount: openingCash,
+                    });
+                    pushToast("Cashier shift opened", "success");
+                    refetchShift();
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
                 }}
               >
                 Open Cash Shift
@@ -394,12 +440,16 @@ export const CashierPOSPage: React.FC = () => {
                 <Button
                   variant="danger"
                   onClick={async () => {
-                    await api.post("/pos/shifts/close", {
-                      closing_cash_amount: closingCash || currentShift.shift_sales_summary?.expected_cash_in_drawer || "0",
-                      closing_notes: closingNotes,
-                    });
-                    pushToast("Shift closed & audited", "success");
-                    refetchShift();
+                    try {
+                      await api.post("/pos/shifts/close", {
+                        closing_cash_amount: closingCash || currentShift.shift_sales_summary?.expected_cash_in_drawer || "0",
+                        closing_notes: closingNotes,
+                      });
+                      pushToast("Shift closed & audited", "success");
+                      refetchShift();
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
                   }}
                 >
                   Close Shift
@@ -416,7 +466,20 @@ export const CashierPOSPage: React.FC = () => {
         title={`Order Receipt • Token ${activeReceipt?.pickup_token}`}
         maxWidth="max-w-2xl"
       >
-        {activeReceipt && <ReceiptSlip receipt={activeReceipt} allowStaffReprint onPrinted={() => {}} />}
+        {activeReceipt && (
+          <ReceiptSlip
+            receipt={activeReceipt}
+            allowStaffReprint
+            onPrinted={async () => {
+              try {
+                const refreshed = await api.get<ReceiptSnapshot>(`/tokens/receipts/${activeReceipt.order_number}`);
+                setActiveReceipt(refreshed.data);
+              } catch {
+                // ignore refresh failure
+              }
+            }}
+          />
+        )}
       </Modal>
     </div>
   );

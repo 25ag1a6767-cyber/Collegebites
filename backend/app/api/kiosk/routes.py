@@ -43,7 +43,7 @@ class KioskDeviceUpdateIn(BaseModel):
 class KioskOrderIn(BaseModel):
     device_code: str = Field(min_length=3, max_length=64)
     canteen_id: UUID
-    payment_method: str = Field(default="razorpay", pattern="^(razorpay|cash)$")
+    payment_method: str = Field(default="razorpay", pattern="^(razorpay|stripe|cash)$")
     guest_name: str = Field(default="Kiosk Guest", max_length=160)
     guest_phone: Optional[str] = Field(default="0000000000", max_length=32)
     language: str = "en"
@@ -67,6 +67,7 @@ def kiosk_status(db: Session = Depends(get_db)):
                 "is_enabled": d.is_enabled,
                 "idle_timeout_seconds": d.idle_timeout_seconds,
                 "supported_languages": d.supported_languages,
+                "last_heartbeat_at": d.last_heartbeat_at.isoformat() if d.last_heartbeat_at else None,
             }
             for d in devices
         ],
@@ -117,6 +118,10 @@ def create_kiosk_order(payload: KioskOrderIn, request: Request, db: Session = De
     dev = db.scalar(select(KioskDevice).where(KioskDevice.device_code == payload.device_code))
     if not dev or not dev.is_enabled:
         raise HTTPException(status_code=403, detail="Kiosk device is not registered or is disabled")
+    if payload.canteen_id != dev.canteen_id:
+        raise HTTPException(status_code=400, detail="Kiosk device belongs to a different canteen")
+    if dev.supported_languages and payload.language not in dev.supported_languages:
+        raise HTTPException(status_code=400, detail=f"Language '{payload.language}' is not enabled on this kiosk")
 
     dev.last_heartbeat_at = datetime.now(timezone.utc)
     co_req = CheckoutRequest(

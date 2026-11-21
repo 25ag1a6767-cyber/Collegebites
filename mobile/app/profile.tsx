@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { mobileApi } from "../src/api/client";
+import { getMobileApiError, mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 import { registerExpoPushToken } from "../src/notifications/registerPush";
 
@@ -12,19 +12,30 @@ export default function ProfileScreen() {
   const { user, setAuth, logout } = useMobileStore();
 
   const [mode, setMode] = useState<"login" | "register">("login");
+  const [loginMethod, setLoginMethod] = useState<"password" | "otp">("password");
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [otpCode, setOtpCode] = useState("");
+  const [devOtp, setDevOtp] = useState<string | null>(null);
+  const [resetMode, setResetMode] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
   const [regName, setRegName] = useState("");
   const [regEmail, setRegEmail] = useState("");
   const [regPhone, setRegPhone] = useState("");
   const [regCollegeId, setRegCollegeId] = useState("");
+  const [regReferral, setRegReferral] = useState("");
   const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
 
   // Signed-in edit fields
   const [fullName, setFullName] = useState("");
+  const [phoneInput, setPhoneInput] = useState("");
   const [collegeId, setCollegeId] = useState("");
   const [department, setDepartment] = useState("");
   const [referralInput, setReferralInput] = useState("");
+  const [curPw, setCurPw] = useState("");
+  const [chgNewPw, setChgNewPw] = useState("");
+  const [confirmDeact, setConfirmDeact] = useState(false);
 
   const { data: profile } = useQuery<any>({
     queryKey: ["m-profile"],
@@ -59,6 +70,7 @@ export default function ProfileScreen() {
   useEffect(() => {
     if (profile) {
       setFullName(profile.full_name || "");
+      setPhoneInput(profile.phone || "");
       setCollegeId(profile.college_id_number || "");
       setDepartment(profile.department || "");
     }
@@ -66,17 +78,24 @@ export default function ProfileScreen() {
 
   const login = async () => {
     setMsg("");
+    setBusy(true);
     try {
-      const res = await mobileApi.post("/auth/login", { identifier: identifier.trim(), password });
+      const res =
+        loginMethod === "otp"
+          ? await mobileApi.post("/auth/otp/login", { target: identifier.trim(), code: otpCode.trim() })
+          : await mobileApi.post("/auth/login", { identifier: identifier.trim(), password });
       await setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
       await registerExpoPushToken();
-    } catch (e: any) {
-      setMsg(e?.response?.data?.detail || "Login failed");
+    } catch (e: unknown) {
+      setMsg(getMobileApiError(e, "Login failed"));
+    } finally {
+      setBusy(false);
     }
   };
 
   const register = async () => {
     setMsg("");
+    setBusy(true);
     try {
       const res = await mobileApi.post("/auth/register", {
         full_name: regName.trim(),
@@ -84,11 +103,14 @@ export default function ProfileScreen() {
         phone: regPhone.trim() || null,
         password,
         college_id_number: regCollegeId.trim() || null,
+        referral_code: regReferral.trim() || null,
       });
       await setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
       await registerExpoPushToken();
-    } catch (e: any) {
-      setMsg(e?.response?.data?.detail || "Registration failed");
+    } catch (e: unknown) {
+      setMsg(getMobileApiError(e, "Registration failed"));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -101,21 +123,32 @@ export default function ProfileScreen() {
             {user.email || user.phone} • Roles: {user.roles.join(", ")}
           </Text>
           <TextInput style={styles.input} value={fullName} onChangeText={setFullName} placeholder="Full Name" />
+          <TextInput style={styles.input} value={phoneInput} onChangeText={setPhoneInput} placeholder="Mobile (+91...)" />
           <TextInput style={styles.input} value={collegeId} onChangeText={setCollegeId} placeholder="College ID / Roll No" />
           <TextInput style={styles.input} value={department} onChangeText={setDepartment} placeholder="Department" />
           <Pressable
+            disabled={busy}
             onPress={async () => {
-              await mobileApi.patch("/customers/profile", {
-                full_name: fullName,
-                college_id_number: collegeId,
-                department,
-              });
-              qc.invalidateQueries({ queryKey: ["m-profile"] });
-              setMsg("Profile saved.");
+              setBusy(true);
+              setMsg("");
+              try {
+                await mobileApi.patch("/customers/profile", {
+                  full_name: fullName,
+                  phone: phoneInput.trim() || null,
+                  college_id_number: collegeId,
+                  department,
+                });
+                qc.invalidateQueries({ queryKey: ["m-profile"] });
+                setMsg("Profile saved.");
+              } catch (e: unknown) {
+                setMsg(getMobileApiError(e, "Could not update profile"));
+              } finally {
+                setBusy(false);
+              }
             }}
             style={styles.btn}
           >
-            <Text style={{ color: "#fff", fontWeight: "800" }}>Save Profile</Text>
+            <Text style={{ color: "#fff", fontWeight: "800" }}>{busy ? "Saving..." : "Save Profile"}</Text>
           </Pressable>
           {Boolean(msg) && <Text style={{ color: "#059669", fontWeight: "700", fontSize: 12 }}>{msg}</Text>}
         </View>
@@ -167,8 +200,12 @@ export default function ProfileScreen() {
                 <Switch
                   value={Boolean(prefs[key])}
                   onValueChange={async () => {
-                    await mobileApi.put("/notifications/preferences", { [key]: !prefs[key] });
-                    qc.invalidateQueries({ queryKey: ["m-notif-prefs"] });
+                    try {
+                      await mobileApi.put("/notifications/preferences", { [key]: !prefs[key] });
+                      qc.invalidateQueries({ queryKey: ["m-notif-prefs"] });
+                    } catch (e: unknown) {
+                      setMsg(getMobileApiError(e, "Preference update failed"));
+                    }
                   }}
                 />
               </View>
@@ -195,7 +232,23 @@ export default function ProfileScreen() {
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.secTitle}>Notifications ({notifications.length})</Text>
+          <View style={styles.prefRow}>
+            <Text style={styles.secTitle}>Notifications ({notifications.length})</Text>
+            {notifications.some((n) => !n.is_read) && (
+              <Pressable
+                onPress={async () => {
+                  try {
+                    await mobileApi.post("/notifications/mark-all-read");
+                    refetchNotifs();
+                  } catch (e: unknown) {
+                    setMsg(getMobileApiError(e));
+                  }
+                }}
+              >
+                <Text style={{ fontSize: 11, color: "#ea580c", fontWeight: "800" }}>Mark All Read</Text>
+              </Pressable>
+            )}
+          </View>
           {notifications.slice(0, 6).map((n) => (
             <View key={n.id} style={styles.notifRow}>
               <Text style={{ fontWeight: "700", fontSize: 12 }}>{n.title}</Text>
@@ -203,8 +256,12 @@ export default function ProfileScreen() {
               {!n.is_read && (
                 <Pressable
                   onPress={async () => {
-                    await mobileApi.post(`/notifications/${n.id}/read`);
-                    refetchNotifs();
+                    try {
+                      await mobileApi.post(`/notifications/${n.id}/read`);
+                      refetchNotifs();
+                    } catch (e: unknown) {
+                      setMsg(getMobileApiError(e));
+                    }
                   }}
                 >
                   <Text style={{ fontSize: 11, color: "#ea580c", fontWeight: "700", marginTop: 2 }}>Mark Read</Text>
@@ -212,6 +269,31 @@ export default function ProfileScreen() {
               )}
             </View>
           ))}
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.secTitle}>Change Password</Text>
+          <TextInput style={styles.input} secureTextEntry value={curPw} onChangeText={setCurPw} placeholder="Current password" />
+          <TextInput style={styles.input} secureTextEntry value={chgNewPw} onChangeText={setChgNewPw} placeholder="New password (8+ chars)" />
+          <Pressable
+            disabled={busy || !curPw || chgNewPw.length < 8}
+            onPress={async () => {
+              setBusy(true);
+              try {
+                await mobileApi.post("/auth/change-password", { current_password: curPw, new_password: chgNewPw });
+                setCurPw("");
+                setChgNewPw("");
+                setMsg("Password updated.");
+              } catch (e: unknown) {
+                setMsg(getMobileApiError(e, "Could not update password"));
+              } finally {
+                setBusy(false);
+              }
+            }}
+            style={styles.btnAlt}
+          >
+            <Text style={{ color: "#fff", fontWeight: "800" }}>Update Password</Text>
+          </Pressable>
         </View>
 
         <View style={{ flexDirection: "row", gap: 8 }}>
@@ -223,7 +305,36 @@ export default function ProfileScreen() {
           </Pressable>
         </View>
 
-        <Pressable onPress={logout} style={styles.logoutBtn}>
+        {user.roles.includes("customer") && user.roles.length === 1 && (
+          <Pressable
+            onPress={async () => {
+              if (!confirmDeact) {
+                setConfirmDeact(true);
+                return;
+              }
+              try {
+                await mobileApi.delete("/customers/me");
+                qc.clear();
+                await logout(true);
+              } catch (e: unknown) {
+                setMsg(getMobileApiError(e));
+              }
+            }}
+            style={[styles.logoutBtn, { backgroundColor: "#dc2626" }]}
+          >
+            <Text style={{ color: "#fff", fontWeight: "800" }}>
+              {confirmDeact ? "Tap Again to Confirm Account Deactivation" : "Deactivate My Account"}
+            </Text>
+          </Pressable>
+        )}
+
+        <Pressable
+          onPress={async () => {
+            await logout();
+            qc.clear();
+          }}
+          style={styles.logoutBtn}
+        >
           <Text style={{ color: "#fff", fontWeight: "800" }}>Sign Out</Text>
         </Pressable>
       </ScrollView>
@@ -250,12 +361,115 @@ export default function ProfileScreen() {
       {mode === "login" ? (
         <View style={styles.card}>
           <Text style={styles.title}>Universal Campus Sign In</Text>
+          <View style={styles.tabRow}>
+            <Pressable
+              onPress={() => {
+                setLoginMethod("password");
+                setResetMode(false);
+              }}
+              style={[styles.tabBtn, loginMethod === "password" && !resetMode && styles.tabBtnActive]}
+            >
+              <Text style={[styles.tabTxt, loginMethod === "password" && !resetMode && { color: "#fff" }]}>Password</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                setLoginMethod("otp");
+                setResetMode(false);
+              }}
+              style={[styles.tabBtn, loginMethod === "otp" && !resetMode && styles.tabBtnActive]}
+            >
+              <Text style={[styles.tabTxt, loginMethod === "otp" && !resetMode && { color: "#fff" }]}>OTP Login</Text>
+            </Pressable>
+          </View>
           <TextInput style={styles.input} value={identifier} onChangeText={setIdentifier} placeholder="Email or Phone" autoCapitalize="none" />
-          <TextInput style={styles.input} value={password} onChangeText={setPassword} secureTextEntry placeholder="Password" />
-          {Boolean(msg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{msg}</Text>}
-          <Pressable onPress={login} style={styles.btn}>
-            <Text style={{ color: "#fff", fontWeight: "800" }}>Sign In</Text>
-          </Pressable>
+
+          {resetMode ? (
+            <>
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                <TextInput style={[styles.input, { flex: 1 }]} value={otpCode} onChangeText={setOtpCode} placeholder="Reset OTP" maxLength={6} />
+                <Pressable
+                  disabled={busy || !identifier.trim()}
+                  onPress={async () => {
+                    setBusy(true);
+                    try {
+                      const r = await mobileApi.post("/auth/otp/request", { target: identifier.trim(), purpose: "password_reset" });
+                      setDevOtp(r.data.dev_otp || null);
+                    } catch (e: unknown) {
+                      setMsg(getMobileApiError(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  style={[styles.btn, { paddingHorizontal: 12 }]}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "700" }}>Send OTP</Text>
+                </Pressable>
+              </View>
+              {devOtp && <Text style={{ fontSize: 11, color: "#b45309" }}>Dev OTP: {devOtp}</Text>}
+              <TextInput style={styles.input} secureTextEntry value={newPassword} onChangeText={setNewPassword} placeholder="New Password (8+ chars)" />
+              <Pressable
+                disabled={busy || otpCode.trim().length < 6 || newPassword.length < 8}
+                onPress={async () => {
+                  setBusy(true);
+                  try {
+                    await mobileApi.post("/auth/password-reset/confirm", {
+                      target: identifier.trim(),
+                      code: otpCode.trim(),
+                      new_password: newPassword,
+                    });
+                    setResetMode(false);
+                    setMsg("Password updated! Please sign in.");
+                  } catch (e: unknown) {
+                    setMsg(getMobileApiError(e));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                style={styles.btn}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800" }}>Reset Password</Text>
+              </Pressable>
+            </>
+          ) : loginMethod === "otp" ? (
+            <>
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                <TextInput style={[styles.input, { flex: 1 }]} value={otpCode} onChangeText={setOtpCode} placeholder="6-digit OTP" maxLength={6} />
+                <Pressable
+                  disabled={busy || !identifier.trim()}
+                  onPress={async () => {
+                    setBusy(true);
+                    try {
+                      const r = await mobileApi.post("/auth/otp/request", { target: identifier.trim(), purpose: "login" });
+                      setDevOtp(r.data.dev_otp || null);
+                    } catch (e: unknown) {
+                      setMsg(getMobileApiError(e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  style={[styles.btn, { paddingHorizontal: 12 }]}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "700" }}>Send OTP</Text>
+                </Pressable>
+              </View>
+              {devOtp && <Text style={{ fontSize: 11, color: "#b45309" }}>Dev OTP: {devOtp}</Text>}
+              {Boolean(msg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{msg}</Text>}
+              <Pressable disabled={busy} onPress={login} style={styles.btn}>
+                <Text style={{ color: "#fff", fontWeight: "800" }}>{busy ? "Signing in..." : "Verify OTP & Sign In"}</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <TextInput style={styles.input} value={password} onChangeText={setPassword} secureTextEntry placeholder="Password" />
+              {Boolean(msg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{msg}</Text>}
+              <Pressable disabled={busy} onPress={login} style={styles.btn}>
+                <Text style={{ color: "#fff", fontWeight: "800" }}>{busy ? "Signing in..." : "Sign In"}</Text>
+              </Pressable>
+              <Pressable onPress={() => setResetMode(true)}>
+                <Text style={{ color: "#ea580c", fontSize: 12, fontWeight: "700", textAlign: "right" }}>Forgot Password?</Text>
+              </Pressable>
+            </>
+          )}
         </View>
       ) : (
         <View style={styles.card}>
@@ -265,10 +479,11 @@ export default function ProfileScreen() {
           <TextInput style={styles.input} value={regEmail} onChangeText={setRegEmail} placeholder="Email (or enter phone)" autoCapitalize="none" />
           <TextInput style={styles.input} value={regPhone} onChangeText={setRegPhone} placeholder="Mobile (+9198...)" />
           <TextInput style={styles.input} value={regCollegeId} onChangeText={setRegCollegeId} placeholder="College ID / Roll No (optional)" />
+          <TextInput style={styles.input} value={regReferral} onChangeText={setRegReferral} placeholder="Referral Code (optional)" />
           <TextInput style={styles.input} value={password} onChangeText={setPassword} secureTextEntry placeholder="Password (min 8 chars)" />
           {Boolean(msg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{msg}</Text>}
-          <Pressable onPress={register} style={styles.btn}>
-            <Text style={{ color: "#fff", fontWeight: "800" }}>Create Universal Account</Text>
+          <Pressable disabled={busy} onPress={register} style={styles.btn}>
+            <Text style={{ color: "#fff", fontWeight: "800" }}>{busy ? "Creating..." : "Create Universal Account"}</Text>
           </Pressable>
         </View>
       )}

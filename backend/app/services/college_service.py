@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import now_college, today_college
 from app.models.college import (
     Canteen,
     CollegeHoliday,
@@ -13,7 +14,9 @@ from app.models.college import (
     Counter,
     DiningTable,
     Kitchen,
+    KitchenStation,
     OperatingHour,
+    PickupLocation,
 )
 from app.models.order import Order
 from app.schemas.college import (
@@ -23,42 +26,62 @@ from app.schemas.college import (
     CanteenUpdate,
     CollegeSettingsUpdate,
     CounterCreate,
+    CounterUpdate,
     DiningTableCreate,
+    DiningTableUpdate,
     HolidayCreate,
+    HolidayUpdate,
     KitchenCreate,
+    KitchenStationCreate,
+    KitchenUpdate,
     OperatingHourItem,
+    PickupLocationCreate,
 )
 from app.services.audit_service import record_audit_log
 
 ACTIVE_CROWD_STATUSES = ("PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING")
 
 
-def compute_canteen_live_status(db: Session, canteen: Canteen, now: Optional[datetime] = None) -> tuple[bool, str, int, int]:
+def compute_canteen_live_status(
+    db: Session,
+    canteen: Canteen,
+    now: Optional[datetime] = None,
+    *,
+    precomputed_active_count: Optional[int] = None,
+) -> tuple[bool, str, int, int]:
     """Compute real-time openness, crowd level, ETA, and active order count."""
-    now_local = now or datetime.now()
+    college_row = db.scalar(select(CollegeSettings))
+    tz_name = college_row.college_timezone if college_row else None
+    now_local = now or now_college(tz_name)
     today = now_local.date()
     current_time = now_local.time()
     weekday = now_local.weekday()
 
-    active_count = db.scalar(
-        select(func.count(Order.id)).where(
-            Order.canteen_id == canteen.id,
-            Order.status.in_(ACTIVE_CROWD_STATUSES),
+    if precomputed_active_count is not None:
+        active_count = precomputed_active_count
+    else:
+        active_count = (
+            db.scalar(
+                select(func.count(Order.id)).where(
+                    Order.canteen_id == canteen.id,
+                    Order.status.in_(ACTIVE_CROWD_STATUSES),
+                )
+            )
+            or 0
         )
-    ) or 0
 
     if not canteen.is_active or canteen.is_temporarily_closed or canteen.ordering_paused:
         return False, "TEMPORARILY_UNAVAILABLE", canteen.default_prep_time_minutes, int(active_count)
 
-    # Check holidays
-    holiday = db.scalar(
+    # Check all matching holidays on today's date
+    holidays = db.scalars(
         select(CollegeHoliday).where(
             CollegeHoliday.is_active.is_(True),
             CollegeHoliday.holiday_date == today,
             or_(CollegeHoliday.canteen_id == canteen.id, CollegeHoliday.canteen_id.is_(None)),
         )
-    )
-    if holiday:
+    ).all()
+    for holiday in holidays:
         if holiday.is_full_day:
             return False, "TEMPORARILY_UNAVAILABLE", canteen.default_prep_time_minutes, int(active_count)
         if holiday.start_time and holiday.end_time and holiday.start_time <= current_time <= holiday.end_time:
@@ -78,7 +101,9 @@ def compute_canteen_live_status(db: Session, canteen: Canteen, now: Optional[dat
         elif not (op_hour.open_time <= current_time <= op_hour.close_time):
             is_open = False
 
-    if active_count >= canteen.max_concurrent_orders and canteen.auto_throttle_enabled:
+    if not is_open:
+        crowd = "TEMPORARILY_UNAVAILABLE"
+    elif active_count >= canteen.max_concurrent_orders and canteen.auto_throttle_enabled:
         crowd = "TEMPORARILY_UNAVAILABLE"
     elif active_count >= canteen.crowd_very_high_threshold:
         crowd = "VERY_HIGH"
@@ -97,8 +122,12 @@ def compute_canteen_live_status(db: Session, canteen: Canteen, now: Optional[dat
     return is_open, crowd, eta, int(active_count)
 
 
-def serialize_canteen(db: Session, canteen: Canteen) -> CanteenOut:
-    is_open, crowd, eta, active_count = compute_canteen_live_status(db, canteen)
+def serialize_canteen(
+    db: Session, canteen: Canteen, *, precomputed_active_count: Optional[int] = None
+) -> CanteenOut:
+    is_open, crowd, eta, active_count = compute_canteen_live_status(
+        db, canteen, precomputed_active_count=precomputed_active_count
+    )
     out = CanteenOut.model_validate(canteen)
     out.is_open_now = is_open
     out.crowd_level = crowd
@@ -142,7 +171,15 @@ def list_canteens(db: Session, include_inactive: bool = False) -> list[CanteenOu
     if not include_inactive:
         stmt = stmt.where(Canteen.is_active.is_(True))
     rows = db.scalars(stmt).all()
-    return [serialize_canteen(db, c) for c in rows]
+    if not rows:
+        return []
+    counts_rows = db.execute(
+        select(Order.canteen_id, func.count(Order.id))
+        .where(Order.canteen_id.in_([c.id for c in rows]), Order.status.in_(ACTIVE_CROWD_STATUSES))
+        .group_by(Order.canteen_id)
+    ).all()
+    count_map = {cid: int(cnt) for cid, cnt in counts_rows}
+    return [serialize_canteen(db, c, precomputed_active_count=count_map.get(c.id, 0)) for c in rows]
 
 
 def get_canteen_detail(db: Session, canteen_id_or_slug: str) -> CanteenDetailOut:
@@ -162,11 +199,13 @@ def get_canteen_detail(db: Session, canteen_id_or_slug: str) -> CanteenDetailOut
     op_hours = db.scalars(
         select(OperatingHour).where(OperatingHour.canteen_id == canteen.id).order_by(OperatingHour.day_of_week)
     ).all()
+    college_row = db.scalar(select(CollegeSettings))
+    today = today_college(college_row.college_timezone if college_row else None)
     holidays = db.scalars(
         select(CollegeHoliday)
         .where(
             CollegeHoliday.is_active.is_(True),
-            CollegeHoliday.holiday_date >= date.today(),
+            CollegeHoliday.holiday_date >= today,
             or_(CollegeHoliday.canteen_id == canteen.id, CollegeHoliday.canteen_id.is_(None)),
         )
         .order_by(CollegeHoliday.holiday_date)
@@ -346,3 +385,75 @@ def create_holiday(db: Session, payload: HolidayCreate, actor_user_id: UUID) -> 
     db.commit()
     db.refresh(holiday)
     return holiday
+
+
+def update_counter(db: Session, counter_id: UUID, payload: CounterUpdate, actor_user_id: UUID) -> Counter:
+    counter = db.get(Counter, counter_id)
+    if not counter:
+        raise HTTPException(status_code=404, detail="Counter not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(counter, k, v)
+    record_audit_log(db, action="counter.updated", entity_type="counter", entity_id=str(counter.id), actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(counter)
+    return counter
+
+
+def update_kitchen(db: Session, kitchen_id: UUID, payload: KitchenUpdate, actor_user_id: UUID) -> Kitchen:
+    kitchen = db.get(Kitchen, kitchen_id)
+    if not kitchen:
+        raise HTTPException(status_code=404, detail="Kitchen not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(kitchen, k, v)
+    record_audit_log(db, action="kitchen.updated", entity_type="kitchen", entity_id=str(kitchen.id), actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(kitchen)
+    return kitchen
+
+
+def add_kitchen_station(db: Session, kitchen_id: UUID, payload: KitchenStationCreate, actor_user_id: UUID) -> KitchenStation:
+    kitchen = db.get(Kitchen, kitchen_id)
+    if not kitchen:
+        raise HTTPException(status_code=404, detail="Kitchen not found")
+    st = KitchenStation(kitchen_id=kitchen_id, **payload.model_dump())
+    db.add(st)
+    record_audit_log(db, action="kitchen_station.created", entity_type="kitchen_station", entity_id=payload.name, actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(st)
+    return st
+
+
+def add_pickup_location(db: Session, canteen_id: UUID, payload: PickupLocationCreate, actor_user_id: UUID) -> PickupLocation:
+    cnt = db.get(Counter, payload.counter_id)
+    if not cnt or cnt.canteen_id != canteen_id:
+        raise HTTPException(status_code=400, detail="Counter does not belong to selected canteen")
+    loc = PickupLocation(canteen_id=canteen_id, **payload.model_dump())
+    db.add(loc)
+    record_audit_log(db, action="pickup_location.created", entity_type="pickup_location", entity_id=payload.display_code, actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(loc)
+    return loc
+
+
+def update_dining_table(db: Session, table_id: UUID, payload: DiningTableUpdate, actor_user_id: UUID) -> DiningTable:
+    table = db.get(DiningTable, table_id)
+    if not table:
+        raise HTTPException(status_code=404, detail="Dining table not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(table, k, v)
+    record_audit_log(db, action="table.updated", entity_type="table", entity_id=str(table.id), actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(table)
+    return table
+
+
+def update_holiday(db: Session, holiday_id: UUID, payload: HolidayUpdate, actor_user_id: UUID) -> CollegeHoliday:
+    hol = db.get(CollegeHoliday, holiday_id)
+    if not hol:
+        raise HTTPException(status_code=404, detail="Holiday not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(hol, k, v)
+    record_audit_log(db, action="holiday.updated", entity_type="college_holiday", entity_id=str(hol.id), actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(hol)
+    return hol

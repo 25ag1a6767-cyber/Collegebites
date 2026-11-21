@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { mobileApi } from "../src/api/client";
+import { getMobileApiError, mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 export default function OrdersScreen() {
@@ -11,25 +11,60 @@ export default function OrdersScreen() {
   const { user, guestOrderTokens, saveGuestOrderToken, setCanteen } = useMobileStore();
   const [lookupNo, setLookupNo] = useState("");
   const [lookupTok, setLookupTok] = useState("");
+  const [recoverPhone, setRecoverPhone] = useState("");
+  const [recoverOtp, setRecoverOtp] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [devOtp, setDevOtp] = useState<string | null>(null);
+  const [recovered, setRecovered] = useState<any[]>([]);
   const [statusMsg, setStatusMsg] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const reorder = async (o: any) => {
     setStatusMsg("");
+    setBusy(true);
     try {
+      let added = 0;
       for (const it of o.items || []) {
         if (!it.food_item_id) continue;
+        const addons: { addon_id: string; quantity: number }[] = [];
+        let spiceLevel: string | null = null;
+        let sugarLevel: string | null = null;
+        const removedIngredients: string[] = [];
+        for (const c of it.customizations || []) {
+          if (c.customization_type === "addon" && c.addon_id) {
+            addons.push({ addon_id: c.addon_id, quantity: c.quantity || 1 });
+          } else if (c.customization_type === "spice") {
+            spiceLevel = c.option_value;
+          } else if (c.customization_type === "sugar") {
+            sugarLevel = c.option_value;
+          } else if (c.customization_type === "remove_ingredient") {
+            removedIngredients.push(c.option_value);
+          }
+        }
         await mobileApi.post("/carts/items", {
           canteen_id: o.canteen_id,
           food_item_id: it.food_item_id,
           variant_id: it.variant_id || null,
           quantity: it.quantity,
+          spice_level: spiceLevel,
+          sugar_level: sugarLevel,
+          removed_ingredients: removedIngredients,
+          addons,
+          special_instructions: it.special_instructions || null,
         });
+        added += 1;
+      }
+      if (added === 0) {
+        setStatusMsg("No reorderable dishes found.");
+        return;
       }
       setCanteen(o.canteen_id);
       qc.invalidateQueries({ queryKey: ["m-cart", o.canteen_id] });
       router.push("/checkout");
-    } catch (e: any) {
-      setStatusMsg(e?.response?.data?.detail || "Some items unavailable to reorder");
+    } catch (e: unknown) {
+      setStatusMsg(getMobileApiError(e, "Some items unavailable to reorder"));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -77,6 +112,88 @@ export default function OrdersScreen() {
             <Text style={{ color: "#fff", fontWeight: "800" }}>Open</Text>
           </Pressable>
         </View>
+        {!user && (
+          <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: "#f1f5f9", gap: 6 }}>
+            <Text style={{ fontSize: 11, fontWeight: "700", color: "#475569" }}>Recover Lost Guest Orders via OTP</Text>
+            <View style={{ flexDirection: "row", gap: 6 }}>
+              <TextInput
+                style={[styles.input, { flex: 1 }]}
+                value={recoverPhone}
+                onChangeText={setRecoverPhone}
+                placeholder="+919876543210"
+              />
+              <Pressable
+                disabled={busy || !recoverPhone.trim()}
+                onPress={async () => {
+                  setBusy(true);
+                  setStatusMsg("");
+                  try {
+                    const r = await mobileApi.post("/auth/otp/request", {
+                      target: recoverPhone.trim(),
+                      purpose: "guest_checkout",
+                    });
+                    setOtpSent(true);
+                    setDevOtp(r.data.dev_otp || null);
+                  } catch (e: unknown) {
+                    setStatusMsg(getMobileApiError(e, "Failed to send OTP"));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                style={styles.goBtn}
+              >
+                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>{otpSent ? "Resend" : "Send OTP"}</Text>
+              </Pressable>
+            </View>
+            {devOtp && <Text style={{ fontSize: 11, color: "#b45309" }}>Dev OTP: {devOtp}</Text>}
+            {otpSent && (
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  value={recoverOtp}
+                  onChangeText={setRecoverOtp}
+                  placeholder="6-digit OTP"
+                  maxLength={6}
+                />
+                <Pressable
+                  disabled={busy || recoverOtp.trim().length < 6}
+                  onPress={async () => {
+                    setBusy(true);
+                    setStatusMsg("");
+                    try {
+                      const ver = await mobileApi.post("/auth/otp/verify", {
+                        target: recoverPhone.trim(),
+                        purpose: "guest_checkout",
+                        code: recoverOtp.trim(),
+                      });
+                      const rows = await mobileApi.post("/orders/guest/lookup", {
+                        guest_phone: recoverPhone.trim(),
+                        otp_verification_token: ver.data.verification_token,
+                      });
+                      (rows.data || []).forEach((ord: any) => {
+                        if (ord.guest_access_token) saveGuestOrderToken(ord.order_number, ord.guest_access_token);
+                      });
+                      setRecovered(rows.data || []);
+                    } catch (e: unknown) {
+                      setStatusMsg(getMobileApiError(e, "Lookup failed"));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  style={[styles.goBtn, { backgroundColor: "#0f172a" }]}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>Find</Text>
+                </Pressable>
+              </View>
+            )}
+            {recovered.map((ro) => (
+              <Pressable key={ro.id} onPress={() => router.push(`/order/${ro.order_number}`)} style={styles.card}>
+                <Text style={styles.ordNo}>{ro.order_number} ({ro.status})</Text>
+                <Text style={styles.meta}>₹{ro.total_amount} • Tap to track</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
       </View>
 
       {!user && guestNums.length > 0 && (

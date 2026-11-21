@@ -1,11 +1,12 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useQuery } from "@tanstack/react-query";
-import { mobileApi } from "../src/api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { buildMobileWsUrl, mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 export default function BoardScreen() {
   const { selectedCanteenId } = useMobileStore();
+  const qc = useQueryClient();
   const [pickedId, setPickedId] = useState("");
 
   const { data: canteens = [] } = useQuery<any[]>({
@@ -21,6 +22,18 @@ export default function BoardScreen() {
     queryFn: async () => (await mobileApi.get(`/pickup/board/${activeId}`)).data,
     refetchInterval: 4000,
   });
+
+  useEffect(() => {
+    if (!activeId) return;
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(buildMobileWsUrl(`/ws/board/${activeId}`));
+      ws.onmessage = () => qc.invalidateQueries({ queryKey: ["m-board", activeId] });
+    } catch {
+      // polling handles fallback
+    }
+    return () => ws?.close();
+  }, [activeId, qc]);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ gap: 14, paddingBottom: 32 }}>

@@ -182,6 +182,8 @@ class ReceiptPrintJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     printer_target: Mapped[str] = mapped_column(String(64), nullable=False, default="browser")  # browser | 58mm | 80mm | a4_pdf | network_escpos | usb | bluetooth
     printer_name: Mapped[Optional[str]] = mapped_column(String(120))
     paper_width: Mapped[str] = mapped_column(String(16), nullable=False, default="80mm")
+    network_host: Mapped[Optional[str]] = mapped_column(String(120))
+    network_port: Mapped[Optional[int]] = mapped_column(Integer)
     is_reprint: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")  # queued | completed | failed
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

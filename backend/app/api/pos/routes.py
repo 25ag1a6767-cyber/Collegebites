@@ -12,7 +12,9 @@ from app.core.permissions import (
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
     client_ip_from_request,
+    enforce_canteen_scope,
     require_roles,
+    scoped_canteen_for_principal,
 )
 from app.schemas.operations import POSWalkInOrderRequest, ShiftCloseRequest, ShiftOpenRequest, ShiftOut
 from app.schemas.order import OrderOut
@@ -30,7 +32,18 @@ def create_walkin_order(
     principal: AuthenticatedPrincipal = Depends(require_roles(*POS_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, payload.canteen_id)
     return pos_service.create_pos_walkin_order(db, payload, principal.user.id, client_ip_from_request(request))
+
+
+@router.get("/orders/pending-counter", response_model=list[OrderOut])
+def pending_counter_orders(
+    canteen_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*POS_ROLES)),
+    db: Session = Depends(get_db),
+):
+    scoped = scoped_canteen_for_principal(principal, canteen_id)
+    return pos_service.list_pending_counter_orders(db, canteen_id=scoped)
 
 
 @router.get("/orders/search", response_model=list[OrderOut])
@@ -40,7 +53,8 @@ def search_orders(
     principal: AuthenticatedPrincipal = Depends(require_roles(*POS_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return pos_service.search_pos_orders(db, q, canteen_id=canteen_id)
+    scoped = scoped_canteen_for_principal(principal, canteen_id)
+    return pos_service.search_pos_orders(db, q, canteen_id=scoped)
 
 
 @router.post("/shifts/open", response_model=ShiftOut)
@@ -49,6 +63,7 @@ def open_shift(
     principal: AuthenticatedPrincipal = Depends(require_roles(*POS_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, payload.canteen_id)
     return pos_service.open_cashier_shift(db, payload, principal.user.id)
 
 

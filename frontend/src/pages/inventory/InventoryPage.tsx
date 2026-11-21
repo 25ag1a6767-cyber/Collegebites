@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Package, Plus, Truck } from "lucide-react";
+import { AlertTriangle, ArrowRightLeft, History, Package, Plus, Trash2, Truck } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
@@ -47,6 +47,12 @@ export const InventoryPage: React.FC = () => {
     queryFn: async () => (await api.get(`/menus/canteens/${activeId}/items?include_inactive=true`)).data,
   });
 
+  const { data: movements = [], refetch: refetchMovements } = useQuery<any[]>({
+    queryKey: ["inv-movements", activeId],
+    enabled: Boolean(activeId),
+    queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/movements?limit=25`)).data,
+  });
+
   // Form states
   const [ingName, setIngName] = useState("");
   const [ingSku, setIngSku] = useState("");
@@ -54,7 +60,7 @@ export const InventoryPage: React.FC = () => {
   const [ingQty, setIngQty] = useState("1000");
   const [ingReorder, setIngReorder] = useState("200");
   const [supName, setSupName] = useState("");
-  const [supPhone] = useState("");
+  const [supPhone, setSupPhone] = useState("");
   const [poSupId, setPoSupId] = useState("");
   const [poIngId, setPoIngId] = useState("");
   const [poQty, setPoQty] = useState("5000");
@@ -66,14 +72,40 @@ export const InventoryPage: React.FC = () => {
   const [recipeIngId, setRecipeIngId] = useState("");
   const [recipeQty, setRecipeQty] = useState("150");
   const [recipeYield, setRecipeYield] = useState("1");
+  const [recipeRows, setRecipeRows] = useState<{ ingredient_id: string; ingredient_name: string; quantity_required: string }[]>([]);
   const [adjItemId, setAdjItemId] = useState("");
   const [adjDelta, setAdjDelta] = useState("500");
   const [adjReason, setAdjReason] = useState("Physical stock count");
+  const [transferToId, setTransferToId] = useState("");
+  const [transferIngId, setTransferIngId] = useState("");
+  const [transferQty, setTransferQty] = useState("100");
+  const [transferNotes, setTransferNotes] = useState("");
+
+  useEffect(() => {
+    if (!recipeFoodId) {
+      setRecipeRows([]);
+      return;
+    }
+    api
+      .get(`/inventory/recipes/${recipeFoodId}`)
+      .then((res) => {
+        setRecipeYield(String(res.data.yield_portions || 1));
+        setRecipeRows(
+          (res.data.ingredients || []).map((r: any) => ({
+            ingredient_id: r.ingredient_id,
+            ingredient_name: r.ingredient_name,
+            quantity_required: String(r.quantity_required),
+          }))
+        );
+      })
+      .catch(() => {});
+  }, [recipeFoodId]);
 
   const refreshAll = () => {
     refetchItems();
     refetchAlerts();
     refetchPos();
+    refetchMovements();
   };
 
   return (
@@ -217,21 +249,27 @@ export const InventoryPage: React.FC = () => {
           <h3 className="font-bold text-sm text-slate-900 flex items-center gap-1.5">
             <Truck className="h-4 w-4 text-sky-600" /> Purchase Orders & Suppliers
           </h3>
-          <div className="flex gap-2">
+          <div className="grid grid-cols-2 gap-2">
             <Input value={supName} onChange={(e) => setSupName(e.target.value)} placeholder="New supplier name" />
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={async () => {
-                await api.post("/inventory/suppliers", { name: supName, phone: supPhone || "+91-9000000000" });
+            <Input value={supPhone} onChange={(e) => setSupPhone(e.target.value)} placeholder="Phone (+91...)" />
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={async () => {
+              try {
+                await api.post("/inventory/suppliers", { name: supName, phone: supPhone.trim() || null });
                 setSupName("");
+                setSupPhone("");
                 refetchSuppliers();
                 pushToast("Supplier added", "success");
-              }}
-            >
-              Add
-            </Button>
-          </div>
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          >
+            Add Supplier
+          </Button>
           <Select value={poSupId} onChange={(e) => setPoSupId(e.target.value)}>
             <option value="">Select Supplier</option>
             {suppliers.map((s) => (
@@ -323,9 +361,13 @@ export const InventoryPage: React.FC = () => {
                   size="sm"
                   variant="success"
                   onClick={async () => {
-                    await api.post(`/inventory/purchase-orders/${po.id}/receive`);
-                    pushToast(`${po.po_number} received into stock!`, "success");
-                    refreshAll();
+                    try {
+                      await api.post(`/inventory/purchase-orders/${po.id}/receive`);
+                      pushToast(`${po.po_number} received into stock!`, "success");
+                      refreshAll();
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
                   }}
                 >
                   Receive Stock
@@ -339,7 +381,7 @@ export const InventoryPage: React.FC = () => {
       {/* Recipe Mapping & Manual Stock Adjustments */}
       <div className="grid gap-5 md:grid-cols-2">
         <Card className="p-5 space-y-3">
-          <h2 className="font-bold text-slate-900 text-sm">Link Dish Recipe (Auto Stock Deduction)</h2>
+          <h2 className="font-bold text-slate-900 text-sm">Link Multi-Ingredient Recipe (Auto Stock Deduction)</h2>
           <Select value={recipeFoodId} onChange={(e) => setRecipeFoodId(e.target.value)}>
             <option value="">Select Menu Dish</option>
             {menuItems.map((m: any) => (
@@ -348,31 +390,62 @@ export const InventoryPage: React.FC = () => {
               </option>
             ))}
           </Select>
-          <Select value={recipeIngId} onChange={(e) => setRecipeIngId(e.target.value)}>
-            <option value="">Select Ingredient</option>
-            {items.map((it) => (
-              <option key={it.ingredient_id} value={it.ingredient_id}>
-                {it.name} ({it.unit})
-              </option>
-            ))}
-          </Select>
-          <div className="grid grid-cols-2 gap-2">
-            <Input value={recipeQty} onChange={(e) => setRecipeQty(e.target.value)} placeholder="Qty Required (e.g. 150)" />
-            <Input value={recipeYield} onChange={(e) => setRecipeYield(e.target.value)} placeholder="Yield Portions (1)" />
+          <div className="flex gap-2">
+            <Select value={recipeIngId} onChange={(e) => setRecipeIngId(e.target.value)}>
+              <option value="">Add Ingredient</option>
+              {items.map((it) => (
+                <option key={it.ingredient_id} value={it.ingredient_id}>
+                  {it.name} ({it.unit})
+                </option>
+              ))}
+            </Select>
+            <Input value={recipeQty} onChange={(e) => setRecipeQty(e.target.value)} placeholder="Qty" className="w-24" />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const ing = items.find((it) => it.ingredient_id === (recipeIngId || items[0]?.ingredient_id));
+                if (!ing) return;
+                setRecipeRows((prev) => {
+                  const rest = prev.filter((r) => r.ingredient_id !== ing.ingredient_id);
+                  return [...rest, { ingredient_id: ing.ingredient_id, ingredient_name: ing.name, quantity_required: recipeQty || "1" }];
+                });
+              }}
+            >
+              + Add
+            </Button>
           </div>
+          {recipeRows.length > 0 && (
+            <div className="space-y-1 text-xs rounded-xl border border-slate-100 bg-slate-50 p-2">
+              {recipeRows.map((r) => (
+                <div key={r.ingredient_id} className="flex items-center justify-between">
+                  <span>
+                    <strong>{r.ingredient_name}</strong>: {r.quantity_required}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setRecipeRows((p) => p.filter((x) => x.ingredient_id !== r.ingredient_id))}
+                    className="text-red-500 hover:text-red-700"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <Input value={recipeYield} onChange={(e) => setRecipeYield(e.target.value)} placeholder="Yield Portions (1)" />
           <Button
             size="sm"
             className="w-full"
             onClick={async () => {
               try {
+                const payloadRows =
+                  recipeRows.length > 0
+                    ? recipeRows.map((r) => ({ ingredient_id: r.ingredient_id, quantity_required: r.quantity_required }))
+                    : [{ ingredient_id: recipeIngId || items[0]?.ingredient_id, quantity_required: recipeQty }];
                 await api.put(`/inventory/recipes/${recipeFoodId || menuItems[0]?.id}`, {
                   yield_portions: Number(recipeYield) || 1,
-                  ingredients: [
-                    {
-                      ingredient_id: recipeIngId || items[0]?.ingredient_id,
-                      quantity_required: recipeQty,
-                    },
-                  ],
+                  ingredients: payloadRows,
                 });
                 pushToast("Recipe linked! Orders will automatically deduct stock.", "success");
                 refreshAll();
@@ -417,6 +490,80 @@ export const InventoryPage: React.FC = () => {
           >
             Apply Stock Adjustment
           </Button>
+        </Card>
+      </div>
+
+      {/* Inter-Canteen Stock Transfer & Ledger */}
+      <div className="grid gap-5 md:grid-cols-2">
+        <Card className="p-5 space-y-3">
+          <h2 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+            <ArrowRightLeft className="h-4 w-4 text-orange-600" /> Inter-Canteen Stock Transfer
+          </h2>
+          <Select value={transferToId} onChange={(e) => setTransferToId(e.target.value)}>
+            <option value="">Destination Canteen</option>
+            {canteens
+              .filter((c) => c.id !== activeId)
+              .map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+          </Select>
+          <Select value={transferIngId} onChange={(e) => setTransferIngId(e.target.value)}>
+            <option value="">Ingredient to Transfer</option>
+            {items.map((it) => (
+              <option key={it.ingredient_id} value={it.ingredient_id}>
+                {it.name} ({it.current_quantity} {it.unit})
+              </option>
+            ))}
+          </Select>
+          <div className="grid grid-cols-2 gap-2">
+            <Input value={transferQty} onChange={(e) => setTransferQty(e.target.value)} placeholder="Quantity" />
+            <Input value={transferNotes} onChange={(e) => setTransferNotes(e.target.value)} placeholder="Notes (optional)" />
+          </div>
+          <Button
+            size="sm"
+            className="w-full"
+            onClick={async () => {
+              try {
+                const dest = transferToId || canteens.find((c) => c.id !== activeId)?.id;
+                if (!dest) return pushToast("Another canteen is required for transfer", "error");
+                await api.post("/inventory/transfers", {
+                  from_canteen_id: activeId,
+                  to_canteen_id: dest,
+                  ingredient_id: transferIngId || items[0]?.ingredient_id,
+                  quantity: transferQty,
+                  notes: transferNotes || null,
+                });
+                setTransferNotes("");
+                pushToast("Stock transferred cleanly!", "success");
+                refreshAll();
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          >
+            Transfer Stock
+          </Button>
+        </Card>
+
+        <Card className="p-5 space-y-3">
+          <h2 className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+            <History className="h-4 w-4 text-slate-600" /> Recent Stock Movements ({movements.length})
+          </h2>
+          <div className="space-y-1.5 max-h-56 overflow-y-auto text-xs">
+            {movements.map((mv) => (
+              <div key={mv.id} className="flex items-center justify-between border-b border-slate-100 py-1.5">
+                <div>
+                  <span className="font-bold text-slate-800">{mv.ingredient_name}</span> •{" "}
+                  <Badge tone={Number(mv.quantity_delta) >= 0 ? "green" : "amber"}>{mv.movement_type}</Badge>
+                </div>
+                <span className="font-mono">
+                  {Number(mv.quantity_delta) > 0 ? `+${mv.quantity_delta}` : mv.quantity_delta} {mv.unit} (Bal: {mv.balance_after})
+                </span>
+              </div>
+            ))}
+          </div>
         </Card>
       </div>
     </div>

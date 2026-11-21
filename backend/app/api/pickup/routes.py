@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -11,8 +11,10 @@ from app.core.permissions import (
     ROLE_PICKUP_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
+    enforce_canteen_scope,
     require_roles,
 )
+from app.models.order import Order
 from app.schemas.operations import (
     DigitalBoardResponse,
     HandoverConfirmRequest,
@@ -33,6 +35,10 @@ def verify_pickup(
     principal: AuthenticatedPrincipal = Depends(require_roles(*PICKUP_ROLES)),
     db: Session = Depends(get_db),
 ):
+    if not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        enforce_canteen_scope(principal, payload.canteen_id)
+        if not payload.canteen_id:
+            payload.canteen_id = principal.assigned_canteen_id
     return pickup_service.verify_pickup(db, payload, principal.user.id)
 
 
@@ -42,6 +48,10 @@ def confirm_handover(
     principal: AuthenticatedPrincipal = Depends(require_roles(*PICKUP_ROLES)),
     db: Session = Depends(get_db),
 ):
+    ord_row = db.get(Order, payload.order_id)
+    if not ord_row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    enforce_canteen_scope(principal, ord_row.canteen_id)
     return pickup_service.confirm_handover(db, payload, principal.user.id)
 
 

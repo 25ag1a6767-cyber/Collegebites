@@ -1,5 +1,9 @@
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from typing import Optional
+from uuid import UUID
 
 from app.core.database import get_db
 from app.core.permissions import (
@@ -7,12 +11,16 @@ from app.core.permissions import (
     client_ip_from_request,
     get_current_principal,
 )
+from app.models.auth import SessionRecord
 from app.schemas.auth import (
+    ChangePasswordRequest,
     LoginRequest,
+    OTPLoginRequest,
     OTPRequest,
     OTPRequestResponse,
     OTPVerifyRequest,
     OTPVerifyResponse,
+    PasswordResetConfirmRequest,
     RefreshTokenRequest,
     RegisterCustomerRequest,
     TokenResponse,
@@ -65,3 +73,79 @@ def get_me(
     db: Session = Depends(get_db),
 ):
     return auth_service.build_user_out(db, principal.user)
+
+
+class PhoneVerifyCompleteIn(BaseModel):
+    target: Optional[str] = None
+    code: str = Field(min_length=6, max_length=6)
+
+
+@router.post("/otp/login", response_model=TokenResponse)
+def otp_login(payload: OTPLoginRequest, request: Request, db: Session = Depends(get_db)):
+    return auth_service.login_with_otp(db, payload, ip_address=client_ip_from_request(request))
+
+
+@router.post("/phone/verify", response_model=UserOut)
+def verify_phone(
+    payload: PhoneVerifyCompleteIn,
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    return auth_service.verify_phone_with_otp(db, principal.user, payload.code, target=payload.target)
+
+
+@router.post("/change-password", response_model=MessageResponse)
+def change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    auth_service.change_user_password(
+        db, principal.user, principal.session_id, payload, ip_address=client_ip_from_request(request)
+    )
+    return MessageResponse(message="Password updated successfully")
+
+
+@router.post("/password-reset/confirm", response_model=MessageResponse)
+def password_reset_confirm(payload: PasswordResetConfirmRequest, request: Request, db: Session = Depends(get_db)):
+    auth_service.confirm_password_reset(db, payload, ip_address=client_ip_from_request(request))
+    return MessageResponse(message="Password reset successfully")
+
+
+@router.get("/sessions")
+def list_sessions(
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    rows = db.scalars(
+        select(SessionRecord)
+        .where(SessionRecord.user_id == principal.user.id, SessionRecord.revoked_at.is_(None))
+        .order_by(SessionRecord.created_at.desc())
+        .limit(20)
+    ).all()
+    return [
+        {
+            "id": str(s.id),
+            "device_info": s.device_info,
+            "ip_address": s.ip_address,
+            "created_at": s.created_at.isoformat(),
+            "expires_at": s.expires_at.isoformat(),
+            "is_current": s.id == principal.session_id,
+        }
+        for s in rows
+    ]
+
+
+@router.delete("/sessions/{session_id}", response_model=MessageResponse)
+def revoke_session(
+    session_id: UUID,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    sess = db.get(SessionRecord, session_id)
+    if not sess or sess.user_id != principal.user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    auth_service.logout_session(db, session_id, principal.user.id, ip_address=client_ip_from_request(request))
+    return MessageResponse(message="Session revoked")

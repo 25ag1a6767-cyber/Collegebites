@@ -10,13 +10,15 @@ from reportlab.pdfgen import canvas
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import today_college
 from app.models.auth import User
 from app.models.college import Counter
-from app.models.engagement import Review
+from app.models.engagement import Review, SupportTicket
 from app.models.inventory import InventoryItem, PurchaseOrder, StockBatch, StockMovement, WastageRecord
 from app.models.menu import FoodCategory, FoodItem, Ingredient
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment
+from app.models.staff import StaffAttendance, StaffTask
 
 
 def get_analytics_report(
@@ -26,8 +28,9 @@ def get_analytics_report(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
 ) -> dict[str, Any]:
-    s_date = start_date or (date.today() - timedelta(days=30))
-    e_date = end_date or date.today()
+    local_today = today_college()
+    s_date = start_date or (local_today - timedelta(days=30))
+    e_date = end_date or local_today
     s_dt = datetime.combine(s_date, time.min, tzinfo=timezone.utc)
     e_dt = datetime.combine(e_date, time.max, tzinfo=timezone.utc)
 
@@ -121,21 +124,43 @@ def get_analytics_report(
     cancelled_orders = db.scalar(select(func.count(Order.id)).where(*order_filters, Order.status.in_(("CANCELLED", "REJECTED")))) or 0
     delayed_orders = db.scalar(select(func.count(Order.id)).where(*order_filters, Order.delayed_minutes > 0)) or 0
 
-    # 3. Inventory metrics
+    # 3. Inventory metrics (scoped to canteen and reporting window)
     inv_stmt = select(InventoryItem, Ingredient.name).join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
     if canteen_id:
         inv_stmt = inv_stmt.where(InventoryItem.canteen_id == canteen_id)
     inv_rows = db.execute(inv_stmt).all()
     low_stock_count = sum(1 for inv, _ in inv_rows if inv.current_quantity <= inv.reorder_level)
-    total_wastage = db.scalar(select(func.coalesce(func.sum(WastageRecord.estimated_loss), 0))) or Decimal("0.00")
-    total_purchases = db.scalar(select(func.coalesce(func.sum(PurchaseOrder.total_cost), 0)).where(PurchaseOrder.status == "received")) or Decimal("0.00")
-    expiring_count = db.scalar(
-        select(func.count(StockBatch.id)).where(
+
+    wastage_stmt = (
+        select(func.coalesce(func.sum(WastageRecord.estimated_loss), 0))
+        .join(InventoryItem, InventoryItem.id == WastageRecord.inventory_item_id)
+        .where(WastageRecord.created_at >= s_dt, WastageRecord.created_at <= e_dt)
+    )
+    if canteen_id:
+        wastage_stmt = wastage_stmt.where(InventoryItem.canteen_id == canteen_id)
+    total_wastage = db.scalar(wastage_stmt) or Decimal("0.00")
+
+    po_stmt = select(func.coalesce(func.sum(PurchaseOrder.total_cost), 0)).where(
+        PurchaseOrder.status == "received",
+        PurchaseOrder.created_at >= s_dt,
+        PurchaseOrder.created_at <= e_dt,
+    )
+    if canteen_id:
+        po_stmt = po_stmt.where(PurchaseOrder.canteen_id == canteen_id)
+    total_purchases = db.scalar(po_stmt) or Decimal("0.00")
+
+    exp_stmt = (
+        select(func.count(StockBatch.id))
+        .join(InventoryItem, InventoryItem.id == StockBatch.inventory_item_id)
+        .where(
             StockBatch.remaining_quantity > 0,
             StockBatch.expiry_date.is_not(None),
-            StockBatch.expiry_date <= date.today() + timedelta(days=7),
+            StockBatch.expiry_date <= local_today + timedelta(days=7),
         )
-    ) or 0
+    )
+    if canteen_id:
+        exp_stmt = exp_stmt.where(InventoryItem.canteen_id == canteen_id)
+    expiring_count = db.scalar(exp_stmt) or 0
 
     # 4. Customer metrics
     total_customers = db.scalar(select(func.count(User.id)).where(User.user_kind == "customer")) or 0
@@ -146,7 +171,42 @@ def get_analytics_report(
     ).all()
     returning_customers = sum(1 for _cid, cnt in cust_order_counts if cnt > 1)
     repeat_rate = round((returning_customers / max(1, len(cust_order_counts))) * 100.0, 1) if cust_order_counts else 0.0
-    avg_rating = db.scalar(select(func.coalesce(func.avg(Review.rating), 0))) or 0
+    review_stmt = select(func.coalesce(func.avg(Review.rating), 0)).where(
+        Review.is_visible.is_(True), Review.created_at >= s_dt, Review.created_at <= e_dt
+    )
+    if canteen_id:
+        review_stmt = review_stmt.where(Review.canteen_id == canteen_id)
+    avg_rating = db.scalar(review_stmt) or 0
+
+    # 5. Support metrics
+    sup_stmt = select(SupportTicket).where(SupportTicket.created_at >= s_dt, SupportTicket.created_at <= e_dt)
+    if canteen_id:
+        sup_stmt = sup_stmt.where(SupportTicket.canteen_id == canteen_id)
+    tickets = db.scalars(sup_stmt).all()
+    open_tickets = sum(1 for t in tickets if t.status in ("open", "assigned", "in_progress"))
+    resolved_tickets = sum(1 for t in tickets if t.status in ("resolved", "closed"))
+    res_mins = [
+        max(0.0, (t.resolved_at - t.created_at).total_seconds() / 60.0)
+        for t in tickets
+        if t.resolved_at and t.created_at
+    ]
+
+    # 6. Staff performance metrics
+    att_stmt = select(StaffAttendance).where(
+        StaffAttendance.attendance_date >= s_date, StaffAttendance.attendance_date <= e_date
+    )
+    if canteen_id:
+        att_stmt = att_stmt.where(StaffAttendance.canteen_id == canteen_id)
+    att_rows = db.scalars(att_stmt).all()
+    present_checkins = sum(1 for a in att_rows if a.status == "present")
+    leave_days = sum(1 for a in att_rows if a.status == "leave")
+
+    task_stmt = select(StaffTask).where(StaffTask.created_at >= s_dt, StaffTask.created_at <= e_dt)
+    if canteen_id:
+        task_stmt = task_stmt.where(StaffTask.canteen_id == canteen_id)
+    tasks = db.scalars(task_stmt).all()
+    tasks_done = sum(1 for t in tasks if t.status == "done")
+    cashier_orders = sum(1 for o in paid_orders if o.cashier_id is not None)
 
     return {
         "range": {"start_date": s_date.isoformat(), "end_date": e_date.isoformat()},
@@ -185,6 +245,19 @@ def get_analytics_report(
             "repeat_order_rate_percent": repeat_rate,
             "average_food_rating": round(float(avg_rating), 2),
         },
+        "support": {
+            "total_tickets": len(tickets),
+            "open_tickets": open_tickets,
+            "resolved_tickets": resolved_tickets,
+            "avg_resolution_minutes": round(sum(res_mins) / len(res_mins), 1) if res_mins else 0.0,
+        },
+        "staff_performance": {
+            "present_checkins": present_checkins,
+            "leave_records": leave_days,
+            "tasks_total": len(tasks),
+            "tasks_completed": tasks_done,
+            "cashier_walkin_orders": cashier_orders,
+        },
     }
 
 
@@ -202,13 +275,41 @@ def export_report_csv(report: dict[str, Any]) -> str:
     for it in report["sales"]["top_items"]:
         writer.writerow([it["item_name"], it["quantity_sold"], it["revenue"]])
     writer.writerow([])
+    writer.writerow(["CATEGORY SALES", "QUANTITY", "REVENUE"])
+    for cat in report["sales"].get("category_sales", []):
+        writer.writerow([cat["category"], cat["quantity"], cat["revenue"]])
+    writer.writerow([])
+    writer.writerow(["COUNTER SALES", "ORDERS", "REVENUE"])
+    for cnt in report["sales"].get("counter_sales", []):
+        writer.writerow([cnt["counter"], cnt["orders"], cnt["revenue"]])
+    writer.writerow([])
+    writer.writerow(["PAYMENT BREAKDOWN", "ORDERS", "AMOUNT"])
+    for pm in report["sales"].get("payment_breakdown", []):
+        writer.writerow([pm["method"], pm["orders"], pm["amount"]])
+    writer.writerow([])
     writer.writerow(["OPERATIONS SUMMARY"])
     for k, v in report["operations"].items():
         if not isinstance(v, list):
             writer.writerow([k, v])
     writer.writerow([])
+    writer.writerow(["PEAK HOURS", "ORDERS"])
+    for ph in report["operations"].get("peak_hours", []):
+        writer.writerow([ph["hour"], ph["orders"]])
+    writer.writerow([])
     writer.writerow(["INVENTORY SUMMARY"])
     for k, v in report["inventory"].items():
+        writer.writerow([k, v])
+    writer.writerow([])
+    writer.writerow(["CUSTOMER METRICS"])
+    for k, v in report.get("customers", {}).items():
+        writer.writerow([k, v])
+    writer.writerow([])
+    writer.writerow(["SUPPORT METRICS"])
+    for k, v in report.get("support", {}).items():
+        writer.writerow([k, v])
+    writer.writerow([])
+    writer.writerow(["STAFF PERFORMANCE"])
+    for k, v in report.get("staff_performance", {}).items():
         writer.writerow([k, v])
     return buf.getvalue()
 
@@ -218,6 +319,13 @@ def export_report_pdf(report: dict[str, Any]) -> bytes:
     c = canvas.Canvas(buf, pagesize=A4)
     w, h = A4
     y = h - 40
+
+    def ensure_space(needed: int = 24) -> None:
+        nonlocal y
+        if y - needed < 42:
+            c.showPage()
+            y = h - 42
+
     c.setFont("Helvetica-Bold", 15)
     c.drawString(40, y, "CollegeBites Operational & Financial Report")
     y -= 20
@@ -227,12 +335,14 @@ def export_report_pdf(report: dict[str, Any]) -> bytes:
 
     def section(title: str, rows: list[tuple[str, Any]]):
         nonlocal y
+        ensure_space(40)
         c.setFont("Helvetica-Bold", 12)
         c.drawString(40, y, title)
         y -= 16
         c.setFont("Helvetica", 10)
         for label, val in rows:
-            c.drawString(52, y, f"{label}: {val}")
+            ensure_space(16)
+            c.drawString(52, y, f"{label}: {val}"[:96])
             y -= 14
         y -= 10
 
@@ -251,6 +361,7 @@ def export_report_pdf(report: dict[str, Any]) -> bytes:
         ("Cancelled / Rejected Orders", op["cancelled_orders"]),
         ("Delayed Orders", op["delayed_orders"]),
         ("Average Prep Minutes", op["avg_prep_minutes"]),
+        ("Average Pickup Wait Minutes", op.get("avg_pickup_wait_minutes", 0)),
     ])
     inv = report["inventory"]
     section("Inventory & Wastage", [
@@ -258,7 +369,32 @@ def export_report_pdf(report: dict[str, Any]) -> bytes:
         ("Low Stock Alerts", inv["low_stock_count"]),
         ("Expiring Within 7 Days", inv["expiring_within_7_days"]),
         ("Wastage Loss", f"Rs.{inv['total_wastage_loss']}"),
+        ("Purchases Received", f"Rs.{inv['total_purchases_received']}"),
     ])
+    cust = report.get("customers", {})
+    section("Customers & Ratings", [
+        ("Registered Customers", cust.get("registered_customers", 0)),
+        ("Active Ordering Customers", cust.get("active_ordering_customers", 0)),
+        ("Repeat Order Rate", f"{cust.get('repeat_order_rate_percent', 0)}%"),
+        ("Average Food Rating", f"{cust.get('average_food_rating', 0)} / 5"),
+    ])
+    sup = report.get("support", {})
+    sp = report.get("staff_performance", {})
+    section("Support & Staff Operations", [
+        ("Support Tickets (Open / Resolved)", f"{sup.get('open_tickets', 0)} / {sup.get('resolved_tickets', 0)}"),
+        ("Avg Ticket Resolution", f"{sup.get('avg_resolution_minutes', 0)} mins"),
+        ("Staff Check-ins / Leave Days", f"{sp.get('present_checkins', 0)} / {sp.get('leave_records', 0)}"),
+        ("Staff Tasks Completed", f"{sp.get('tasks_completed', 0)} / {sp.get('tasks_total', 0)}"),
+        ("Cashier Walk-in Orders", sp.get("cashier_walkin_orders", 0)),
+    ])
+    if s.get("top_items"):
+        section("Top Food Items", [(it["item_name"], f"{it['quantity_sold']} sold (Rs.{it['revenue']:.2f})") for it in s["top_items"][:10]])
+    if s.get("category_sales"):
+        section("Category Sales", [(it["category"], f"{it['quantity']} sold (Rs.{it['revenue']:.2f})") for it in s["category_sales"]])
+    if s.get("counter_sales"):
+        section("Counter Sales", [(it["counter"], f"{it['orders']} orders (Rs.{it['revenue']:.2f})") for it in s["counter_sales"]])
+    if s.get("payment_breakdown"):
+        section("Payment Breakdown", [(it["method"], f"{it['orders']} orders (Rs.{it['amount']:.2f})") for it in s["payment_breakdown"]])
     c.showPage()
     c.save()
     return buf.getvalue()

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Linking, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "react-native-qrcode-svg";
-import { API_BASE_URL, mobileApi } from "../../src/api/client";
+import { API_BASE_URL, buildMobileWsUrl, getMobileApiError, mobileApi } from "../../src/api/client";
 import { useMobileStore } from "../../src/store/useMobileStore";
 import { hmacSha256Hex } from "../../src/utils/hmacSha256";
 
@@ -20,7 +20,7 @@ export default function OrderDetailScreen() {
   const { orderNumber } = useLocalSearchParams<{ orderNumber: string }>();
   const router = useRouter();
   const qc = useQueryClient();
-  const { guestOrderTokens, cachedOrders, saveCachedOrder } = useMobileStore();
+  const { accessToken, guestOrderTokens, cachedOrders, saveCachedOrder } = useMobileStore();
   const gToken = orderNumber ? guestOrderTokens[orderNumber] : undefined;
   const suffix = gToken ? `?guest_token=${encodeURIComponent(gToken)}` : "";
   const [paying, setPaying] = useState(false);
@@ -49,10 +49,10 @@ export default function OrderDetailScreen() {
   // Real-time WebSocket updates
   useEffect(() => {
     if (!order?.id) return;
-    const wsBase = API_BASE_URL.replace(/^http/i, "ws").replace(/\/api\/v1$/, "");
+    if (!accessToken && !gToken) return;
     let ws: WebSocket | null = null;
     try {
-      ws = new WebSocket(`${wsBase}/api/v1/ws/orders/${order.id}`);
+      ws = new WebSocket(buildMobileWsUrl(`/ws/orders/${order.id}`, { token: accessToken, guestToken: gToken }));
       ws.onmessage = () => {
         qc.invalidateQueries({ queryKey: ["m-order", orderNumber] });
         qc.invalidateQueries({ queryKey: ["m-receipt", orderNumber] });
@@ -61,7 +61,7 @@ export default function OrderDetailScreen() {
       // polling fallback handles it
     }
     return () => ws?.close();
-  }, [order?.id, orderNumber, qc]);
+  }, [order?.id, orderNumber, accessToken, gToken, qc]);
 
   if (!order) {
     return (
@@ -87,8 +87,8 @@ export default function OrderDetailScreen() {
         payment_method: "card",
       });
       await refetch();
-    } catch (e: any) {
-      setErrMsg(e?.response?.data?.detail || "Stripe payment verification failed");
+    } catch (e: unknown) {
+      setErrMsg(getMobileApiError(e, "Stripe payment verification failed"));
     } finally {
       setPaying(false);
     }
@@ -96,12 +96,15 @@ export default function OrderDetailScreen() {
 
   const failTestStripe = async () => {
     setPaying(true);
+    setErrMsg("");
     try {
-      await mobileApi.post("/payments/stripe/fail", {
+      await mobileApi.post(`/payments/stripe/fail${suffix}`, {
         order_id: order.id,
         reason: "Customer cancelled Stripe payment in mobile app",
       });
       await refetch();
+    } catch (e: unknown) {
+      setErrMsg(getMobileApiError(e, "Could not update payment status"));
     } finally {
       setPaying(false);
     }
@@ -123,8 +126,8 @@ export default function OrderDetailScreen() {
         payment_method: "upi",
       });
       await refetch();
-    } catch (e: any) {
-      setErrMsg(e?.response?.data?.detail || "Payment verification failed");
+    } catch (e: unknown) {
+      setErrMsg(getMobileApiError(e, "Payment verification failed"));
     } finally {
       setPaying(false);
     }
@@ -132,12 +135,28 @@ export default function OrderDetailScreen() {
 
   const failTestRazorpay = async () => {
     setPaying(true);
+    setErrMsg("");
     try {
-      await mobileApi.post("/payments/razorpay/fail", {
+      await mobileApi.post(`/payments/razorpay/fail${suffix}`, {
         order_id: order.id,
         reason: "Customer cancelled payment in mobile app",
       });
       await refetch();
+    } catch (e: unknown) {
+      setErrMsg(getMobileApiError(e, "Could not update payment status"));
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  const retryPayment = async (method: "razorpay" | "stripe") => {
+    setPaying(true);
+    setErrMsg("");
+    try {
+      await mobileApi.post(`/payments/retry/${order.id}${suffix}`, { payment_method: method });
+      await refetch();
+    } catch (e: unknown) {
+      setErrMsg(getMobileApiError(e, "Could not restart payment"));
     } finally {
       setPaying(false);
     }
@@ -150,8 +169,40 @@ export default function OrderDetailScreen() {
         reason: "Cancelled by customer from mobile app",
       });
       await refetch();
-    } catch (e: any) {
-      setErrMsg(e?.response?.data?.detail || "Cannot cancel order at this stage");
+    } catch (e: unknown) {
+      setErrMsg(getMobileApiError(e, "Cannot cancel order at this stage"));
+    }
+  };
+
+  const downloadOrShareReceipt = async () => {
+    setErrMsg("");
+    if (Platform.OS === "web") {
+      try {
+        const res = await mobileApi.get(`/tokens/receipts/${order.order_number}/pdf${suffix}`, {
+          responseType: "blob",
+        });
+        const url = URL.createObjectURL(res.data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `CollegeBites-${order.order_number}.pdf`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e: unknown) {
+        setErrMsg(getMobileApiError(e, "Could not download PDF receipt"));
+      }
+      return;
+    }
+    if (gToken) {
+      await Linking.openURL(`${API_BASE_URL}/tokens/receipts/${order.order_number}/pdf${suffix}`);
+      return;
+    }
+    try {
+      const lines = (order.items || []).map((i: any) => `${i.quantity}x ${i.item_name} (₹${i.line_subtotal})`).join("\n");
+      await Share.share({
+        message: `COLLEGEBITES RECEIPT\nOrder: ${order.order_number}\nPickup Token: ${order.pickup_token_code || "Pending"}\nCanteen: ${order.canteen_name} / ${order.counter_name}\nTotal Paid: ₹${order.total_amount}\n\nItems:\n${lines}`,
+      });
+    } catch {
+      // user dismissed share sheet
     }
   };
 
@@ -249,6 +300,20 @@ export default function OrderDetailScreen() {
         </View>
       )}
 
+      {order.status === "PAYMENT_FAILED" && (
+        <View style={styles.payBox}>
+          <Text style={styles.secTitle}>Retry Online Payment (₹{order.total_amount})</Text>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <Pressable disabled={paying} onPress={() => retryPayment("razorpay")} style={[styles.payBtn, { flex: 1 }]}>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Retry Razorpay</Text>
+            </Pressable>
+            <Pressable disabled={paying} onPress={() => retryPayment("stripe")} style={[styles.payBtn, { flex: 1, backgroundColor: "#4f46e5" }]}>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Retry Stripe</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
       <View style={styles.card}>
         <Text style={styles.secTitle}>Complete Receipt Summary</Text>
         <Text style={{ fontSize: 11, color: "#64748b" }}>
@@ -290,10 +355,12 @@ export default function OrderDetailScreen() {
 
       {order.payment_status === "CONFIRMED" && (
         <Pressable
-          onPress={() => Linking.openURL(`${API_BASE_URL}/tokens/receipts/${order.order_number}/pdf${suffix}`)}
+          onPress={downloadOrShareReceipt}
           style={styles.pdfBtn}
         >
-          <Text style={{ color: "#fff", fontWeight: "800" }}>Download Printable PDF Receipt</Text>
+          <Text style={{ color: "#fff", fontWeight: "800" }}>
+            {Platform.OS === "web" || gToken ? "Download Printable PDF Receipt" : "Share / Save Digital Receipt"}
+          </Text>
         </Pressable>
       )}
 

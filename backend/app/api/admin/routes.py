@@ -15,12 +15,14 @@ from app.core.permissions import (
     client_ip_from_request,
     enforce_canteen_scope,
     require_roles,
+    scoped_canteen_for_principal,
 )
 from app.core.redis_client import get_redis
-from app.models.auth import User
+from app.models.auth import StaffProfile, User
+from app.models.college import CollegeHoliday, Counter, DiningTable, Kitchen, KitchenStation, PickupLocation
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment, PickupToken
-from app.models.system import AuditLog
+from app.models.system import AuditLog, SystemEvent
 from app.schemas.auth import StaffCreateRequest, UserOut, UserRoleAssignRequest
 from app.schemas.order import OrderOut
 from app.schemas.college import (
@@ -31,14 +33,22 @@ from app.schemas.college import (
     CollegeSettingsUpdate,
     CounterCreate,
     CounterOut,
+    CounterUpdate,
     DiningTableCreate,
     DiningTableOut,
+    DiningTableUpdate,
     HolidayCreate,
     HolidayOut,
+    HolidayUpdate,
     KitchenCreate,
     KitchenOut,
+    KitchenStationCreate,
+    KitchenStationOut,
+    KitchenUpdate,
     OperatingHourItem,
     OperatingHourOut,
+    PickupLocationCreate,
+    PickupLocationOut,
 )
 from app.schemas.common import AuditLogOut
 from app.services import auth_service, college_service, order_service
@@ -132,6 +142,136 @@ def create_holiday(
     return college_service.create_holiday(db, payload, principal.user.id)
 
 
+@router.get("/holidays", response_model=list[HolidayOut])
+def list_holidays(
+    canteen_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    stmt = select(CollegeHoliday).order_by(CollegeHoliday.holiday_date.asc())
+    if canteen_id:
+        stmt = stmt.where(or_(CollegeHoliday.canteen_id == canteen_id, CollegeHoliday.canteen_id.is_(None)))
+    return list(db.scalars(stmt).all())
+
+
+@router.patch("/holidays/{holiday_id}", response_model=HolidayOut)
+def update_holiday(
+    holiday_id: UUID,
+    payload: HolidayUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    return college_service.update_holiday(db, holiday_id, payload, principal.user.id)
+
+
+@router.delete("/holidays/{holiday_id}")
+def delete_holiday(
+    holiday_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    hol = db.get(CollegeHoliday, holiday_id)
+    if not hol:
+        raise HTTPException(status_code=404, detail="Holiday not found")
+    hol.is_active = False
+    db.commit()
+    return {"status": "deactivated", "id": str(holiday_id)}
+
+
+@router.patch("/counters/{counter_id}", response_model=CounterOut)
+def update_counter(
+    counter_id: UUID,
+    payload: CounterUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    cnt = db.get(Counter, counter_id)
+    if not cnt:
+        raise HTTPException(status_code=404, detail="Counter not found")
+    enforce_canteen_scope(principal, cnt.canteen_id)
+    return college_service.update_counter(db, counter_id, payload, principal.user.id)
+
+
+@router.patch("/kitchens/{kitchen_id}", response_model=KitchenOut)
+def update_kitchen(
+    kitchen_id: UUID,
+    payload: KitchenUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    kit = db.get(Kitchen, kitchen_id)
+    if not kit:
+        raise HTTPException(status_code=404, detail="Kitchen not found")
+    enforce_canteen_scope(principal, kit.canteen_id)
+    return college_service.update_kitchen(db, kitchen_id, payload, principal.user.id)
+
+
+@router.get("/canteens/{canteen_id}/kitchen-stations", response_model=list[KitchenStationOut])
+def list_kitchen_stations(
+    canteen_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return list(
+        db.scalars(
+            select(KitchenStation)
+            .join(Kitchen, Kitchen.id == KitchenStation.kitchen_id)
+            .where(Kitchen.canteen_id == canteen_id)
+            .order_by(KitchenStation.name)
+        ).all()
+    )
+
+
+@router.post("/kitchens/{kitchen_id}/stations", response_model=KitchenStationOut, status_code=status.HTTP_201_CREATED)
+def create_kitchen_station(
+    kitchen_id: UUID,
+    payload: KitchenStationCreate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    kit = db.get(Kitchen, kitchen_id)
+    if not kit:
+        raise HTTPException(status_code=404, detail="Kitchen not found")
+    enforce_canteen_scope(principal, kit.canteen_id)
+    return college_service.add_kitchen_station(db, kitchen_id, payload, principal.user.id)
+
+
+@router.get("/canteens/{canteen_id}/pickup-locations", response_model=list[PickupLocationOut])
+def list_pickup_locations(
+    canteen_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return list(db.scalars(select(PickupLocation).where(PickupLocation.canteen_id == canteen_id).order_by(PickupLocation.name)).all())
+
+
+@router.post("/canteens/{canteen_id}/pickup-locations", response_model=PickupLocationOut, status_code=status.HTTP_201_CREATED)
+def create_pickup_location(
+    canteen_id: UUID,
+    payload: PickupLocationCreate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return college_service.add_pickup_location(db, canteen_id, payload, principal.user.id)
+
+
+@router.patch("/tables/{table_id}", response_model=DiningTableOut)
+def update_table(
+    table_id: UUID,
+    payload: DiningTableUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    tbl = db.get(DiningTable, table_id)
+    if not tbl:
+        raise HTTPException(status_code=404, detail="Dining table not found")
+    enforce_canteen_scope(principal, tbl.canteen_id)
+    return college_service.update_dining_table(db, table_id, payload, principal.user.id)
+
+
 @router.get("/users", response_model=list[UserOut])
 def list_users(
     user_kind: Optional[str] = Query(default=None),
@@ -139,7 +279,12 @@ def list_users(
     db: Session = Depends(get_db),
 ):
     stmt = select(User).order_by(User.created_at.desc())
-    if user_kind:
+    if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        scoped_canteen = scoped_canteen_for_principal(principal, None)
+        stmt = stmt.join(StaffProfile, StaffProfile.user_id == User.id).where(
+            StaffProfile.assigned_canteen_id == scoped_canteen
+        )
+    elif user_kind:
         stmt = stmt.where(User.user_kind == user_kind)
     users = db.scalars(stmt.limit(200)).all()
     return [auth_service.build_user_out(db, u) for u in users]
@@ -155,7 +300,10 @@ def create_staff(
     if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
         if any(r in {"super_admin", "college_admin"} for r in payload.role_names):
             payload.role_names = [r for r in payload.role_names if r not in {"super_admin", "college_admin"}]
-        enforce_canteen_scope(principal, payload.assigned_canteen_id)
+        if not payload.role_names:
+            raise HTTPException(status_code=403, detail="Canteen managers cannot create college admin accounts")
+        scoped_cid = scoped_canteen_for_principal(principal, payload.assigned_canteen_id)
+        payload.assigned_canteen_id = scoped_cid
     return auth_service.create_staff_user(db, payload, principal.user.id, client_ip_from_request(request))
 
 
@@ -248,14 +396,27 @@ def list_all_orders(
 @router.get("/audit-logs", response_model=list[AuditLogOut])
 def get_audit_logs(
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     action: Optional[str] = Query(default=None),
+    entity_type: Optional[str] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
     db: Session = Depends(get_db),
 ):
-    stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
+    stmt = select(AuditLog).order_by(AuditLog.created_at.desc()).offset(offset).limit(limit)
     if action:
         stmt = stmt.where(AuditLog.action.ilike(f"%{action}%"))
+    if entity_type:
+        stmt = stmt.where(AuditLog.entity_type == entity_type)
     return db.scalars(stmt).all()
+
+
+@router.get("/system-events")
+def get_system_events(
+    limit: int = Query(default=50, ge=1, le=200),
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    return list(db.scalars(select(SystemEvent).order_by(SystemEvent.created_at.desc()).limit(limit)).all())
 
 
 @router.get("/health")

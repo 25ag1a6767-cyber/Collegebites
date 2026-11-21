@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import sha256_hex, verify_signed_qr_token_format
+from app.core.time_utils import today_college
 from app.models.college import Canteen, Counter
 from app.models.order import Order, OrderItem, SlotReservation
 from app.models.payment import (
@@ -134,7 +135,7 @@ def verify_pickup(db: Session, payload: PickupVerifyRequest, staff_user_id: UUID
     elif payload.pickup_token:
         method = "manual_token"
         presented = payload.pickup_token.strip().upper()
-        stmt = select(PickupToken).where(PickupToken.token_code == presented, PickupToken.service_date == date.today())
+        stmt = select(PickupToken).where(PickupToken.token_code == presented, PickupToken.service_date == today_college())
         if payload.canteen_id:
             stmt = stmt.where(PickupToken.canteen_id == payload.canteen_id)
         token_row = db.scalar(stmt.order_by(PickupToken.created_at.desc()))
@@ -326,29 +327,44 @@ def get_digital_token_board(db: Session, canteen_id: UUID) -> DigitalBoardRespon
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")
 
-    rows = db.execute(
+    today = today_college()
+    active_rows = db.execute(
         select(PickupToken.token_code, Counter.name, Order.status, Order.ready_at, Order.completed_at)
         .join(Order, Order.id == PickupToken.order_id)
         .join(Counter, Counter.id == PickupToken.counter_id)
         .where(
             Order.canteen_id == canteen_id,
-            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY", "COMPLETED")),
+            PickupToken.service_date == today,
+            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
         )
-        .order_by(Order.updated_at.desc())
+        .order_by(Order.updated_at.asc())
         .limit(80)
+    ).all()
+    completed_rows = db.execute(
+        select(PickupToken.token_code, Counter.name, Order.status, Order.ready_at, Order.completed_at)
+        .join(Order, Order.id == PickupToken.order_id)
+        .join(Counter, Counter.id == PickupToken.counter_id)
+        .where(
+            Order.canteen_id == canteen_id,
+            PickupToken.service_date == today,
+            Order.status == "COMPLETED",
+        )
+        .order_by(Order.completed_at.desc())
+        .limit(10)
     ).all()
 
     preparing: list[TokenBoardItem] = []
     ready: list[TokenBoardItem] = []
-    completed: list[TokenBoardItem] = []
-    for token_code, counter_name, status_val, ready_at, _completed_at in rows:
+    completed: list[TokenBoardItem] = [
+        TokenBoardItem(token_code=tc, counter_name=cn, order_status=st, ready_at=ra)
+        for tc, cn, st, ra, _ca in completed_rows
+    ]
+    for token_code, counter_name, status_val, ready_at, _completed_at in active_rows:
         item = TokenBoardItem(token_code=token_code, counter_name=counter_name, order_status=status_val, ready_at=ready_at)
         if status_val in ("PLACED", "ACCEPTED", "PREPARING"):
             preparing.append(item)
         elif status_val == "READY":
             ready.append(item)
-        elif status_val == "COMPLETED" and len(completed) < 10:
-            completed.append(item)
 
     return DigitalBoardResponse(
         canteen_id=canteen.id,

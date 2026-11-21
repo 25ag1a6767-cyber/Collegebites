@@ -41,6 +41,14 @@ class FoodVariantIn(BaseModel):
     is_available: bool = True
 
 
+class FoodVariantUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    price_delta: Optional[Decimal] = None
+    absolute_price: Optional[Decimal] = Field(default=None, ge=0)
+    is_default: Optional[bool] = None
+    is_available: Optional[bool] = None
+
+
 class FoodVariantOut(ORMModel):
     id: UUID
     name: str
@@ -57,6 +65,14 @@ class FoodAddonCreate(BaseModel):
     price: Decimal = Field(ge=0)
     is_veg: bool = True
     is_available: bool = True
+
+
+class FoodAddonUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    addon_type: Optional[str] = Field(default=None, pattern="^(addon|topping|side)$")
+    price: Optional[Decimal] = Field(default=None, ge=0)
+    is_veg: Optional[bool] = None
+    is_available: Optional[bool] = None
 
 
 class FoodAddonOut(ORMModel):
@@ -138,6 +154,7 @@ class FoodItemUpdate(BaseModel):
     is_available: Optional[bool] = None
     is_active: Optional[bool] = None
     addon_ids: Optional[list[UUID]] = None
+    allergen_names: Optional[list[str]] = None
 
 
 class FoodItemOut(ORMModel):
@@ -171,6 +188,7 @@ class FoodItemOut(ORMModel):
     is_available: bool
     is_active: bool
     insufficient_ingredients: bool
+    is_schedule_active_now: bool = True
     images: list[FoodImageOut] = []
     variants: list[FoodVariantOut] = []
     addons: list[FoodAddonOut] = []
@@ -186,6 +204,19 @@ class MenuScheduleCreate(BaseModel):
     days_of_week: list[int] = [0, 1, 2, 3, 4, 5, 6]
 
 
+class MenuScheduleUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=120)
+    schedule_type: Optional[str] = Field(default=None, pattern="^(breakfast|lunch|snacks|special|all_day)$")
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    days_of_week: Optional[list[int]] = None
+    is_active: Optional[bool] = None
+
+
+class MenuScheduleAssignItemsIn(BaseModel):
+    food_item_ids: list[UUID]
+
+
 class MenuScheduleOut(ORMModel):
     id: UUID
     canteen_id: UUID
@@ -195,10 +226,12 @@ class MenuScheduleOut(ORMModel):
     end_time: time
     days_of_week: list[int]
     is_active: bool
+    scheduled_item_ids: list[UUID] = []
 
 
 class CustomerProfileUpdate(BaseModel):
     full_name: Optional[str] = Field(default=None, min_length=2, max_length=160)
+    phone: Optional[str] = Field(default=None, min_length=8, max_length=20)
     college_id_number: Optional[str] = None
     department: Optional[str] = None
     dietary_preference: Optional[str] = None

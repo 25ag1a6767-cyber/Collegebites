@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     APP_NAME: str = "CollegeBites"
     API_PREFIX: str = "/api/v1"
+    COLLEGE_TIMEZONE: str = "Asia/Kolkata"
     PUBLIC_BASE_URL: str = "http://localhost:5173"
     API_BASE_URL: str = "http://localhost:8000"
 
@@ -78,7 +79,8 @@ class Settings(BaseSettings):
     DEFAULT_PRINTER_PORT: int = 9100
 
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8081"
-    RATE_LIMIT_DEFAULT: str = "120/minute"
+    RATE_LIMIT_DEFAULT: str = "300/minute"
+    RATE_LIMIT_ENABLED: bool = True
 
     @property
     def cors_origin_list(self) -> List[str]:

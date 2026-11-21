@@ -17,18 +17,38 @@ const DEMO_USERS = [
 
 export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ initialMode = "login" }) => {
   const [mode, setMode] = useState<"login" | "register">(initialMode);
+  const [loginMethod, setLoginMethod] = useState<"password" | "otp">("password");
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  const [otpCode, setOtpCode] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [collegeId, setCollegeId] = useState("");
   const [department, setDepartment] = useState("");
+  const [referralCode, setReferralCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetTarget, setResetTarget] = useState("");
+  const [resetCode, setResetCode] = useState("");
+  const [resetNewPw, setResetNewPw] = useState("");
+  const [resetSent, setResetSent] = useState(false);
 
   const navigate = useNavigate();
   const { setAuth } = useAppStore();
   const { pushToast } = useToast();
+
+  const routeAfterAuth = (roles: string[], redirectPath?: string) => {
+    if (redirectPath) return navigate(redirectPath);
+    if (roles.includes("kitchen_staff")) navigate("/kitchen");
+    else if (roles.includes("cashier")) navigate("/cashier");
+    else if (roles.includes("pickup_staff")) navigate("/pickup");
+    else if (roles.includes("inventory_manager")) navigate("/inventory");
+    else if (roles.some((r) => ["super_admin", "college_admin", "canteen_manager"].includes(r))) navigate("/admin");
+    else navigate("/");
+  };
 
   const doLogin = async (idVal: string, pwVal: string, redirectPath?: string) => {
     setLoading(true);
@@ -36,16 +56,24 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
       const res = await api.post("/auth/login", { identifier: idVal, password: pwVal });
       setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
       pushToast(`Welcome back, ${res.data.user.full_name}!`, "success");
-      const roles: string[] = res.data.user.roles || [];
-      if (redirectPath) return navigate(redirectPath);
-      if (roles.includes("kitchen_staff")) navigate("/kitchen");
-      else if (roles.includes("cashier")) navigate("/cashier");
-      else if (roles.includes("pickup_staff")) navigate("/pickup");
-      else if (roles.includes("inventory_manager")) navigate("/inventory");
-      else if (roles.some((r) => ["super_admin", "college_admin", "canteen_manager"].includes(r))) navigate("/admin");
-      else navigate("/");
+      routeAfterAuth(res.data.user.roles || [], redirectPath);
     } catch (err) {
       pushToast(getApiError(err, "Login failed"), "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const requestLoginOtp = async () => {
+    if (!identifier.trim()) return pushToast("Enter your email or mobile number first", "error");
+    setLoading(true);
+    try {
+      const res = await api.post("/auth/otp/request", { target: identifier.trim(), purpose: "login" });
+      setOtpSent(true);
+      setDevOtpHint(res.data.dev_otp || null);
+      pushToast("Login OTP sent!", "success");
+    } catch (err) {
+      pushToast(getApiError(err, "Could not request OTP"), "error");
     } finally {
       setLoading(false);
     }
@@ -54,6 +82,20 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (mode === "login") {
+      if (loginMethod === "otp") {
+        setLoading(true);
+        try {
+          const res = await api.post("/auth/otp/login", { target: identifier.trim(), code: otpCode.trim() });
+          setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
+          pushToast(`Welcome back, ${res.data.user.full_name}!`, "success");
+          routeAfterAuth(res.data.user.roles || []);
+        } catch (err) {
+          pushToast(getApiError(err, "OTP login failed"), "error");
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
       await doLogin(identifier, password);
       return;
     }
@@ -66,6 +108,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
         password,
         college_id_number: collegeId || null,
         department: department || null,
+        referral_code: referralCode.trim() || null,
       });
       setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
       pushToast("Account created! Happy ordering.", "success");
@@ -137,37 +180,165 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                     <Input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="CSE" />
                   </div>
                 </div>
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-slate-700">Referral Code (Optional)</label>
+                  <Input value={referralCode} onChange={(e) => setReferralCode(e.target.value)} placeholder="Friend's referral code" />
+                </div>
               </>
             )}
 
             {mode === "login" && (
+              <>
+                <div className="flex gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setLoginMethod("password")}
+                    className={`rounded-lg px-3 py-1 font-bold ${loginMethod === "password" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}
+                  >
+                    Password
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLoginMethod("otp")}
+                    className={`rounded-lg px-3 py-1 font-bold ${loginMethod === "otp" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}
+                  >
+                    Mobile / Email OTP
+                  </button>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-slate-700">Email or Mobile Number</label>
+                  <Input
+                    required
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    placeholder="student@collegebites.edu"
+                  />
+                </div>
+              </>
+            )}
+
+            {(mode === "register" || loginMethod === "password") ? (
               <div>
-                <label className="mb-1 block text-xs font-bold text-slate-700">Email or Mobile Number</label>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700">Password</label>
+                  {mode === "login" && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResetTarget(identifier);
+                        setResetSent(false);
+                        setDevOtpHint(null);
+                        setResetOpen(true);
+                      }}
+                      className="text-xs font-bold text-orange-600 hover:underline"
+                    >
+                      Forgot Password?
+                    </button>
+                  )}
+                </div>
                 <Input
+                  type="password"
                   required
-                  value={identifier}
-                  onChange={(e) => setIdentifier(e.target.value)}
-                  placeholder="student@collegebites.edu"
+                  minLength={mode === "register" ? 8 : 1}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
                 />
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <Input
+                    required
+                    maxLength={6}
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value)}
+                    placeholder="Enter 6-digit OTP"
+                  />
+                  <Button type="button" variant="outline" onClick={requestLoginOtp} disabled={loading}>
+                    {otpSent ? "Resend" : "Send OTP"}
+                  </Button>
+                </div>
+                {devOtpHint && (
+                  <div className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs text-slate-700">
+                    Dev/Test OTP: <strong className="font-mono">{devOtpHint}</strong>
+                  </div>
+                )}
               </div>
             )}
 
-            <div>
-              <label className="mb-1 block text-xs font-bold text-slate-700">Password</label>
-              <Input
-                type="password"
-                required
-                minLength={mode === "register" ? 8 : 1}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-              />
-            </div>
-
             <Button type="submit" variant="primary" className="w-full" disabled={loading}>
-              {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Create Account"}
+              {loading ? "Please wait..." : mode === "login" ? (loginMethod === "otp" ? "Verify & Sign In" : "Sign In") : "Create Account"}
             </Button>
           </form>
+
+          {resetOpen && (
+            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between font-bold text-slate-900">
+                <span>Reset Password via OTP</span>
+                <button type="button" onClick={() => setResetOpen(false)} className="text-slate-400 hover:text-slate-700">
+                  Close
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <Input value={resetTarget} onChange={(e) => setResetTarget(e.target.value)} placeholder="Registered Email or Mobile" />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={loading || !resetTarget.trim()}
+                  onClick={async () => {
+                    setLoading(true);
+                    try {
+                      const r = await api.post("/auth/otp/request", { target: resetTarget.trim(), purpose: "password_reset" });
+                      setResetSent(true);
+                      setDevOtpHint(r.data.dev_otp || null);
+                      pushToast("Reset OTP sent!", "success");
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                >
+                  {resetSent ? "Resend" : "Send OTP"}
+                </Button>
+              </div>
+              {devOtpHint && (
+                <div className="rounded-lg bg-white px-2.5 py-1 border border-slate-200">
+                  Dev OTP: <strong className="font-mono">{devOtpHint}</strong>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-2">
+                <Input value={resetCode} onChange={(e) => setResetCode(e.target.value)} placeholder="6-digit OTP" maxLength={6} />
+                <Input type="password" value={resetNewPw} onChange={(e) => setResetNewPw(e.target.value)} placeholder="New password (8+ chars)" />
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                className="w-full"
+                disabled={loading || resetCode.trim().length < 6 || resetNewPw.length < 8}
+                onClick={async () => {
+                  setLoading(true);
+                  try {
+                    await api.post("/auth/password-reset/confirm", {
+                      target: resetTarget.trim(),
+                      code: resetCode.trim(),
+                      new_password: resetNewPw,
+                    });
+                    pushToast("Password updated! Sign in with your new password.", "success");
+                    setResetOpen(false);
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+              >
+                Confirm New Password
+              </Button>
+            </div>
+          )}
 
           <div className="mt-5 rounded-xl bg-orange-50 p-3 text-xs text-orange-900">
             <strong>Visiting campus?</strong> You can also skip login and order directly as a <strong>Guest</strong> at checkout with quick mobile OTP verification.

@@ -7,13 +7,14 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.time_utils import now_college, today_college
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment, PickupToken
 from app.models.staff import StaffShift
 from app.schemas.operations import POSWalkInOrderRequest, ShiftCloseRequest, ShiftOpenRequest, ShiftOut
 from app.schemas.order import CheckoutRequest, OrderOut
 from app.services.audit_service import record_audit_log
-from app.services.order_service import checkout_order, serialize_order
+from app.services.order_service import checkout_order, serialize_orders_batch
 from app.services.payment_service import collect_counter_payment
 from app.schemas.payment import CounterPaymentCollectRequest
 
@@ -27,7 +28,7 @@ def create_pos_walkin_order(
         counter_id=payload.counter_id,
         order_type="walk_in",
         order_channel="pos",
-        payment_method="cash" if payload.payment_method == "cash" else payload.payment_method,
+        payment_method=payload.payment_method,
         coupon_code=payload.coupon_code,
         guest_name=payload.customer_name,
         guest_phone=payload.customer_phone or "0000000000",
@@ -55,6 +56,23 @@ def create_pos_walkin_order(
     return confirmed
 
 
+def list_pending_counter_orders(db: Session, canteen_id: Optional[UUID] = None) -> list[OrderOut]:
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(
+            Order.status == "PAYMENT_PENDING",
+            Order.payment_status == "PENDING",
+        )
+        .order_by(Order.created_at.desc())
+        .limit(40)
+    )
+    if canteen_id:
+        stmt = stmt.where(Order.canteen_id == canteen_id)
+    orders = db.scalars(stmt).all()
+    return serialize_orders_batch(db, list(orders))
+
+
 def search_pos_orders(db: Session, query: str, canteen_id: Optional[UUID] = None) -> list[OrderOut]:
     q = query.strip()
     token_order_ids = list(
@@ -77,7 +95,7 @@ def search_pos_orders(db: Session, query: str, canteen_id: Optional[UUID] = None
     if canteen_id:
         stmt = stmt.where(Order.canteen_id == canteen_id)
     orders = db.scalars(stmt).all()
-    return [serialize_order(db, o) for o in orders]
+    return serialize_orders_batch(db, list(orders))
 
 
 def _shift_sales_summary(db: Session, shift: StaffShift) -> dict:
@@ -85,7 +103,9 @@ def _shift_sales_summary(db: Session, shift: StaffShift) -> dict:
     end_dt = shift.closed_at or datetime.now(timezone.utc)
     rows = db.execute(
         select(Payment.method, func.count(Payment.id), func.coalesce(func.sum(Payment.amount), 0))
+        .join(Order, Order.id == Payment.order_id)
         .where(
+            Order.canteen_id == shift.canteen_id,
             Payment.recorded_by_user_id == shift.staff_user_id,
             Payment.status == "CONFIRMED",
             Payment.confirmed_at >= start_dt,
@@ -109,15 +129,20 @@ def open_cashier_shift(db: Session, payload: ShiftOpenRequest, cashier_user_id: 
         select(StaffShift).where(StaffShift.staff_user_id == cashier_user_id, StaffShift.status == "open")
     )
     if existing:
+        if existing.canteen_id != payload.canteen_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Close your existing open shift in the previous canteen before opening one here",
+            )
         out = ShiftOut.model_validate(existing)
         out.shift_sales_summary = _shift_sales_summary(db, existing)
         return out
-    now = datetime.now()
+    now = now_college()
     shift = StaffShift(
         staff_user_id=cashier_user_id,
         canteen_id=payload.canteen_id,
         counter_id=payload.counter_id,
-        shift_date=date.today(),
+        shift_date=now.date(),
         start_time=now.time(),
         end_time=time(23, 59),
         shift_type="cashier",

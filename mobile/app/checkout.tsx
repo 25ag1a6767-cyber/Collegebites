@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { mobileApi } from "../src/api/client";
+import { getMobileApiError, mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 export default function CheckoutScreen() {
@@ -19,7 +19,8 @@ export default function CheckoutScreen() {
     queryKey: ["m-canteens"],
     queryFn: async () => (await mobileApi.get("/canteens")).data,
   });
-  const activeCanteenId = selectedCanteenId || canteens[0]?.id;
+  const activeCanteen = canteens.find((c) => c.id === selectedCanteenId) || canteens[0];
+  const activeCanteenId = activeCanteen?.id;
 
   const { data: cart, refetch: refetchCart } = useQuery<any>({
     queryKey: ["m-cart", activeCanteenId],
@@ -33,9 +34,16 @@ export default function CheckoutScreen() {
     queryFn: async () => (await mobileApi.get(`/orders/slots/${activeCanteenId}`)).data,
   });
 
+  const { data: loyalty } = useQuery<any>({
+    queryKey: ["m-loyalty"],
+    enabled: Boolean(user),
+    queryFn: async () => (await mobileApi.get("/promotions/loyalty/me")).data,
+  });
+
   const [couponInput, setCouponInput] = useState("");
+  const [redeemPoints, setRedeemPoints] = useState(0);
   const [selectedSlotId, setSelectedSlotId] = useState<string>("");
-  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe" | "cash_counter" | "pay_at_pickup">("razorpay");
+  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe" | "cash" | "pay_at_pickup">("razorpay");
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
   const [otpCode, setOtpCode] = useState("");
@@ -51,8 +59,8 @@ export default function CheckoutScreen() {
     try {
       await mobileApi.patch(`/carts/items/${cartItemId}`, { quantity: nextQty });
       refetchCart();
-    } catch (e: any) {
-      setErrorMsg(e?.response?.data?.detail || "Could not update item");
+    } catch (e: unknown) {
+      setErrorMsg(getMobileApiError(e, "Could not update item"));
     }
   };
 
@@ -68,8 +76,8 @@ export default function CheckoutScreen() {
       if (!res.data.coupon_valid && res.data.coupon_message) {
         setErrorMsg(res.data.coupon_message);
       }
-    } catch (e: any) {
-      setErrorMsg(e?.response?.data?.detail || "Coupon error");
+    } catch (e: unknown) {
+      setErrorMsg(getMobileApiError(e, "Coupon error"));
     }
   };
 
@@ -78,8 +86,8 @@ export default function CheckoutScreen() {
     try {
       const res = await mobileApi.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
       setDevOtp(res.data.dev_otp || null);
-    } catch (e: any) {
-      setErrorMsg(e?.response?.data?.detail || "Failed to send OTP");
+    } catch (e: unknown) {
+      setErrorMsg(getMobileApiError(e, "Failed to send OTP"));
     }
   };
 
@@ -92,8 +100,8 @@ export default function CheckoutScreen() {
         code: otpCode.trim(),
       });
       setOtpToken(res.data.verification_token);
-    } catch (e: any) {
-      setErrorMsg(e?.response?.data?.detail || "OTP verification failed");
+    } catch (e: unknown) {
+      setErrorMsg(getMobileApiError(e, "OTP verification failed"));
     }
   };
 
@@ -123,6 +131,9 @@ export default function CheckoutScreen() {
           pickup_slot_id: selectedSlotId || null,
           order_channel: "mobile",
           payment_method: payMethod,
+          coupon_code: cart?.coupon_code || null,
+          redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
+          idempotency_key: idemKey,
           guest_name: !user ? guestName.trim() : null,
           guest_phone: !user ? guestPhone.trim() : null,
           guest_otp_verification_token: !user ? otpToken : null,
@@ -135,8 +146,8 @@ export default function CheckoutScreen() {
       if (ord.guest_access_token) saveGuestOrderToken(ord.order_number, ord.guest_access_token);
       qc.invalidateQueries({ queryKey: ["m-cart", activeCanteenId] });
       router.push(`/order/${ord.order_number}`);
-    } catch (e: any) {
-      setErrorMsg(e?.response?.data?.detail || "Checkout failed");
+    } catch (e: unknown) {
+      setErrorMsg(getMobileApiError(e, "Checkout failed"));
     } finally {
       setBusy(false);
     }
@@ -238,15 +249,35 @@ export default function CheckoutScreen() {
         </View>
       )}
 
+      {user && (loyalty?.points_balance || 0) > 0 && (
+        <View style={styles.box}>
+          <Text style={styles.sub}>Loyalty Points ({loyalty.points_balance} avail • 4 pts = ₹1)</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Pressable
+              onPress={() => setRedeemPoints(redeemPoints > 0 ? 0 : loyalty.points_balance)}
+              style={[styles.btnSec, redeemPoints > 0 && { backgroundColor: "#ea580c" }]}
+            >
+              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>
+                {redeemPoints > 0 ? `Redeeming ${redeemPoints} pts (-₹${(redeemPoints / 4).toFixed(2)})` : "Redeem Max Points"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
       {/* Payment Method */}
       <View style={styles.box}>
         <Text style={styles.sub}>Payment Method</Text>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
           {[
-            { id: "razorpay", label: "Razorpay" },
-            { id: "stripe", label: "Stripe Card" },
-            { id: "cash", label: "Counter Cash" },
-            { id: "pay_at_pickup", label: "Pay at Pickup" },
+            ...(activeCanteen?.allow_online_payment !== false && college?.razorpay_enabled !== false
+              ? [{ id: "razorpay", label: "Razorpay" }]
+              : []),
+            ...(activeCanteen?.allow_online_payment !== false && college?.stripe_enabled !== false
+              ? [{ id: "stripe", label: "Stripe Card" }]
+              : []),
+            ...(activeCanteen?.allow_cash_at_counter !== false ? [{ id: "cash", label: "Counter Cash" }] : []),
+            ...(activeCanteen?.allow_pay_at_pickup ? [{ id: "pay_at_pickup", label: "Pay at Pickup" }] : []),
           ].map((m) => (
             <Pressable
               key={m.id}

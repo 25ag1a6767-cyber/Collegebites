@@ -15,6 +15,7 @@ class RegisterCustomerRequest(BaseModel):
     college_id_number: Optional[str] = Field(default=None, max_length=64)
     department: Optional[str] = Field(default=None, max_length=120)
     dietary_preference: Optional[str] = Field(default=None, max_length=32)
+    referral_code: Optional[str] = Field(default=None, max_length=24)
 
     @model_validator(mode="after")
     def validate_contact(self):
@@ -35,13 +36,30 @@ class RefreshTokenRequest(BaseModel):
 
 class OTPRequest(BaseModel):
     target: str = Field(min_length=8, max_length=160)
-    purpose: str = Field(default="guest_checkout", pattern="^(guest_checkout|login|phone_verify)$")
+    purpose: str = Field(default="guest_checkout", pattern="^(guest_checkout|login|phone_verify|password_reset)$")
 
 
 class OTPVerifyRequest(BaseModel):
     target: str = Field(min_length=8, max_length=160)
-    purpose: str = Field(default="guest_checkout", pattern="^(guest_checkout|login|phone_verify)$")
+    purpose: str = Field(default="guest_checkout", pattern="^(guest_checkout|login|phone_verify|password_reset)$")
     code: str = Field(min_length=6, max_length=6)
+
+
+class OTPLoginRequest(BaseModel):
+    target: str = Field(min_length=8, max_length=160)
+    code: str = Field(min_length=6, max_length=6)
+    device_info: Optional[str] = Field(default=None, max_length=255)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    target: str = Field(min_length=8, max_length=160)
+    code: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class OTPRequestResponse(BaseModel):

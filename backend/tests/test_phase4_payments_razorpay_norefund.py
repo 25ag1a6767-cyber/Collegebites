@@ -122,8 +122,14 @@ def test_payment_failure_and_cash_counter_collection(client: TestClient):
     cashier = login_as(client, "cashier@collegebites.edu", "Staff@12345")
 
     order_fail = _create_student_order(client, student["headers"], "razorpay", "idem-fail-1")
+    unauth_fail = client.post(
+        "/api/v1/payments/razorpay/fail",
+        json={"order_id": order_fail["id"], "reason": "Unauthorized attempt"},
+    )
+    assert unauth_fail.status_code == 401
     fail_res = client.post(
         "/api/v1/payments/razorpay/fail",
+        headers=student["headers"],
         json={"order_id": order_fail["id"], "reason": "UPI PIN declined"},
     )
     assert fail_res.status_code == 200

@@ -25,8 +25,10 @@ export interface CollegeSettings {
   kiosk_enabled: boolean;
   guest_otp_required: boolean;
   razorpay_enabled: boolean;
+  stripe_enabled?: boolean;
   cash_at_counter_enabled: boolean;
   pay_at_pickup_enabled: boolean;
+  college_timezone?: string;
 }
 
 export interface Counter {
@@ -146,6 +148,7 @@ export interface FoodItem {
   is_available: boolean;
   is_active: boolean;
   insufficient_ingredients: boolean;
+  is_schedule_active_now?: boolean;
   images: { id: string; image_url: string; alt_text?: string | null; is_primary: boolean }[];
   variants: FoodVariant[];
   addons: FoodAddon[];
@@ -240,6 +243,7 @@ export interface Order {
     special_instructions?: string | null;
     customizations: {
       id: string;
+      addon_id?: string | null;
       customization_type: string;
       option_name: string;
       option_value: string;

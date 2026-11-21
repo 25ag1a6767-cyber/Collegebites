@@ -164,6 +164,7 @@ class OrderItemCustomization(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     order_item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("order_items.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    addon_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("food_addons.id", ondelete="SET NULL"))
     customization_type: Mapped[str] = mapped_column(String(32), nullable=False)
     option_name: Mapped[str] = mapped_column(String(120), nullable=False)
     option_value: Mapped[str] = mapped_column(String(120), nullable=False)

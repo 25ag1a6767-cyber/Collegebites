@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useRouter } from "expo-router";
-import { mobileApi } from "../src/api/client";
+import { getMobileApiError, mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 const STAFF_ROLES = new Set(["super_admin", "college_admin", "canteen_manager", "cashier", "pickup_staff"]);
@@ -18,45 +18,65 @@ export default function ScanScreen() {
   const [statusMsg, setStatusMsg] = useState("");
   const [scanned, setScanned] = useState(false);
   const [pickupResult, setPickupResult] = useState<any | null>(null);
+  const [verifyMethod, setVerifyMethod] = useState<"qr_scan" | "manual_token" | "order_number">("qr_scan");
+  const [busy, setBusy] = useState(false);
 
   const resolveLocation = async (raw: string) => {
     const code = raw.includes("/scan/") ? raw.split("/scan/").pop() || raw : raw;
+    setBusy(true);
     try {
       const res = await mobileApi.get(`/qr/locations/resolve/${encodeURIComponent(code.trim())}`);
       setCanteen(res.data.canteen.id, res.data.qr.code);
       setStatusMsg(`Selected ${res.data.canteen.name}`);
       router.push("/");
-    } catch (e: any) {
-      setStatusMsg(e?.response?.data?.detail || "Invalid or revoked QR code");
+    } catch (e: unknown) {
+      setStatusMsg(getMobileApiError(e, "Invalid or revoked QR code"));
+    } finally {
+      setBusy(false);
     }
   };
 
   const verifyPickup = async (raw: string) => {
     setStatusMsg("");
+    setBusy(true);
     try {
       const trimmed = raw.trim();
-      const payload =
-        trimmed.length <= 8 && !trimmed.includes("CBQR")
-          ? { pickup_token: trimmed }
-          : { qr_payload: trimmed };
+      let payload: Record<string, string>;
+      let method: "qr_scan" | "manual_token" | "order_number";
+      if (trimmed.includes("CBQR") || trimmed.includes("/pickup/verify")) {
+        payload = { qr_payload: trimmed };
+        method = "qr_scan";
+      } else if (/^CB-/i.test(trimmed)) {
+        payload = { order_number: trimmed };
+        method = "order_number";
+      } else {
+        payload = { pickup_token: trimmed };
+        method = "manual_token";
+      }
+      setVerifyMethod(method);
       const res = await mobileApi.post("/pickup/verify", payload);
       setPickupResult(res.data);
-    } catch (e: any) {
-      setStatusMsg(e?.response?.data?.detail || "Pickup verification failed");
+    } catch (e: unknown) {
+      setStatusMsg(getMobileApiError(e, "Pickup verification failed"));
+    } finally {
+      setBusy(false);
     }
   };
 
   const confirmHandover = async () => {
     if (!pickupResult?.order_id) return;
+    setBusy(true);
     try {
       await mobileApi.post("/pickup/handover", {
         order_id: pickupResult.order_id,
         counter_id: pickupResult.counter_id || null,
-        verification_method: "qr_scan",
+        verification_method: verifyMethod,
       });
       setPickupResult({ ...pickupResult, can_handover: false, result_code: "COMPLETED", message: "Handover confirmed." });
-    } catch (e: any) {
-      setStatusMsg(e?.response?.data?.detail || "Handover failed");
+    } catch (e: unknown) {
+      setStatusMsg(getMobileApiError(e, "Handover failed"));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -127,8 +147,8 @@ export default function ScanScreen() {
           onChangeText={setManualCode}
           placeholder={mode === "pickup" ? "e.g. A001" : "e.g. CB-MAIN-T01"}
         />
-        <Pressable onPress={() => handleScanData(manualCode)} style={styles.btn}>
-          <Text style={styles.btnText}>{mode === "pickup" ? "Verify" : "Open"}</Text>
+        <Pressable disabled={busy} onPress={() => handleScanData(manualCode)} style={styles.btn}>
+          <Text style={styles.btnText}>{busy ? "..." : mode === "pickup" ? "Verify" : "Open"}</Text>
         </Pressable>
       </View>
 
@@ -144,8 +164,8 @@ export default function ScanScreen() {
             </Text>
           )}
           {pickupResult.can_handover && (
-            <Pressable onPress={confirmHandover} style={[styles.btn, { backgroundColor: "#059669" }]}>
-              <Text style={styles.btnText}>Confirm Food Handover</Text>
+            <Pressable disabled={busy} onPress={confirmHandover} style={[styles.btn, { backgroundColor: "#059669" }]}>
+              <Text style={styles.btnText}>{busy ? "Confirming..." : "Confirm Food Handover"}</Text>
             </Pressable>
           )}
         </View>

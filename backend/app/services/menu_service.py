@@ -9,7 +9,8 @@ from fastapi import HTTPException
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.college import Canteen
+from app.core.time_utils import now_college
+from app.models.college import Canteen, CollegeSettings
 from app.models.menu import (
     Allergen,
     FoodAddon,
@@ -19,27 +20,85 @@ from app.models.menu import (
     FoodItemAddon,
     FoodItemAllergen,
     FoodVariant,
+    MenuAvailability,
     MenuSchedule,
 )
 from app.schemas.menu import (
     AllergenOut,
     FoodAddonCreate,
     FoodAddonOut,
+    FoodAddonUpdate,
     FoodCategoryCreate,
     FoodCategoryUpdate,
     FoodItemCreate,
     FoodItemOut,
     FoodItemUpdate,
+    FoodVariantIn,
+    FoodVariantUpdate,
     MenuScheduleCreate,
+    MenuScheduleOut,
+    MenuScheduleUpdate,
 )
 from app.services.audit_service import record_audit_log
 
 
-def serialize_food_item(db: Session, item: FoodItem) -> FoodItemOut:
-    category = db.get(FoodCategory, item.category_id)
+def compute_schedule_availability_map(db: Session, food_item_ids: list[UUID]) -> dict[UUID, bool]:
+    """Return {food_item_id: is_schedule_active_now}. Items with no schedule links default to True."""
+    if not food_item_ids:
+        return {}
+    links = db.scalars(
+        select(MenuAvailability).where(MenuAvailability.food_item_id.in_(food_item_ids))
+    ).all()
+    if not links:
+        return {fid: True for fid in food_item_ids}
+
+    sched_ids = {l.menu_schedule_id for l in links}
+    scheds = {
+        s.id: s for s in db.scalars(select(MenuSchedule).where(MenuSchedule.id.in_(list(sched_ids)))).all()
+    }
+    college_row = db.scalar(select(CollegeSettings))
+    now_dt = now_college(college_row.college_timezone if college_row else None)
+    cur_time = now_dt.time()
+    weekday = now_dt.weekday()
+
+    links_by_item: dict[UUID, list[MenuAvailability]] = {}
+    for l in links:
+        links_by_item.setdefault(l.food_item_id, []).append(l)
+
+    out: dict[UUID, bool] = {}
+    for fid in food_item_ids:
+        item_links = links_by_item.get(fid)
+        if not item_links:
+            out[fid] = True
+            continue
+        active_now = False
+        for l in item_links:
+            if not l.is_available:
+                continue
+            if l.override_until and l.override_until <= now_dt:
+                continue
+            sched = scheds.get(l.menu_schedule_id)
+            if sched and sched.is_active and weekday in (sched.days_of_week or []):
+                if sched.start_time <= cur_time <= sched.end_time:
+                    active_now = True
+                    break
+        out[fid] = active_now
+    return out
+
+
+def serialize_food_item(
+    db: Session,
+    item: FoodItem,
+    *,
+    category_map: Optional[dict[UUID, FoodCategory]] = None,
+    addon_map: Optional[dict[UUID, FoodAddon]] = None,
+    allergen_map: Optional[dict[UUID, Allergen]] = None,
+    schedule_active_map: Optional[dict[UUID, bool]] = None,
+) -> FoodItemOut:
+    category = category_map.get(item.category_id) if category_map is not None else db.get(FoodCategory, item.category_id)
     addons: list[FoodAddonOut] = []
     for link in item.addon_links:
-        addon = db.get(FoodAddon, link.addon_id)
+        addon = addon_map.get(link.addon_id) if addon_map is not None else db.get(FoodAddon, link.addon_id)
         if addon:
             addons.append(
                 FoodAddonOut(
@@ -55,9 +114,14 @@ def serialize_food_item(db: Session, item: FoodItem) -> FoodItemOut:
             )
     allergens: list[AllergenOut] = []
     for alink in item.allergen_links:
-        alg = db.get(Allergen, alink.allergen_id)
+        alg = allergen_map.get(alink.allergen_id) if allergen_map is not None else db.get(Allergen, alink.allergen_id)
         if alg:
             allergens.append(AllergenOut.model_validate(alg))
+
+    if schedule_active_map is not None:
+        sched_ok = schedule_active_map.get(item.id, True)
+    else:
+        sched_ok = compute_schedule_availability_map(db, [item.id]).get(item.id, True)
 
     return FoodItemOut(
         id=item.id,
@@ -90,6 +154,7 @@ def serialize_food_item(db: Session, item: FoodItem) -> FoodItemOut:
         is_available=item.is_available,
         is_active=item.is_active,
         insufficient_ingredients=item.insufficient_ingredients,
+        is_schedule_active_now=sched_ok,
         images=sorted(item.images, key=lambda x: (not x.is_primary, x.display_order)),
         variants=item.variants,
         addons=addons,
@@ -193,7 +258,30 @@ def list_food_items(
         stmt = stmt.order_by(FoodItem.popularity_score.desc(), FoodItem.name.asc())
 
     items = db.scalars(stmt).all()
-    return [serialize_food_item(db, item) for item in items]
+    if not items:
+        return []
+    cat_ids = list({i.category_id for i in items})
+    addon_ids = list({lnk.addon_id for i in items for lnk in i.addon_links})
+    allergen_ids = list({alnk.allergen_id for i in items for alnk in i.allergen_links})
+    cat_map = {c.id: c for c in db.scalars(select(FoodCategory).where(FoodCategory.id.in_(cat_ids))).all()} if cat_ids else {}
+    addon_map = {a.id: a for a in db.scalars(select(FoodAddon).where(FoodAddon.id.in_(addon_ids))).all()} if addon_ids else {}
+    alg_map = {a.id: a for a in db.scalars(select(Allergen).where(Allergen.id.in_(allergen_ids))).all()} if allergen_ids else {}
+    sched_map = compute_schedule_availability_map(db, [i.id for i in items])
+
+    serialized = [
+        serialize_food_item(
+            db,
+            item,
+            category_map=cat_map,
+            addon_map=addon_map,
+            allergen_map=alg_map,
+            schedule_active_map=sched_map,
+        )
+        for item in items
+    ]
+    if available_only:
+        serialized = [s for s in serialized if s.is_schedule_active_now]
+    return serialized
 
 
 def get_food_item(db: Session, item_id: UUID) -> FoodItemOut:
@@ -266,7 +354,7 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
     if not item:
         raise HTTPException(status_code=404, detail="Food item not found")
 
-    updates = payload.model_dump(exclude_unset=True, exclude={"image_url", "addon_ids"})
+    updates = payload.model_dump(exclude_unset=True, exclude={"image_url", "addon_ids", "allergen_names"})
     for k, v in updates.items():
         setattr(item, k, v)
 
@@ -287,6 +375,21 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
         for addon_id in payload.addon_ids:
             if db.get(FoodAddon, addon_id):
                 db.add(FoodItemAddon(food_item_id=item.id, addon_id=addon_id))
+
+    if payload.allergen_names is not None:
+        for old_al in db.scalars(select(FoodItemAllergen).where(FoodItemAllergen.food_item_id == item.id)).all():
+            db.delete(old_al)
+        db.flush()
+        for alg_name in payload.allergen_names:
+            clean = alg_name.strip()
+            if not clean:
+                continue
+            alg = db.scalar(select(Allergen).where(Allergen.name.ilike(clean)))
+            if not alg:
+                alg = Allergen(name=clean)
+                db.add(alg)
+                db.flush()
+            db.add(FoodItemAllergen(food_item_id=item.id, allergen_id=alg.id))
 
     record_audit_log(
         db,
@@ -309,37 +412,123 @@ def create_addon(db: Session, payload: FoodAddonCreate, actor_user_id: UUID) -> 
     return addon
 
 
+def update_addon(db: Session, addon: FoodAddon, payload: FoodAddonUpdate, actor_user_id: UUID) -> FoodAddon:
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(addon, k, v)
+    record_audit_log(db, action="addon.updated", entity_type="food_addon", entity_id=str(addon.id), actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(addon)
+    return addon
+
+
 def list_addons(db: Session, canteen_id: UUID) -> list[FoodAddon]:
     return list(db.scalars(select(FoodAddon).where(FoodAddon.canteen_id == canteen_id).order_by(FoodAddon.name)).all())
 
 
-def list_schedules(db: Session, canteen_id: UUID) -> list[MenuSchedule]:
-    return list(db.scalars(select(MenuSchedule).where(MenuSchedule.canteen_id == canteen_id).order_by(MenuSchedule.start_time)).all())
+def _serialize_schedule(db: Session, sched: MenuSchedule) -> MenuScheduleOut:
+    item_ids = list(
+        db.scalars(
+            select(MenuAvailability.food_item_id).where(
+                MenuAvailability.menu_schedule_id == sched.id, MenuAvailability.is_available.is_(True)
+            )
+        ).all()
+    )
+    return MenuScheduleOut(
+        id=sched.id,
+        canteen_id=sched.canteen_id,
+        name=sched.name,
+        schedule_type=sched.schedule_type,
+        start_time=sched.start_time,
+        end_time=sched.end_time,
+        days_of_week=sched.days_of_week or [],
+        is_active=sched.is_active,
+        scheduled_item_ids=item_ids,
+    )
 
 
-def create_schedule(db: Session, payload: MenuScheduleCreate, actor_user_id: UUID) -> MenuSchedule:
+def list_schedules(db: Session, canteen_id: UUID) -> list[MenuScheduleOut]:
+    rows = db.scalars(select(MenuSchedule).where(MenuSchedule.canteen_id == canteen_id).order_by(MenuSchedule.start_time)).all()
+    return [_serialize_schedule(db, s) for s in rows]
+
+
+def create_schedule(db: Session, payload: MenuScheduleCreate, actor_user_id: UUID) -> MenuScheduleOut:
     sched = MenuSchedule(**payload.model_dump())
     db.add(sched)
     record_audit_log(db, action="menu_schedule.created", entity_type="menu_schedule", entity_id=payload.name, actor_user_id=actor_user_id)
     db.commit()
     db.refresh(sched)
-    return sched
+    return _serialize_schedule(db, sched)
+
+
+def update_schedule(db: Session, sched: MenuSchedule, payload: MenuScheduleUpdate, actor_user_id: UUID) -> MenuScheduleOut:
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(sched, k, v)
+    record_audit_log(db, action="menu_schedule.updated", entity_type="menu_schedule", entity_id=str(sched.id), actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(sched)
+    return _serialize_schedule(db, sched)
+
+
+def assign_schedule_items(
+    db: Session, sched: MenuSchedule, food_item_ids: list[UUID], actor_user_id: UUID
+) -> MenuScheduleOut:
+    old = db.scalars(select(MenuAvailability).where(MenuAvailability.menu_schedule_id == sched.id)).all()
+    for row in old:
+        db.delete(row)
+    db.flush()
+    for fid in set(food_item_ids):
+        item = db.get(FoodItem, fid)
+        if item and item.canteen_id == sched.canteen_id:
+            db.add(MenuAvailability(food_item_id=fid, menu_schedule_id=sched.id, is_available=True))
+    record_audit_log(
+        db,
+        action="menu_schedule.items_assigned",
+        entity_type="menu_schedule",
+        entity_id=str(sched.id),
+        actor_user_id=actor_user_id,
+        details={"count": len(set(food_item_ids))},
+    )
+    db.commit()
+    return _serialize_schedule(db, sched)
 
 
 def export_menu_csv(db: Session, canteen_id: UUID) -> str:
     items = list_food_items(db, canteen_id, include_inactive=True)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["name", "slug", "category", "base_price", "is_veg", "prep_time_minutes", "portion_size", "is_available", "is_active", "description"])
+    writer.writerow([
+        "name",
+        "slug",
+        "category",
+        "base_price",
+        "tax_rate_percent",
+        "is_veg",
+        "prep_time_minutes",
+        "portion_size",
+        "calories",
+        "is_featured",
+        "is_popular",
+        "is_todays_special",
+        "is_recommended",
+        "is_available",
+        "is_active",
+        "description",
+    ])
     for it in items:
         writer.writerow([
             it.name,
             it.slug,
             it.category_name or "General",
             f"{it.base_price:.2f}",
+            f"{it.tax_rate_percent:.2f}" if it.tax_rate_percent is not None else "",
             "true" if it.is_veg else "false",
             it.prep_time_minutes,
             it.portion_size or "",
+            it.calories if it.calories is not None else "",
+            "true" if it.is_featured else "false",
+            "true" if it.is_popular else "false",
+            "true" if it.is_todays_special else "false",
+            "true" if it.is_recommended else "false",
             "true" if it.is_available else "false",
             "true" if it.is_active else "false",
             it.description or "",
@@ -348,7 +537,7 @@ def export_menu_csv(db: Session, canteen_id: UUID) -> str:
 
 
 def _slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:150]
     return slug or "item"
 
 
@@ -359,56 +548,82 @@ def import_menu_csv(db: Session, canteen_id: UUID, csv_text: str, actor_user_id:
     reader = csv.DictReader(io.StringIO(csv_text))
     created_count = 0
     updated_count = 0
+    errors: list[dict] = []
 
-    for row in reader:
+    for row_num, row in enumerate(reader, start=2):
         name = (row.get("name") or "").strip()
         if not name:
             continue
-        cat_name = (row.get("category") or "General").strip()
-        cat_slug = _slugify(cat_name)
-        cat = db.scalar(select(FoodCategory).where(FoodCategory.canteen_id == canteen_id, FoodCategory.slug == cat_slug))
-        if not cat:
-            cat = FoodCategory(canteen_id=canteen_id, name=cat_name, slug=cat_slug)
-            db.add(cat)
-            db.flush()
+        try:
+            cat_name = (row.get("category") or "General").strip()
+            cat_slug = _slugify(cat_name)[:115]
+            cat = db.scalar(select(FoodCategory).where(FoodCategory.canteen_id == canteen_id, FoodCategory.slug == cat_slug))
+            if not cat:
+                cat = FoodCategory(canteen_id=canteen_id, name=cat_name[:120], slug=cat_slug)
+                db.add(cat)
+                db.flush()
 
-        item_slug = _slugify((row.get("slug") or name).strip())
-        base_price = Decimal(str(row.get("base_price") or "0.00")).quantize(Decimal("0.01"))
-        is_veg = str(row.get("is_veg") or "true").lower() in ("true", "1", "yes", "veg")
-        prep_time = int(row.get("prep_time_minutes") or 10)
-        is_avail = str(row.get("is_available") or "true").lower() in ("true", "1", "yes")
-        is_active = str(row.get("is_active") or "true").lower() in ("true", "1", "yes")
+            item_slug = _slugify((row.get("slug") or name).strip())
+            base_price = Decimal(str(row.get("base_price") or "0.00")).quantize(Decimal("0.01"))
+            if base_price < 0:
+                raise ValueError("base_price must be non-negative")
+            tax_raw = (row.get("tax_rate_percent") or "").strip()
+            tax_rate = Decimal(tax_raw).quantize(Decimal("0.01")) if tax_raw else None
+            prep_time = max(1, int(row.get("prep_time_minutes") or 10))
+            cal_raw = (row.get("calories") or "").strip()
+            calories = int(cal_raw) if cal_raw else None
+            is_veg = str(row.get("is_veg") or "true").lower() in ("true", "1", "yes", "veg")
+            is_avail = str(row.get("is_available") or "true").lower() in ("true", "1", "yes")
+            is_active = str(row.get("is_active") or "true").lower() in ("true", "1", "yes")
+            is_feat = str(row.get("is_featured") or "false").lower() in ("true", "1", "yes")
+            is_pop = str(row.get("is_popular") or "false").lower() in ("true", "1", "yes")
+            is_spec = str(row.get("is_todays_special") or "false").lower() in ("true", "1", "yes")
+            is_rec = str(row.get("is_recommended") or "false").lower() in ("true", "1", "yes")
 
-        existing = db.scalar(select(FoodItem).where(FoodItem.canteen_id == canteen_id, FoodItem.slug == item_slug))
-        if existing:
-            existing.name = name
-            existing.category_id = cat.id
-            existing.base_price = base_price
-            existing.is_veg = is_veg
-            existing.prep_time_minutes = prep_time
-            existing.is_available = is_avail
-            existing.is_active = is_active
-            existing.portion_size = row.get("portion_size") or existing.portion_size
-            existing.description = row.get("description") or existing.description
-            updated_count += 1
-        else:
-            item = FoodItem(
-                canteen_id=canteen_id,
-                category_id=cat.id,
-                name=name,
-                slug=item_slug,
-                base_price=base_price,
-                is_veg=is_veg,
-                prep_time_minutes=prep_time,
-                portion_size=row.get("portion_size") or None,
-                description=row.get("description") or None,
-                is_available=is_avail,
-                is_active=is_active,
-            )
-            db.add(item)
-            db.flush()
-            db.add(FoodVariant(food_item_id=item.id, name="Regular", price_delta=Decimal("0.00"), is_default=True))
-            created_count += 1
+            existing = db.scalar(select(FoodItem).where(FoodItem.canteen_id == canteen_id, FoodItem.slug == item_slug))
+            if existing:
+                existing.name = name[:160]
+                existing.category_id = cat.id
+                existing.base_price = base_price
+                existing.tax_rate_percent = tax_rate
+                existing.is_veg = is_veg
+                existing.prep_time_minutes = prep_time
+                existing.calories = calories
+                existing.is_featured = is_feat
+                existing.is_popular = is_pop
+                existing.is_todays_special = is_spec
+                existing.is_recommended = is_rec
+                existing.is_available = is_avail
+                existing.is_active = is_active
+                existing.portion_size = row.get("portion_size") or existing.portion_size
+                existing.description = row.get("description") or existing.description
+                updated_count += 1
+            else:
+                item = FoodItem(
+                    canteen_id=canteen_id,
+                    category_id=cat.id,
+                    name=name[:160],
+                    slug=item_slug,
+                    base_price=base_price,
+                    tax_rate_percent=tax_rate,
+                    is_veg=is_veg,
+                    prep_time_minutes=prep_time,
+                    calories=calories,
+                    is_featured=is_feat,
+                    is_popular=is_pop,
+                    is_todays_special=is_spec,
+                    is_recommended=is_rec,
+                    portion_size=row.get("portion_size") or None,
+                    description=row.get("description") or None,
+                    is_available=is_avail,
+                    is_active=is_active,
+                )
+                db.add(item)
+                db.flush()
+                db.add(FoodVariant(food_item_id=item.id, name="Regular", price_delta=Decimal("0.00"), is_default=True))
+                created_count += 1
+        except Exception as exc:
+            errors.append({"row": row_num, "name": name, "error": str(exc)})
 
     record_audit_log(
         db,
@@ -416,7 +631,7 @@ def import_menu_csv(db: Session, canteen_id: UUID, csv_text: str, actor_user_id:
         entity_type="canteen",
         entity_id=str(canteen_id),
         actor_user_id=actor_user_id,
-        details={"created": created_count, "updated": updated_count},
+        details={"created": created_count, "updated": updated_count, "errors": len(errors)},
     )
     db.commit()
-    return {"created": created_count, "updated": updated_count}
+    return {"created": created_count, "updated": updated_count, "errors": errors}

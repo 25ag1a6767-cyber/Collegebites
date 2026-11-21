@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, BellRing, Check, ChefHat, Clock, Flame, Volume2, VolumeX } from "lucide-react";
-import { api, getApiError } from "../../api/client";
+import { api, buildWsUrl, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, FoodItem, Order } from "../../types";
-import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
+import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
 
 function playChime() {
   try {
@@ -29,7 +29,7 @@ function playChime() {
 export const KitchenDisplayPage: React.FC = () => {
   const qc = useQueryClient();
   const { pushToast } = useToast();
-  const { user, selectedCanteenId } = useAppStore();
+  const { user, accessToken, selectedCanteenId } = useAppStore();
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
@@ -38,19 +38,31 @@ export const KitchenDisplayPage: React.FC = () => {
 
   const [canteenId, setCanteenId] = useState<string>(user?.assigned_canteen_id || selectedCanteenId || "");
   const activeCanteenId = canteenId || canteens[0]?.id || "";
+  const [kitchenId, setKitchenId] = useState("");
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [delayModalOrder, setDelayModalOrder] = useState<Order | null>(null);
   const [delayMins, setDelayMins] = useState(10);
   const [delayReason, setDelayReason] = useState("High kitchen load");
+  const [rejectOrderTarget, setRejectOrderTarget] = useState<Order | null>(null);
+  const [busy, setBusy] = useState(false);
   const [showAvailabilityModal, setShowAvailabilityModal] = useState(false);
   const [availModalTab, setAvailModalTab] = useState<"dishes" | "ingredients">("dishes");
 
   const prevPlacedIds = useRef<Set<string>>(new Set());
 
-  const { data: orders = [], refetch } = useQuery<Order[]>({
-    queryKey: ["kitchen-orders", activeCanteenId],
+  const { data: canteenDetail } = useQuery<Canteen>({
+    queryKey: ["kitchen-canteen-detail", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/orders`)).data,
+    queryFn: async () => (await api.get(`/canteens/${activeCanteenId}`)).data,
+  });
+
+  const { data: orders = [], refetch } = useQuery<Order[]>({
+    queryKey: ["kitchen-orders", activeCanteenId, kitchenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => {
+      const q = kitchenId ? `?kitchen_id=${kitchenId}` : "";
+      return (await api.get(`/kitchen/canteens/${activeCanteenId}/orders${q}`)).data;
+    },
     refetchInterval: 4000,
   });
 
@@ -81,11 +93,10 @@ export const KitchenDisplayPage: React.FC = () => {
 
   // WebSocket live push
   useEffect(() => {
-    if (!activeCanteenId) return;
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    if (!activeCanteenId || !accessToken) return;
     let ws: WebSocket | null = null;
     try {
-      ws = new WebSocket(`${proto}://${window.location.host}/api/v1/ws/kitchen/${activeCanteenId}`);
+      ws = new WebSocket(buildWsUrl(`/ws/kitchen/${activeCanteenId}`, { token: accessToken }));
       ws.onmessage = () => {
         if (soundEnabled) playChime();
         qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
@@ -94,7 +105,7 @@ export const KitchenDisplayPage: React.FC = () => {
       // polling handles updates
     }
     return () => ws?.close();
-  }, [activeCanteenId, soundEnabled, qc]);
+  }, [activeCanteenId, accessToken, soundEnabled, qc]);
 
   const act = async (url: string, msg: string) => {
     try {
@@ -147,8 +158,11 @@ export const KitchenDisplayPage: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={activeCanteenId}
-            onChange={(e) => setCanteenId(e.target.value)}
-            className="w-56 bg-slate-800 border-slate-700 text-white"
+            onChange={(e) => {
+              setCanteenId(e.target.value);
+              setKitchenId("");
+            }}
+            className="w-48 bg-slate-800 border-slate-700 text-white"
           >
             {canteens.map((c) => (
               <option key={c.id} value={c.id}>
@@ -156,6 +170,20 @@ export const KitchenDisplayPage: React.FC = () => {
               </option>
             ))}
           </Select>
+          {canteenDetail?.kitchens && canteenDetail.kitchens.length > 0 && (
+            <Select
+              value={kitchenId}
+              onChange={(e) => setKitchenId(e.target.value)}
+              className="w-40 bg-slate-800 border-slate-700 text-white"
+            >
+              <option value="">All Kitchens</option>
+              {canteenDetail.kitchens.map((k) => (
+                <option key={k.id} value={k.id}>
+                  {k.name}
+                </option>
+              ))}
+            </Select>
+          )}
           <Button size="sm" variant="outline" onClick={() => setShowAvailabilityModal(true)}>
             <AlertTriangle className="h-4 w-4 text-amber-600" /> Ingredient / Item Availability
           </Button>
@@ -269,17 +297,7 @@ export const KitchenDisplayPage: React.FC = () => {
                         <Button
                           size="sm"
                           variant="danger"
-                          onClick={async () => {
-                            const reason = window.prompt("Reason for rejecting order (payment retained per college policy):", "Ingredient unavailable");
-                            if (!reason) return;
-                            try {
-                              await api.post(`/kitchen/orders/${o.id}/reject`, { reason });
-                              pushToast(`Order ${o.pickup_token_code} rejected`, "info");
-                              refetch();
-                            } catch (err) {
-                              pushToast(getApiError(err), "error");
-                            }
-                          }}
+                          onClick={() => setRejectOrderTarget(o)}
                         >
                           Reject
                         </Button>
@@ -349,11 +367,15 @@ export const KitchenDisplayPage: React.FC = () => {
                       size="sm"
                       variant={item.is_available ? "success" : "danger"}
                       onClick={async () => {
-                        await api.post(`/kitchen/items/${item.id}/unavailable`, {
-                          is_available: !item.is_available,
-                          reason: "Toggled from Kitchen Display",
-                        });
-                        refetchMenu();
+                        try {
+                          await api.post(`/kitchen/items/${item.id}/unavailable`, {
+                            is_available: !item.is_available,
+                            reason: "Toggled from Kitchen Display",
+                          });
+                          refetchMenu();
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
                       }}
                     >
                       {item.is_available ? "Available" : "Unavailable"}
@@ -376,12 +398,16 @@ export const KitchenDisplayPage: React.FC = () => {
                       variant={Number(ing.current_quantity) <= 0 ? "danger" : "outline"}
                       disabled={Number(ing.current_quantity) <= 0}
                       onClick={async () => {
-                        await api.post(`/kitchen/ingredients/${ing.inventory_item_id}/unavailable`, {
-                          reason: "Reported exhausted from Kitchen Display",
-                        });
-                        pushToast(`Reported ${ing.name} unavailable & notified Inventory Manager`, "info");
-                        refetchIngredients();
-                        refetchMenu();
+                        try {
+                          await api.post(`/kitchen/ingredients/${ing.inventory_item_id}/unavailable`, {
+                            reason: "Reported exhausted from Kitchen Display",
+                          });
+                          pushToast(`Reported ${ing.name} unavailable & notified Inventory Manager`, "info");
+                          refetchIngredients();
+                          refetchMenu();
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
                       }}
                     >
                       {Number(ing.current_quantity) <= 0 ? "Reported Out" : "Report Out"}
@@ -391,6 +417,31 @@ export const KitchenDisplayPage: React.FC = () => {
           </div>
         </div>
       </Modal>
+
+      <InputPromptModal
+        open={Boolean(rejectOrderTarget)}
+        title={`Reject Order • ${rejectOrderTarget?.pickup_token_code || rejectOrderTarget?.order_number || ""}`}
+        label="Rejection Reason (payment records remain retained per college policy)"
+        defaultValue="Ingredient unavailable"
+        placeholder="Reason for rejecting order"
+        submitLabel="Reject Order"
+        busy={busy}
+        onCancel={() => setRejectOrderTarget(null)}
+        onSubmit={async (reason: string) => {
+          if (!rejectOrderTarget) return;
+          setBusy(true);
+          try {
+            await api.post(`/kitchen/orders/${rejectOrderTarget.id}/reject`, { reason });
+            pushToast(`Order ${rejectOrderTarget.pickup_token_code || rejectOrderTarget.order_number} rejected`, "info");
+            setRejectOrderTarget(null);
+            refetch();
+          } catch (err) {
+            pushToast(getApiError(err), "error");
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
     </div>
   );
 };

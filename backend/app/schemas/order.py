@@ -108,6 +108,7 @@ class CheckoutRequest(BaseModel):
     guest_phone: Optional[str] = Field(default=None, max_length=32)
     guest_otp_verification_token: Optional[str] = None
     notes: Optional[str] = Field(default=None, max_length=500)
+    redeem_loyalty_points: int = Field(default=0, ge=0, le=100000)
     use_cart: bool = True
     direct_items: list[CheckoutItemDirectIn] = []
     accepted_policy: bool = True
@@ -115,6 +116,7 @@ class CheckoutRequest(BaseModel):
 
 class OrderItemCustomizationOut(ORMModel):
     id: UUID
+    addon_id: Optional[UUID] = None
     customization_type: str
     option_name: str
     option_value: str

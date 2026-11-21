@@ -3,19 +3,23 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ClipboardList, Search, ShieldCheck } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
-import { Badge, Button, Card, Input, Select, useToast } from "../../../components/ui/Primitives";
+import { Badge, Button, Card, ConfirmModal, Input, Select, useToast } from "../../../components/ui/Primitives";
 
 export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCanteenId }) => {
   const { pushToast } = useToast();
   const [statusFilter, setStatusFilter] = useState("");
   const [orderSearch, setOrderSearch] = useState("");
   const [userKindFilter, setUserKindFilter] = useState("");
+  const [scopeCanteenOnly, setScopeCanteenOnly] = useState(false);
   const [roleEdits, setRoleEdits] = useState<Record<string, string>>({});
+  const [cancelOrderTarget, setCancelOrderTarget] = useState<any | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   const { data: orders = [], refetch: refetchOrders } = useQuery<any[]>({
-    queryKey: ["admin-all-orders", activeCanteenId, statusFilter, orderSearch],
+    queryKey: ["admin-all-orders", activeCanteenId, statusFilter, orderSearch, scopeCanteenOnly],
     queryFn: async () => {
       const params = new URLSearchParams();
+      if (scopeCanteenOnly && activeCanteenId) params.set("canteen_id", activeCanteenId);
       if (statusFilter) params.set("status", statusFilter);
       if (orderSearch.trim()) params.set("q", orderSearch.trim());
       params.set("limit", "100");
@@ -39,6 +43,14 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
             <ClipboardList className="h-4 w-4 text-orange-600" /> All Campus Orders ({orders.length})
           </h2>
           <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={scopeCanteenOnly}
+                onChange={(e) => setScopeCanteenOnly(e.target.checked)}
+              />
+              Selected Canteen Only
+            </label>
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
               <Input
@@ -85,16 +97,7 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
                   <Button
                     size="sm"
                     variant="danger"
-                    onClick={async () => {
-                      if (!window.confirm("Cancel this order? Payment records remain retained (no in-app refunds).")) return;
-                      try {
-                        await api.post(`/orders/${o.id}/cancel`, { reason: "Cancelled by college administrator" });
-                        pushToast("Order cancelled (payment record retained)", "info");
-                        refetchOrders();
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      }
-                    }}
+                    onClick={() => setCancelOrderTarget(o)}
                   >
                     Cancel
                   </Button>
@@ -191,6 +194,31 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
           })}
         </div>
       </Card>
+
+      <ConfirmModal
+        open={Boolean(cancelOrderTarget)}
+        title={`Cancel Order ${cancelOrderTarget?.order_number || ""}?`}
+        message="This cancels the order cleanly while retaining immutable payment records (no in-app refunds are processed)."
+        confirmLabel="Cancel Order"
+        busy={cancelling}
+        onCancel={() => setCancelOrderTarget(null)}
+        onConfirm={async () => {
+          if (!cancelOrderTarget) return;
+          setCancelling(true);
+          try {
+            await api.post(`/orders/${cancelOrderTarget.id}/cancel`, {
+              reason: "Cancelled by college administrator",
+            });
+            pushToast("Order cancelled (payment record retained)", "info");
+            setCancelOrderTarget(null);
+            refetchOrders();
+          } catch (err) {
+            pushToast(getApiError(err), "error");
+          } finally {
+            setCancelling(false);
+          }
+        }}
+      />
     </div>
   );
 };

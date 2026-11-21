@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,9 @@ from app.core.permissions import (
     enforce_canteen_scope,
     require_roles,
 )
+from app.models.inventory import InventoryItem
+from app.models.menu import FoodItem
+from app.models.order import Order
 from app.schemas.operations import DelayReportRequest, ItemUnavailableRequest
 from app.schemas.order import OrderOut
 from app.services import kitchen_service
@@ -24,15 +27,23 @@ router = APIRouter(prefix="/kitchen", tags=["Kitchen Display System"])
 KITCHEN_ROLES = (ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_KITCHEN_STAFF)
 
 
+def _enforce_order_scope(db: Session, principal: AuthenticatedPrincipal, order_id: UUID) -> None:
+    ord_row = db.get(Order, order_id)
+    if not ord_row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    enforce_canteen_scope(principal, ord_row.canteen_id)
+
+
 @router.get("/canteens/{canteen_id}/orders", response_model=list[OrderOut])
 def get_kitchen_orders(
     canteen_id: UUID,
     status: Optional[str] = Query(default=None),
+    kitchen_id: Optional[UUID] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, canteen_id)
-    return kitchen_service.list_kitchen_orders(db, canteen_id, status_filter=status)
+    return kitchen_service.list_kitchen_orders(db, canteen_id, status_filter=status, kitchen_id=kitchen_id)
 
 
 @router.post("/orders/{order_id}/accept", response_model=OrderOut)
@@ -41,6 +52,7 @@ def accept_order(
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
+    _enforce_order_scope(db, principal, order_id)
     return kitchen_service.accept_order(db, order_id, principal.user.id)
 
 
@@ -50,6 +62,7 @@ def start_preparing(
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
+    _enforce_order_scope(db, principal, order_id)
     return kitchen_service.start_preparing_order(db, order_id, principal.user.id)
 
 
@@ -59,6 +72,7 @@ def mark_ready(
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
+    _enforce_order_scope(db, principal, order_id)
     return kitchen_service.mark_order_ready(db, order_id, principal.user.id)
 
 
@@ -69,6 +83,7 @@ def report_delay(
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
+    _enforce_order_scope(db, principal, order_id)
     return kitchen_service.report_order_delay(db, order_id, payload, principal.user.id)
 
 
@@ -79,6 +94,10 @@ def mark_item_unavailable(
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
+    item = db.get(FoodItem, food_item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, item.canteen_id)
     return kitchen_service.toggle_item_availability_from_kitchen(db, food_item_id, payload, principal.user.id)
 
 
@@ -97,6 +116,7 @@ def reject_order(
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
+    _enforce_order_scope(db, principal, order_id)
     return kitchen_service.reject_order_from_kitchen(db, order_id, payload.reason, principal.user.id)
 
 
@@ -117,4 +137,8 @@ def report_ingredient_unavailable(
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
+    inv = db.get(InventoryItem, inventory_item_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    enforce_canteen_scope(principal, inv.canteen_id)
     return kitchen_service.report_ingredient_unavailable(db, inventory_item_id, payload.reason, principal.user.id)

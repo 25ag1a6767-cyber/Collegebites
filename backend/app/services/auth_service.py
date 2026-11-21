@@ -34,13 +34,16 @@ from app.models.auth import (
     User,
     UserRole,
 )
-from app.models.promotion import LoyaltyAccount
+from app.models.promotion import LoyaltyAccount, LoyaltyTransaction
 from app.schemas.auth import (
+    ChangePasswordRequest,
     LoginRequest,
+    OTPLoginRequest,
     OTPRequest,
     OTPRequestResponse,
     OTPVerifyRequest,
     OTPVerifyResponse,
+    PasswordResetConfirmRequest,
     RegisterCustomerRequest,
     StaffCreateRequest,
     TokenResponse,
@@ -48,6 +51,17 @@ from app.schemas.auth import (
     UserRoleAssignRequest,
 )
 from app.services.audit_service import record_audit_log
+
+
+def recompute_loyalty_tier(acct: LoyaltyAccount) -> None:
+    if acct.lifetime_points >= 1000:
+        acct.tier_level = "PLATINUM"
+    elif acct.lifetime_points >= 500:
+        acct.tier_level = "GOLD"
+    elif acct.lifetime_points >= 200:
+        acct.tier_level = "SILVER"
+    else:
+        acct.tier_level = "BRONZE"
 
 
 def build_user_out(db: Session, user: User) -> UserOut:
@@ -152,12 +166,45 @@ def register_customer(
             dietary_preference=data.dietary_preference,
         )
     )
-    db.add(
-        LoyaltyAccount(
-            user_id=user.id,
-            referral_code=f"CB{secrets.token_hex(4).upper()}",
-        )
+    my_loyalty = LoyaltyAccount(
+        user_id=user.id,
+        referral_code=f"CB{secrets.token_hex(4).upper()}",
+        points_balance=0,
+        lifetime_points=0,
     )
+    if data.referral_code:
+        ref_code = data.referral_code.strip().upper()
+        referrer = db.scalar(
+            select(LoyaltyAccount).where(LoyaltyAccount.referral_code == ref_code).with_for_update()
+        )
+        if referrer and referrer.user_id != user.id:
+            my_loyalty.referred_by_user_id = referrer.user_id
+            my_loyalty.points_balance += 50
+            my_loyalty.lifetime_points += 50
+            recompute_loyalty_tier(my_loyalty)
+            referrer.points_balance += 50
+            referrer.lifetime_points += 50
+            recompute_loyalty_tier(referrer)
+            db.add(my_loyalty)
+            db.flush()
+            db.add_all([
+                LoyaltyTransaction(
+                    loyalty_account_id=my_loyalty.id,
+                    points_delta=50,
+                    transaction_type="referral_bonus",
+                    description=f"Welcome referral bonus ({ref_code})",
+                ),
+                LoyaltyTransaction(
+                    loyalty_account_id=referrer.id,
+                    points_delta=50,
+                    transaction_type="referral_bonus",
+                    description=f"Referred {user.full_name}",
+                ),
+            ])
+        else:
+            db.add(my_loyalty)
+    else:
+        db.add(my_loyalty)
     record_audit_log(
         db,
         action="customer.registered",
@@ -204,7 +251,7 @@ def refresh_user_session(db: Session, raw_refresh_token: str, ip_address: Option
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
 
     token_hash = sha256_hex(raw_refresh_token)
-    token_rec = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+    token_rec = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_hash).with_for_update())
     if not token_rec:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token not recognized")
 
@@ -309,6 +356,7 @@ def verify_otp(db: Session, data: OTPVerifyRequest) -> OTPVerifyResponse:
             OTPVerification.verified_at.is_(None),
         )
         .order_by(OTPVerification.created_at.desc())
+        .with_for_update()
     )
     if not otp_rec:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No pending OTP request found")
@@ -352,6 +400,104 @@ def validate_guest_otp_token(db: Session, target: str, raw_verification_token: O
     if not rec or not rec.verified_at:
         return False
     return (datetime.now(timezone.utc) - rec.verified_at) <= timedelta(minutes=30)
+
+
+def _find_user_by_identifier(db: Session, target: str) -> Optional[User]:
+    ident = target.strip()
+    return db.scalar(select(User).where(or_(User.email == ident.lower(), User.phone == ident)))
+
+
+def login_with_otp(db: Session, data: OTPLoginRequest, ip_address: Optional[str] = None) -> TokenResponse:
+    verify_otp(db, OTPVerifyRequest(target=data.target, purpose="login", code=data.code))
+    user = _find_user_by_identifier(db, data.target)
+    if not user:
+        raise HTTPException(status_code=404, detail="No account registered with this email or mobile number")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+    user.is_verified = True
+    record_audit_log(
+        db,
+        action="user.otp_login",
+        entity_type="user",
+        entity_id=str(user.id),
+        actor_user_id=user.id,
+        actor_role=user.user_kind,
+        ip_address=ip_address,
+    )
+    return _issue_session_tokens(db, user, device_info=data.device_info, ip_address=ip_address)
+
+
+def verify_phone_with_otp(db: Session, user: User, code: str, target: Optional[str] = None) -> UserOut:
+    phone_target = (target or user.phone or "").strip()
+    if not phone_target:
+        raise HTTPException(status_code=400, detail="Mobile number is required to verify phone")
+    verify_otp(db, OTPVerifyRequest(target=phone_target, purpose="phone_verify", code=code))
+    if phone_target != user.phone:
+        conflict = db.scalar(select(User).where(User.phone == phone_target, User.id != user.id))
+        if conflict:
+            raise HTTPException(status_code=409, detail="Mobile number already linked to another account")
+        user.phone = phone_target
+    user.is_verified = True
+    db.commit()
+    db.refresh(user)
+    return build_user_out(db, user)
+
+
+def change_user_password(
+    db: Session,
+    user: User,
+    current_session_id: UUID,
+    data: ChangePasswordRequest,
+    ip_address: Optional[str] = None,
+) -> None:
+    if not user.password_hash or not verify_password(data.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    user.password_hash = hash_password(data.new_password)
+    now = datetime.now(timezone.utc)
+    other_sessions = db.scalars(
+        select(SessionRecord).where(
+            SessionRecord.user_id == user.id,
+            SessionRecord.id != current_session_id,
+            SessionRecord.revoked_at.is_(None),
+        )
+    ).all()
+    for sess in other_sessions:
+        sess.revoked_at = now
+    record_audit_log(
+        db,
+        action="user.password_changed",
+        entity_type="user",
+        entity_id=str(user.id),
+        actor_user_id=user.id,
+        ip_address=ip_address,
+    )
+    db.commit()
+
+
+def confirm_password_reset(db: Session, data: PasswordResetConfirmRequest, ip_address: Optional[str] = None) -> None:
+    verify_otp(db, OTPVerifyRequest(target=data.target, purpose="password_reset", code=data.code))
+    user = _find_user_by_identifier(db, data.target)
+    if not user:
+        raise HTTPException(status_code=404, detail="No matching account found")
+    user.password_hash = hash_password(data.new_password)
+    now = datetime.now(timezone.utc)
+    for sess in db.scalars(
+        select(SessionRecord).where(SessionRecord.user_id == user.id, SessionRecord.revoked_at.is_(None))
+    ).all():
+        sess.revoked_at = now
+    for tok in db.scalars(
+        select(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+    ).all():
+        tok.revoked_at = now
+    record_audit_log(
+        db,
+        action="user.password_reset",
+        entity_type="user",
+        entity_id=str(user.id),
+        actor_user_id=user.id,
+        ip_address=ip_address,
+    )
+    db.commit()
 
 
 def create_staff_user(

@@ -2,6 +2,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -68,7 +69,27 @@ def my_orders(
         .order_by(Order.created_at.desc())
         .limit(50)
     ).all()
-    return [order_service.serialize_order(db, o) for o in orders]
+    return order_service.serialize_orders_batch(db, list(orders))
+
+
+class GuestOrderLookupRequest(BaseModel):
+    guest_phone: str = Field(min_length=8, max_length=32)
+    otp_verification_token: str = Field(min_length=8)
+
+
+@router.post("/guest/lookup", response_model=list[OrderOut])
+def guest_order_lookup(payload: GuestOrderLookupRequest, db: Session = Depends(get_db)):
+    return order_service.lookup_guest_orders(
+        db, guest_phone=payload.guest_phone, otp_verification_token=payload.otp_verification_token
+    )
+
+
+def _staff_scoped_canteen(principal: Optional[AuthenticatedPrincipal]) -> Optional[UUID]:
+    if not principal or not principal.has_role(*STAFF_ROLES):
+        return None
+    if principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        return None
+    return principal.assigned_canteen_id
 
 
 @router.get("/{order_id_or_number}", response_model=OrderOut)
@@ -85,6 +106,7 @@ def get_order(
         order_id_or_number,
         user_id=principal.user.id if principal else None,
         is_staff=is_staff,
+        staff_canteen_id=_staff_scoped_canteen(principal),
         guest_access_token=guest_token or x_guest_token,
     )
 
@@ -108,4 +130,5 @@ def cancel_order(
         finance_note=payload.finance_note,
         guest_access_token=guest_token or x_guest_token,
         is_staff=is_staff,
+        staff_canteen_id=_staff_scoped_canteen(principal),
     )

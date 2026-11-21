@@ -5,7 +5,7 @@ import { AlertTriangle, CheckCircle2, CreditCard, ShieldAlert, Smartphone, Trash
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings, Order } from "../../types";
-import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
+import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
 
 export const CheckoutPage: React.FC = () => {
   const navigate = useNavigate();
@@ -47,7 +47,14 @@ export const CheckoutPage: React.FC = () => {
     queryFn: async () => (await api.get(`/orders/slots/${activeCanteen!.id}`)).data,
   });
 
+  const { data: loyalty } = useQuery<any>({
+    queryKey: ["loyalty-me"],
+    enabled: Boolean(user),
+    queryFn: async () => (await api.get("/promotions/loyalty/me")).data,
+  });
+
   const [couponInput, setCouponInput] = useState("");
+  const [redeemPoints, setRedeemPoints] = useState(0);
   const [slotId, setSlotId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"razorpay" | "stripe" | "cash" | "pay_at_pickup">("razorpay");
   const [orderType, setOrderType] = useState<"pickup" | "dine_in" | "qr_table">(
@@ -63,9 +70,10 @@ export const CheckoutPage: React.FC = () => {
   const [otpVerifiedToken, setOtpVerifiedToken] = useState<string | null>(null);
   const [otpSent, setOtpSent] = useState(false);
 
-  // Razorpay payment modal state
+  // Razorpay / Note modal state
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
   const [rzpMethod, setRzpMethod] = useState("upi");
+  const [noteModalItem, setNoteModalItem] = useState<{ id: string; note: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [idemKey] = useState(() => "cb-idem-" + Date.now() + "-" + Math.random().toString(36).slice(2));
 
@@ -78,15 +86,18 @@ export const CheckoutPage: React.FC = () => {
     }
   };
 
-  const updateItemNote = async (cartItemId: string, currentNote: string) => {
-    const next = window.prompt("Update special preparation note (kitchen instructions):", currentNote);
-    if (next === null) return;
+  const submitItemNote = async (nextNote: string) => {
+    if (!noteModalItem) return;
+    setBusy(true);
     try {
-      await api.patch(`/carts/items/${cartItemId}`, { special_instructions: next.trim() || "" });
+      await api.patch(`/carts/items/${noteModalItem.id}`, { special_instructions: nextNote.trim() || "" });
       refetchCart();
+      setNoteModalItem(null);
       pushToast("Item customization updated", "success");
     } catch (err) {
       pushToast(getApiError(err), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -149,6 +160,7 @@ export const CheckoutPage: React.FC = () => {
         order_channel: scannedLocationQrCode ? "qr" : "web",
         payment_method: paymentMethod,
         coupon_code: cart.coupon_code || null,
+        redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
         idempotency_key: idemKey,
         guest_name: !user ? guestName : null,
         guest_phone: !user ? guestPhone : null,
@@ -279,7 +291,10 @@ export const CheckoutPage: React.FC = () => {
     setBusy(true);
     try {
       const endpoint = pendingOrder.payment_method === "stripe" ? "/payments/stripe/fail" : "/payments/razorpay/fail";
-      await api.post(endpoint, {
+      const gTok = pendingOrder.guest_access_token
+        ? `?guest_token=${encodeURIComponent(pendingOrder.guest_access_token)}`
+        : "";
+      await api.post(`${endpoint}${gTok}`, {
         order_id: pendingOrder.id,
         reason: "Customer cancelled payment on gateway",
       });
@@ -343,7 +358,7 @@ export const CheckoutPage: React.FC = () => {
                   )}
                   <button
                     type="button"
-                    onClick={() => updateItemNote(it.id, it.special_instructions || "")}
+                    onClick={() => setNoteModalItem({ id: it.id, note: it.special_instructions || "" })}
                     className="mt-0.5 text-[11px] font-semibold text-orange-600 hover:underline"
                   >
                     {it.special_instructions ? "Edit note" : "+ Add kitchen note"}
@@ -447,28 +462,32 @@ export const CheckoutPage: React.FC = () => {
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                 {activeCanteen?.allow_online_payment && (
                   <>
-                    <button
-                      type="button"
-                      onClick={() => setPaymentMethod("razorpay")}
-                      className={`rounded-xl border p-3 text-left text-xs font-bold ${
-                        paymentMethod === "razorpay" ? "border-orange-600 bg-orange-50 text-orange-900" : "border-slate-200"
-                      }`}
-                    >
-                      <CreditCard className="h-4 w-4 mb-1 text-orange-600" />
-                      Razorpay Online
-                      <div className="font-normal text-slate-500">UPI, Cards, Netbanking, Wallets</div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPaymentMethod("stripe")}
-                      className={`rounded-xl border p-3 text-left text-xs font-bold ${
-                        paymentMethod === "stripe" ? "border-indigo-600 bg-indigo-50 text-indigo-900" : "border-slate-200"
-                      }`}
-                    >
-                      <CreditCard className="h-4 w-4 mb-1 text-indigo-600" />
-                      Stripe Checkout
-                      <div className="font-normal text-slate-500">Global Cards, Apple/Google Pay</div>
-                    </button>
+                    {(college?.razorpay_enabled ?? true) && (
+                      <button
+                        type="button"
+                        onClick={() => setPaymentMethod("razorpay")}
+                        className={`rounded-xl border p-3 text-left text-xs font-bold ${
+                          paymentMethod === "razorpay" ? "border-orange-600 bg-orange-50 text-orange-900" : "border-slate-200"
+                        }`}
+                      >
+                        <CreditCard className="h-4 w-4 mb-1 text-orange-600" />
+                        Razorpay Online
+                        <div className="font-normal text-slate-500">UPI, Cards, Netbanking, Wallets</div>
+                      </button>
+                    )}
+                    {(college?.stripe_enabled ?? true) && (
+                      <button
+                        type="button"
+                        onClick={() => setPaymentMethod("stripe")}
+                        className={`rounded-xl border p-3 text-left text-xs font-bold ${
+                          paymentMethod === "stripe" ? "border-indigo-600 bg-indigo-50 text-indigo-900" : "border-slate-200"
+                        }`}
+                      >
+                        <CreditCard className="h-4 w-4 mb-1 text-indigo-600" />
+                        Stripe Checkout
+                        <div className="font-normal text-slate-500">Global Cards, Apple/Google Pay</div>
+                      </button>
+                    )}
                   </>
                 )}
                 {activeCanteen?.allow_cash_at_counter && (
@@ -516,6 +535,39 @@ export const CheckoutPage: React.FC = () => {
                 Apply
               </Button>
             </div>
+
+            {user && (loyalty?.points_balance || 0) > 0 && (
+              <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-3 text-xs space-y-1.5">
+                <div className="flex items-center justify-between font-bold text-orange-950">
+                  <span>Redeem Loyalty Points</span>
+                  <span>Avail: {loyalty.points_balance} pts (4 pts = ₹1)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={loyalty.points_balance}
+                    step={4}
+                    value={redeemPoints}
+                    onChange={(e) =>
+                      setRedeemPoints(Math.min(loyalty.points_balance, Math.max(0, Number(e.target.value) || 0)))
+                    }
+                    className="w-28 bg-white"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setRedeemPoints(redeemPoints > 0 ? 0 : loyalty.points_balance)}
+                  >
+                    {redeemPoints > 0 ? "Clear" : "Use Max"}
+                  </Button>
+                  {redeemPoints > 0 && (
+                    <span className="font-bold text-emerald-700">-₹{(redeemPoints / 4).toFixed(2)} est.</span>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="space-y-2 border-t border-slate-100 pt-3 text-sm">
               <div className="flex justify-between text-slate-600">
@@ -643,6 +695,18 @@ export const CheckoutPage: React.FC = () => {
           </div>
         )}
       </Modal>
+
+      <InputPromptModal
+        open={Boolean(noteModalItem)}
+        title="Kitchen Preparation Instructions"
+        label="Special Note for this Dish"
+        defaultValue={noteModalItem?.note || ""}
+        placeholder="e.g. Extra crispy, pack chutney separately"
+        submitLabel="Save Note"
+        busy={busy}
+        onCancel={() => setNoteModalItem(null)}
+        onSubmit={submitItemNote}
+      />
     </>
   );
 };

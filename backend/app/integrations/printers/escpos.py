@@ -6,8 +6,37 @@ ESC = b"\x1b"
 GS = b"\x1d"
 
 
+def _wrap_lines(text: str, width: int) -> list[str]:
+    text = text.strip()
+    if len(text) <= width:
+        return [text]
+    lines: list[str] = []
+    cur = ""
+    for word in text.split(" "):
+        if len(word) > width:
+            if cur:
+                lines.append(cur)
+                cur = ""
+            while len(word) > width:
+                lines.append(word[:width])
+                word = word[width:]
+            cur = word
+        elif not cur:
+            cur = word
+        elif len(cur) + 1 + len(word) <= width:
+            cur = f"{cur} {word}"
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
 def _line(text: str, width: int) -> bytes:
-    return (text[:width] + "\n").encode("ascii", errors="replace")
+    if not text:
+        return b"\n"
+    return b"".join((part + "\n").encode("ascii", errors="replace") for part in _wrap_lines(text, width))
 
 
 def _lr(left: str, right: str, width: int) -> bytes:

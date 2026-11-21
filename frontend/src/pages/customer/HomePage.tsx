@@ -116,7 +116,7 @@ export const HomePage: React.FC = () => {
 
   const openItemModal = (item: FoodItem) => {
     setActiveItem(item);
-    const defVar = item.variants.find((v) => v.is_default) || item.variants[0];
+    const defVar = item.variants.find((v) => v.is_default && v.is_available) || item.variants.find((v) => v.is_available) || item.variants[0];
     setSelVariantId(defVar?.id || "");
     setSelSpice(item.spice_levels[0] || "");
     setSelSugar(item.sugar_levels[0] || "");
@@ -389,7 +389,8 @@ export const HomePage: React.FC = () => {
       ) : (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {items.map((item, idx) => {
-            const unavailable = !item.is_available || item.insufficient_ingredients || !activeCanteen?.is_open_now;
+            const outOfSchedule = item.is_schedule_active_now === false;
+            const unavailable = !item.is_available || item.insufficient_ingredients || outOfSchedule || !activeCanteen?.is_open_now;
             const isFav = profile?.favourite_item_ids?.includes(item.id);
             return (
               <motion.div
@@ -459,6 +460,8 @@ export const HomePage: React.FC = () => {
                           ? "Low Ingredients"
                           : !item.is_available
                           ? "Sold Out"
+                          : outOfSchedule
+                          ? "Outside Schedule"
                           : !activeCanteen?.is_open_now
                           ? "Canteen Closed"
                           : "Customize & Add"}
@@ -537,9 +540,14 @@ export const HomePage: React.FC = () => {
                       <button
                         key={v.id}
                         type="button"
+                        disabled={!v.is_available}
                         onClick={() => setSelVariantId(v.id)}
                         className={`rounded-xl border px-3 py-2 text-left text-xs font-semibold ${
-                          selVariantId === v.id ? "border-orange-600 bg-orange-50 text-orange-900" : "border-slate-200"
+                          !v.is_available
+                            ? "border-slate-100 bg-slate-50 text-slate-400 line-through cursor-not-allowed"
+                            : selVariantId === v.id
+                            ? "border-orange-600 bg-orange-50 text-orange-900"
+                            : "border-slate-200"
                         }`}
                       >
                         <div className="flex justify-between">
@@ -599,7 +607,7 @@ export const HomePage: React.FC = () => {
               <div>
                 <label className="mb-2 block text-xs font-bold uppercase text-slate-600">Add-ons & Extra Toppings</label>
                 <div className="space-y-2">
-                  {activeItem.addons.map((ad) => {
+                  {activeItem.addons.filter((ad) => ad.is_available).map((ad) => {
                     const c = selAddons[ad.id] || 0;
                     return (
                       <div key={ad.id} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2 text-xs">

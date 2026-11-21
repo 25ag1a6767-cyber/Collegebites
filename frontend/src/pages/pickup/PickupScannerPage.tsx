@@ -29,9 +29,11 @@ export const PickupScannerPage: React.FC = () => {
   const [verifyMode, setVerifyMode] = useState<"qr" | "token" | "order">("token");
   const [result, setResult] = useState<any>(null);
   const [cameraActive, setCameraActive] = useState(false);
+  const [busy, setBusy] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
 
   const runVerification = async (payload: { qr_payload?: string; pickup_token?: string; order_number?: string }) => {
+    setBusy(true);
     try {
       const res = await api.post("/pickup/verify", {
         ...payload,
@@ -41,30 +43,48 @@ export const PickupScannerPage: React.FC = () => {
       setResult(res.data);
     } catch (err) {
       pushToast(getApiError(err, "Verification error"), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
-  const startCamera = async () => {
-    try {
-      setCameraActive(true);
-      setTimeout(async () => {
+  useEffect(() => {
+    const hash = window.location.hash || "";
+    const qs = new URLSearchParams(window.location.search);
+    const hashMatch = hash.match(/token=([^&]+)/);
+    const rawTok = (hashMatch ? decodeURIComponent(hashMatch[1]) : "") || qs.get("token") || "";
+    if (rawTok) {
+      setVerifyMode("qr");
+      setManualInput(rawTok);
+      void runVerification({ qr_payload: rawTok });
+    }
+  }, []);
+
+  const startCamera = () => {
+    setCameraActive(true);
+    setTimeout(async () => {
+      try {
         const html5Qr = new Html5Qrcode("cb-qr-reader");
         scannerRef.current = html5Qr;
         await html5Qr.start(
           { facingMode: "environment" },
           { fps: 10, qrbox: { width: 240, height: 240 } },
           async (decodedText) => {
-            await html5Qr.stop();
+            try {
+              await html5Qr.stop();
+            } catch {
+              // ignore stop race
+            }
             setCameraActive(false);
-            runVerification({ qr_payload: decodedText });
+            void runVerification({ qr_payload: decodedText });
           },
           () => {}
         );
-      }, 100);
-    } catch {
-      setCameraActive(false);
-      pushToast("Camera permission unavailable; use manual QR/Token lookup.", "error");
-    }
+      } catch {
+        setCameraActive(false);
+        pushToast("Camera unavailable; use manual QR/Token lookup.", "error");
+      }
+    }, 100);
   };
 
   const stopCamera = async () => {
@@ -92,6 +112,7 @@ export const PickupScannerPage: React.FC = () => {
 
   const confirmHandover = async () => {
     if (!result?.order_id) return;
+    setBusy(true);
     try {
       await api.post("/pickup/handover", {
         order_id: result.order_id,
@@ -102,6 +123,8 @@ export const PickupScannerPage: React.FC = () => {
       setResult({ ...result, can_handover: false, order_status: "COMPLETED", result_code: "COMPLETED", message: "Food handed over and order marked COMPLETED." });
     } catch (err) {
       pushToast(getApiError(err, "Handover failed"), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -272,7 +295,7 @@ export const PickupScannerPage: React.FC = () => {
               )}
 
               {result.can_handover && (
-                <Button variant="success" size="lg" className="w-full" onClick={confirmHandover}>
+                <Button variant="success" size="lg" className="w-full" disabled={busy} onClick={confirmHandover}>
                   <ShieldAlert className="h-4 w-4" /> Confirm Food Handover (Mark COMPLETED)
                 </Button>
               )}

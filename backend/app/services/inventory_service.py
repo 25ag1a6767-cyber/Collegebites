@@ -1,12 +1,13 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.time_utils import today_college
 from app.models.inventory import (
     InventoryItem,
     PurchaseOrder,
@@ -21,6 +22,53 @@ from app.models.inventory import (
 from app.models.menu import FoodItem, Ingredient, Recipe, RecipeIngredient
 from app.models.order import Order, OrderItem
 from app.services.audit_service import record_audit_log
+
+
+def _consume_batches(
+    db: Session,
+    inventory_item_id: UUID,
+    qty: Decimal,
+    *,
+    exclude_expired: bool = False,
+    batch_id: Optional[UUID] = None,
+) -> list[tuple[Optional[UUID], Decimal, Optional[date], Decimal]]:
+    """Consume stock from specific batch or FEFO order with row locks, returning [(batch_id, taken, expiry, unit_cost)]."""
+    if qty <= Decimal("0.000"):
+        return []
+    consumed: list[tuple[Optional[UUID], Decimal, Optional[date], Decimal]] = []
+    if batch_id:
+        batch = db.scalar(
+            select(StockBatch)
+            .where(StockBatch.id == batch_id, StockBatch.inventory_item_id == inventory_item_id)
+            .with_for_update()
+        )
+        if not batch:
+            raise HTTPException(status_code=404, detail="Stock batch not found for this inventory item")
+        take = min(batch.remaining_quantity, qty)
+        batch.remaining_quantity -= take
+        if take > 0:
+            consumed.append((batch.id, take, batch.expiry_date, batch.unit_cost))
+        return consumed
+
+    stmt = (
+        select(StockBatch)
+        .where(StockBatch.inventory_item_id == inventory_item_id, StockBatch.remaining_quantity > 0)
+        .order_by(StockBatch.expiry_date.asc().nulls_last(), StockBatch.received_at.asc())
+        .with_for_update()
+    )
+    if exclude_expired:
+        today = today_college()
+        stmt = stmt.where(or_(StockBatch.expiry_date.is_(None), StockBatch.expiry_date >= today))
+    remaining = qty
+    for batch in db.scalars(stmt).all():
+        if remaining <= Decimal("0.000"):
+            break
+        take = min(batch.remaining_quantity, remaining)
+        batch.remaining_quantity -= take
+        remaining -= take
+        if take > 0:
+            consumed.append((batch.id, take, batch.expiry_date, batch.unit_cost))
+    return consumed
 
 
 def refresh_food_item_ingredient_sufficiency(db: Session, canteen_id: UUID) -> list[str]:
@@ -82,19 +130,8 @@ def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optiona
                 continue
             inv.current_quantity = max(Decimal("0.000"), inv.current_quantity - needed)
 
-            # Consume batches FEFO (earliest expiry first)
-            remaining_to_consume = needed
-            batches = db.scalars(
-                select(StockBatch)
-                .where(StockBatch.inventory_item_id == inv.id, StockBatch.remaining_quantity > 0)
-                .order_by(StockBatch.expiry_date.asc().nulls_last(), StockBatch.received_at.asc())
-            ).all()
-            for batch in batches:
-                if remaining_to_consume <= Decimal("0.000"):
-                    break
-                take = min(batch.remaining_quantity, remaining_to_consume)
-                batch.remaining_quantity -= take
-                remaining_to_consume -= take
+            # Consume non-expired batches FEFO (earliest expiry first) with row locks
+            _consume_batches(db, inv.id, needed, exclude_expired=True)
 
             db.add(
                 StockMovement(
@@ -124,6 +161,73 @@ def create_supplier(db: Session, data: dict, actor_user_id: UUID) -> Supplier:
     db.commit()
     db.refresh(sup)
     return sup
+
+
+def update_supplier(db: Session, supplier_id: UUID, data: dict, actor_user_id: UUID) -> Supplier:
+    sup = db.get(Supplier, supplier_id)
+    if not sup:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    for k, v in data.items():
+        if v is not None:
+            setattr(sup, k, v)
+    record_audit_log(db, action="supplier.updated", entity_type="supplier", entity_id=str(sup.id), actor_user_id=actor_user_id)
+    db.commit()
+    db.refresh(sup)
+    return sup
+
+
+def update_inventory_item(db: Session, inventory_item_id: UUID, data: dict, actor_user_id: UUID) -> dict:
+    inv = db.scalar(select(InventoryItem).where(InventoryItem.id == inventory_item_id).with_for_update())
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    if data.get("reorder_level") is not None:
+        inv.reorder_level = Decimal(str(data["reorder_level"]))
+    if data.get("unit_cost") is not None:
+        inv.unit_cost = Decimal(str(data["unit_cost"]))
+    if data.get("unit"):
+        inv.unit = data["unit"]
+    record_audit_log(
+        db,
+        action="inventory.item_updated",
+        entity_type="inventory_item",
+        entity_id=str(inv.id),
+        actor_user_id=actor_user_id,
+    )
+    db.commit()
+    return {
+        "inventory_item_id": str(inv.id),
+        "reorder_level": str(inv.reorder_level),
+        "unit_cost": str(inv.unit_cost),
+        "unit": inv.unit,
+    }
+
+
+def list_inventory_movements(db: Session, canteen_id: UUID, limit: int = 100, offset: int = 0) -> list[dict]:
+    rows = db.execute(
+        select(StockMovement, InventoryItem, Ingredient.name)
+        .join(InventoryItem, InventoryItem.id == StockMovement.inventory_item_id)
+        .join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
+        .where(InventoryItem.canteen_id == canteen_id)
+        .order_by(desc(StockMovement.created_at))
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": str(mv.id),
+            "inventory_item_id": str(mv.inventory_item_id),
+            "ingredient_name": ing_name,
+            "unit": inv.unit,
+            "movement_type": mv.movement_type,
+            "quantity_delta": str(mv.quantity_delta),
+            "balance_after": str(mv.balance_after),
+            "reference_type": mv.reference_type,
+            "reference_id": mv.reference_id,
+            "notes": mv.notes,
+            "created_at": mv.created_at.isoformat() if mv.created_at else None,
+        }
+        for mv, inv, ing_name in rows
+    ]
 
 
 def create_ingredient_with_stock(db: Session, data: dict, actor_user_id: UUID) -> dict:
@@ -216,6 +320,34 @@ def list_canteen_inventory(db: Session, canteen_id: UUID) -> list[dict]:
     return result
 
 
+def get_recipe(db: Session, food_item_id: UUID) -> dict:
+    food = db.get(FoodItem, food_item_id)
+    if not food:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == food_item_id))
+    if not recipe:
+        return {"food_item_id": str(food_item_id), "recipe_id": None, "yield_portions": 1, "ingredients": []}
+    rows = db.execute(
+        select(RecipeIngredient, Ingredient)
+        .join(Ingredient, Ingredient.id == RecipeIngredient.ingredient_id)
+        .where(RecipeIngredient.recipe_id == recipe.id)
+    ).all()
+    return {
+        "food_item_id": str(food_item_id),
+        "recipe_id": str(recipe.id),
+        "yield_portions": recipe.yield_portions,
+        "ingredients": [
+            {
+                "ingredient_id": str(ri.ingredient_id),
+                "ingredient_name": ing.name,
+                "unit": ing.unit,
+                "quantity_required": str(ri.quantity_required),
+            }
+            for ri, ing in rows
+        ],
+    }
+
+
 def upsert_recipe(db: Session, food_item_id: UUID, yield_portions: int, ingredients: list[dict], actor_user_id: UUID) -> dict:
     food = db.get(FoodItem, food_item_id)
     if not food:
@@ -247,7 +379,7 @@ def upsert_recipe(db: Session, food_item_id: UUID, yield_portions: int, ingredie
 
 
 def create_purchase_order(db: Session, data: dict, actor_user_id: UUID) -> dict:
-    po_number = f"PO-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    po_number = f"PO-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6].upper()}"
     total = sum(
         (Decimal(str(it["quantity_ordered"])) * Decimal(str(it["unit_cost"])) for it in data["items"]),
         Decimal("0.00"),
@@ -278,7 +410,9 @@ def create_purchase_order(db: Session, data: dict, actor_user_id: UUID) -> dict:
     return {"id": str(po.id), "po_number": po.po_number, "status": po.status, "total_cost": str(po.total_cost)}
 
 
-def receive_purchase_order(db: Session, po_id: UUID, actor_user_id: UUID) -> dict:
+def receive_purchase_order(
+    db: Session, po_id: UUID, actor_user_id: UUID, received_items: Optional[list[dict]] = None
+) -> dict:
     po = db.scalar(select(PurchaseOrder).where(PurchaseOrder.id == po_id).with_for_update())
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
@@ -286,13 +420,29 @@ def receive_purchase_order(db: Session, po_id: UUID, actor_user_id: UUID) -> dic
         return {"id": str(po.id), "po_number": po.po_number, "status": "received"}
 
     po_items = db.scalars(select(PurchaseOrderItem).where(PurchaseOrderItem.purchase_order_id == po.id)).all()
+    rec_map = {str(r["ingredient_id"]): r for r in (received_items or [])}
     now = datetime.now(timezone.utc)
     for poi in po_items:
-        poi.quantity_received = poi.quantity_ordered
+        outstanding = max(Decimal("0.000"), poi.quantity_ordered - poi.quantity_received)
+        if outstanding <= Decimal("0.000"):
+            continue
+        if received_items is not None:
+            entry = rec_map.get(str(poi.ingredient_id))
+            if not entry:
+                continue
+            receive_qty = min(outstanding, max(Decimal("0.000"), Decimal(str(entry["quantity_received"]))))
+            expiry = entry.get("expiry_date") or poi.expiry_date
+        else:
+            receive_qty = outstanding
+            expiry = poi.expiry_date
+        if receive_qty <= Decimal("0.000"):
+            continue
+
+        poi.quantity_received += receive_qty
         inv = db.scalar(
-            select(InventoryItem).where(
-                InventoryItem.canteen_id == po.canteen_id, InventoryItem.ingredient_id == poi.ingredient_id
-            )
+            select(InventoryItem)
+            .where(InventoryItem.canteen_id == po.canteen_id, InventoryItem.ingredient_id == poi.ingredient_id)
+            .with_for_update()
         )
         if not inv:
             ing = db.get(Ingredient, poi.ingredient_id)
@@ -305,17 +455,17 @@ def receive_purchase_order(db: Session, po_id: UUID, actor_user_id: UUID) -> dic
             )
             db.add(inv)
             db.flush()
-        inv.current_quantity += poi.quantity_ordered
+        inv.current_quantity += receive_qty
         inv.unit_cost = poi.unit_cost
         batch = StockBatch(
             inventory_item_id=inv.id,
             supplier_id=po.supplier_id,
-            batch_number=f"{po.po_number}-{str(poi.ingredient_id)[:4]}",
-            initial_quantity=poi.quantity_ordered,
-            remaining_quantity=poi.quantity_ordered,
+            batch_number=f"{po.po_number}-{str(poi.ingredient_id)[:4]}-{uuid4().hex[:3].upper()}",
+            initial_quantity=receive_qty,
+            remaining_quantity=receive_qty,
             unit_cost=poi.unit_cost,
             received_at=now,
-            expiry_date=poi.expiry_date,
+            expiry_date=expiry,
         )
         db.add(batch)
         db.flush()
@@ -324,20 +474,30 @@ def receive_purchase_order(db: Session, po_id: UUID, actor_user_id: UUID) -> dic
                 inventory_item_id=inv.id,
                 batch_id=batch.id,
                 movement_type="purchase",
-                quantity_delta=poi.quantity_ordered,
+                quantity_delta=receive_qty,
                 balance_after=inv.current_quantity,
                 reference_type="purchase_order",
                 reference_id=str(po.id),
                 created_by_user_id=actor_user_id,
-                notes=f"Received {po.po_number}",
+                notes=f"Received {receive_qty} from {po.po_number}",
             )
         )
-    po.status = "received"
-    po.received_at = now
+    all_done = all(p.quantity_received >= p.quantity_ordered for p in po_items)
+    any_done = any(p.quantity_received > 0 for p in po_items)
+    po.status = "received" if all_done else ("partial" if any_done else po.status)
+    if all_done:
+        po.received_at = now
     refresh_food_item_ingredient_sufficiency(db, po.canteen_id)
-    record_audit_log(db, action="purchase_order.received", entity_type="purchase_order", entity_id=po.po_number, actor_user_id=actor_user_id)
+    record_audit_log(
+        db,
+        action="purchase_order.received",
+        entity_type="purchase_order",
+        entity_id=po.po_number,
+        actor_user_id=actor_user_id,
+        details={"status": po.status},
+    )
     db.commit()
-    return {"id": str(po.id), "po_number": po.po_number, "status": "received"}
+    return {"id": str(po.id), "po_number": po.po_number, "status": po.status}
 
 
 def adjust_or_waste_stock(
@@ -348,16 +508,20 @@ def adjust_or_waste_stock(
     reason: str,
     is_wastage: bool,
     actor_user_id: UUID,
+    batch_id: Optional[UUID] = None,
 ) -> dict:
     inv = db.scalar(select(InventoryItem).where(InventoryItem.id == inventory_item_id).with_for_update())
     if not inv:
         raise HTTPException(status_code=404, detail="Inventory item not found")
     if is_wastage:
         qty = abs(quantity_delta)
+        consumed = _consume_batches(db, inv.id, qty, exclude_expired=False, batch_id=batch_id)
+        used_batch_id = consumed[0][0] if consumed else batch_id
         inv.current_quantity = max(Decimal("0.000"), inv.current_quantity - qty)
         loss = (qty * inv.unit_cost).quantize(Decimal("0.01"))
         w = WastageRecord(
             inventory_item_id=inv.id,
+            batch_id=used_batch_id,
             quantity=qty,
             reason=reason,
             estimated_loss=loss,
@@ -367,6 +531,7 @@ def adjust_or_waste_stock(
         db.add(
             StockMovement(
                 inventory_item_id=inv.id,
+                batch_id=used_batch_id,
                 movement_type="wastage",
                 quantity_delta=-qty,
                 balance_after=inv.current_quantity,
@@ -377,6 +542,22 @@ def adjust_or_waste_stock(
             )
         )
     else:
+        used_batch_id = batch_id
+        if quantity_delta < Decimal("0.000"):
+            consumed = _consume_batches(db, inv.id, abs(quantity_delta), exclude_expired=False, batch_id=batch_id)
+            used_batch_id = consumed[0][0] if consumed else batch_id
+        elif quantity_delta > Decimal("0.000"):
+            adj_batch = StockBatch(
+                inventory_item_id=inv.id,
+                batch_number=f"ADJ-{uuid4().hex[:6].upper()}",
+                initial_quantity=quantity_delta,
+                remaining_quantity=quantity_delta,
+                unit_cost=inv.unit_cost,
+                received_at=datetime.now(timezone.utc),
+            )
+            db.add(adj_batch)
+            db.flush()
+            used_batch_id = adj_batch.id
         inv.current_quantity = max(Decimal("0.000"), inv.current_quantity + quantity_delta)
         db.add(
             StockAdjustment(
@@ -389,6 +570,7 @@ def adjust_or_waste_stock(
         db.add(
             StockMovement(
                 inventory_item_id=inv.id,
+                batch_id=used_batch_id,
                 movement_type="adjustment",
                 quantity_delta=quantity_delta,
                 balance_after=inv.current_quantity,
@@ -414,6 +596,8 @@ def transfer_stock(
     notes: Optional[str],
     actor_user_id: UUID,
 ) -> dict:
+    if from_canteen_id == to_canteen_id:
+        raise HTTPException(status_code=400, detail="Source and destination canteens must be different")
     src = db.scalar(
         select(InventoryItem)
         .where(InventoryItem.canteen_id == from_canteen_id, InventoryItem.ingredient_id == ingredient_id)
@@ -421,6 +605,12 @@ def transfer_stock(
     )
     if not src or src.current_quantity < quantity:
         raise HTTPException(status_code=400, detail="Insufficient stock in source canteen")
+    has_batches = db.scalar(select(StockBatch.id).where(StockBatch.inventory_item_id == src.id).limit(1))
+    consumed_slices = _consume_batches(db, src.id, quantity, exclude_expired=True)
+    taken_total = sum((t[1] for t in consumed_slices), Decimal("0.000"))
+    if has_batches and taken_total < quantity:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Insufficient non-expired batch stock in source canteen")
     src.current_quantity -= quantity
 
     src_ing = db.get(Ingredient, ingredient_id)
@@ -428,7 +618,13 @@ def transfer_stock(
         select(Ingredient).where(Ingredient.canteen_id == to_canteen_id, Ingredient.sku == src_ing.sku)
     )
     if not dst_ing:
-        dst_ing = Ingredient(canteen_id=to_canteen_id, name=src_ing.name, sku=src_ing.sku, unit=src_ing.unit)
+        dst_ing = Ingredient(
+            canteen_id=to_canteen_id,
+            name=src_ing.name,
+            sku=src_ing.sku,
+            unit=src_ing.unit,
+            is_allergen=src_ing.is_allergen,
+        )
         db.add(dst_ing)
         db.flush()
 
@@ -450,6 +646,32 @@ def transfer_stock(
         db.flush()
     dst.current_quantity += quantity
 
+    now = datetime.now(timezone.utc)
+    if consumed_slices:
+        for _bid, taken, exp, ucost in consumed_slices:
+            db.add(
+                StockBatch(
+                    inventory_item_id=dst.id,
+                    batch_number=f"TRF-{uuid4().hex[:6].upper()}",
+                    initial_quantity=taken,
+                    remaining_quantity=taken,
+                    unit_cost=ucost,
+                    received_at=now,
+                    expiry_date=exp,
+                )
+            )
+    else:
+        db.add(
+            StockBatch(
+                inventory_item_id=dst.id,
+                batch_number=f"TRF-{uuid4().hex[:6].upper()}",
+                initial_quantity=quantity,
+                remaining_quantity=quantity,
+                unit_cost=src.unit_cost,
+                received_at=now,
+            )
+        )
+
     tr = StockTransfer(
         from_canteen_id=from_canteen_id,
         to_canteen_id=to_canteen_id,
@@ -459,6 +681,7 @@ def transfer_stock(
         notes=notes,
     )
     db.add(tr)
+    db.flush()
     db.add(
         StockMovement(
             inventory_item_id=src.id,
@@ -468,6 +691,7 @@ def transfer_stock(
             reference_type="transfer",
             reference_id=str(to_canteen_id),
             created_by_user_id=actor_user_id,
+            notes=notes,
         )
     )
     db.add(
@@ -479,12 +703,13 @@ def transfer_stock(
             reference_type="transfer",
             reference_id=str(from_canteen_id),
             created_by_user_id=actor_user_id,
+            notes=notes,
         )
     )
     refresh_food_item_ingredient_sufficiency(db, from_canteen_id)
     refresh_food_item_ingredient_sufficiency(db, to_canteen_id)
     db.commit()
-    return {"status": "transferred", "quantity": str(quantity)}
+    return {"id": str(tr.id), "status": "transferred", "quantity": str(quantity)}
 
 
 def get_inventory_alerts(db: Session, canteen_id: UUID, expiring_within_days: int = 7) -> dict:
@@ -503,7 +728,7 @@ def get_inventory_alerts(db: Session, canteen_id: UUID, expiring_within_days: in
             "unit": inv.unit,
         })
 
-    cutoff = date.today() + timedelta(days=expiring_within_days)
+    cutoff = today_college() + timedelta(days=expiring_within_days)
     expiring_batches = db.execute(
         select(StockBatch, Ingredient.name)
         .join(InventoryItem, InventoryItem.id == StockBatch.inventory_item_id)

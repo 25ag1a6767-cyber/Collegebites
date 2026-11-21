@@ -218,6 +218,22 @@ def require_roles(*allowed_roles: str):
     return dependency
 
 
+def require_role_or_permission(allowed_roles: Iterable[str], *required_permissions: str):
+    allowed = tuple(allowed_roles)
+
+    def dependency(principal: AuthenticatedPrincipal = Depends(get_current_principal)) -> AuthenticatedPrincipal:
+        if ROLE_SUPER_ADMIN in principal.roles or "*" in principal.permissions:
+            return principal
+        if principal.has_role(*allowed) or any(principal.has_permission(p) for p in required_permissions):
+            return principal
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Requires permission ({', '.join(required_permissions)}) or role ({', '.join(allowed)})",
+        )
+
+    return dependency
+
+
 def require_permissions(*required_permissions: str):
     def dependency(principal: AuthenticatedPrincipal = Depends(get_current_principal)) -> AuthenticatedPrincipal:
         if "*" in principal.permissions or ROLE_SUPER_ADMIN in principal.roles:
@@ -235,11 +251,24 @@ def require_permissions(*required_permissions: str):
 def enforce_canteen_scope(principal: AuthenticatedPrincipal, canteen_id: Optional[UUID]) -> None:
     if principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
         return
-    if canteen_id and principal.assigned_canteen_id and principal.assigned_canteen_id != canteen_id:
+    if not principal.assigned_canteen_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Staff user has no assigned canteen",
+        )
+    if canteen_id and principal.assigned_canteen_id != canteen_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Staff user is not authorized for this canteen",
         )
+
+
+def scoped_canteen_for_principal(principal: AuthenticatedPrincipal, requested_canteen_id: Optional[UUID]) -> Optional[UUID]:
+    """Resolve effective canteen filter, locking non-college-admin staff to their assigned canteen."""
+    if principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        return requested_canteen_id
+    enforce_canteen_scope(principal, requested_canteen_id)
+    return principal.assigned_canteen_id
 
 
 def client_ip_from_request(request: Optional[Request]) -> Optional[str]:

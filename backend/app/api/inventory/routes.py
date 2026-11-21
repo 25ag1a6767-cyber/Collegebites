@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,9 +15,11 @@ from app.core.permissions import (
     ROLE_INVENTORY_MANAGER,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
+    enforce_canteen_scope,
     require_roles,
 )
-from app.models.inventory import PurchaseOrder
+from app.models.inventory import InventoryItem, PurchaseOrder, StockTransfer
+from app.models.menu import FoodItem
 from app.services import inventory_service
 
 router = APIRouter(prefix="/inventory", tags=["Inventory, Recipes & Suppliers"])
@@ -76,10 +78,37 @@ class StockAdjustIn(BaseModel):
     reason: str = Field(min_length=2, max_length=255)
 
 
+class SupplierUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=160)
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    gst_number: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class InventoryItemUpdate(BaseModel):
+    reorder_level: Optional[Decimal] = Field(default=None, ge=0)
+    unit_cost: Optional[Decimal] = Field(default=None, ge=0)
+    unit: Optional[str] = None
+
+
+class POReceiveItemIn(BaseModel):
+    ingredient_id: UUID
+    quantity_received: Decimal = Field(gt=0)
+    expiry_date: Optional[date] = None
+
+
+class POReceiveIn(BaseModel):
+    received_items: list[POReceiveItemIn] = Field(min_length=1)
+
+
 class WastageIn(BaseModel):
     inventory_item_id: UUID
     quantity: Decimal = Field(gt=0)
     reason: str = Field(min_length=2, max_length=255)
+    batch_id: Optional[UUID] = None
 
 
 class StockTransferIn(BaseModel):
@@ -107,13 +136,68 @@ def create_supplier(
     return inventory_service.create_supplier(db, payload.model_dump(), principal.user.id)
 
 
+@router.patch("/suppliers/{supplier_id}")
+def update_supplier(
+    supplier_id: UUID,
+    payload: SupplierUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    return inventory_service.update_supplier(db, supplier_id, payload.model_dump(exclude_unset=True), principal.user.id)
+
+
 @router.get("/canteens/{canteen_id}/items")
 def list_inventory(
     canteen_id: UUID,
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, canteen_id)
     return inventory_service.list_canteen_inventory(db, canteen_id)
+
+
+@router.patch("/items/{inventory_item_id}")
+def update_inventory_item(
+    inventory_item_id: UUID,
+    payload: InventoryItemUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    inv = db.get(InventoryItem, inventory_item_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    enforce_canteen_scope(principal, inv.canteen_id)
+    return inventory_service.update_inventory_item(
+        db, inventory_item_id, payload.model_dump(exclude_unset=True), principal.user.id
+    )
+
+
+@router.get("/canteens/{canteen_id}/movements")
+def list_movements(
+    canteen_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return inventory_service.list_inventory_movements(db, canteen_id, limit=limit, offset=offset)
+
+
+@router.get("/canteens/{canteen_id}/transfers")
+def list_transfers(
+    canteen_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    rows = db.scalars(
+        select(StockTransfer)
+        .where((StockTransfer.from_canteen_id == canteen_id) | (StockTransfer.to_canteen_id == canteen_id))
+        .order_by(StockTransfer.created_at.desc())
+        .limit(100)
+    ).all()
+    return list(rows)
 
 
 @router.post("/ingredients", status_code=status.HTTP_201_CREATED)
@@ -122,7 +206,21 @@ def create_ingredient(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, payload.canteen_id)
     return inventory_service.create_ingredient_with_stock(db, payload.model_dump(), principal.user.id)
+
+
+@router.get("/recipes/{food_item_id}")
+def get_recipe(
+    food_item_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    food = db.get(FoodItem, food_item_id)
+    if not food:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, food.canteen_id)
+    return inventory_service.get_recipe(db, food_item_id)
 
 
 @router.put("/recipes/{food_item_id}")
@@ -132,6 +230,10 @@ def upsert_recipe(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    food = db.get(FoodItem, food_item_id)
+    if not food:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, food.canteen_id)
     return inventory_service.upsert_recipe(
         db,
         food_item_id,
@@ -147,6 +249,7 @@ def list_pos(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, canteen_id)
     return list(
         db.scalars(select(PurchaseOrder).where(PurchaseOrder.canteen_id == canteen_id).order_by(PurchaseOrder.created_at.desc())).all()
     )
@@ -158,16 +261,23 @@ def create_po(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, payload.canteen_id)
     return inventory_service.create_purchase_order(db, payload.model_dump(), principal.user.id)
 
 
 @router.post("/purchase-orders/{po_id}/receive")
 def receive_po(
     po_id: UUID,
+    payload: Optional[POReceiveIn] = None,
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return inventory_service.receive_purchase_order(db, po_id, principal.user.id)
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    enforce_canteen_scope(principal, po.canteen_id)
+    rec_items = [it.model_dump() for it in payload.received_items] if payload else None
+    return inventory_service.receive_purchase_order(db, po_id, principal.user.id, received_items=rec_items)
 
 
 @router.post("/adjustments")
@@ -176,6 +286,10 @@ def adjust_stock(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    inv = db.get(InventoryItem, payload.inventory_item_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    enforce_canteen_scope(principal, inv.canteen_id)
     return inventory_service.adjust_or_waste_stock(
         db,
         inventory_item_id=payload.inventory_item_id,
@@ -192,6 +306,10 @@ def record_wastage(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    inv = db.get(InventoryItem, payload.inventory_item_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    enforce_canteen_scope(principal, inv.canteen_id)
     return inventory_service.adjust_or_waste_stock(
         db,
         inventory_item_id=payload.inventory_item_id,
@@ -199,6 +317,7 @@ def record_wastage(
         reason=payload.reason,
         is_wastage=True,
         actor_user_id=principal.user.id,
+        batch_id=payload.batch_id,
     )
 
 
@@ -208,6 +327,7 @@ def transfer_stock(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, payload.from_canteen_id)
     return inventory_service.transfer_stock(
         db,
         from_canteen_id=payload.from_canteen_id,
@@ -225,4 +345,5 @@ def get_alerts(
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
+    enforce_canteen_scope(principal, canteen_id)
     return inventory_service.get_inventory_alerts(db, canteen_id)

@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Download, LayoutDashboard } from "lucide-react";
-import { api } from "../../api/client";
+import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CollegeSettings, FoodItem } from "../../types";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
@@ -15,6 +15,7 @@ import { OrdersUsersTab } from "./components/OrdersUsersTab";
 export const AdminConsolePage: React.FC = () => {
   const { pushToast } = useToast();
   const { user, selectedCanteenId } = useAppStore();
+  const isCollegeAdmin = Boolean(user?.roles?.some((r) => r === "super_admin" || r === "college_admin"));
   const [tab, setTab] = useState<
     "analytics" | "orders" | "locations" | "menu" | "qr" | "queue" | "staff" | "promotions" | "support" | "system"
   >("analytics");
@@ -30,12 +31,15 @@ export const AdminConsolePage: React.FC = () => {
   });
 
   const [canteenId, setCanteenId] = useState(user?.assigned_canteen_id || selectedCanteenId || "");
-  const activeCanteenId = canteenId || canteens[0]?.id || "";
+  const activeCanteenId = (!isCollegeAdmin && user?.assigned_canteen_id) ? user.assigned_canteen_id : (canteenId || canteens[0]?.id || "");
+  const [scopeReportToCanteen, setScopeReportToCanteen] = useState(!isCollegeAdmin);
+
+  const reportQueryCanteen = scopeReportToCanteen && activeCanteenId ? `?canteen_id=${activeCanteenId}` : "";
 
   const { data: report } = useQuery<any>({
-    queryKey: ["admin-report", activeCanteenId],
+    queryKey: ["admin-report", activeCanteenId, scopeReportToCanteen],
     enabled: tab === "analytics",
-    queryFn: async () => (await api.get("/reports/dashboard")).data,
+    queryFn: async () => (await api.get(`/reports/dashboard${reportQueryCanteen}`)).data,
   });
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
@@ -63,39 +67,43 @@ export const AdminConsolePage: React.FC = () => {
   });
 
   const { data: staffList = [], refetch: refetchStaff } = useQuery<any[]>({
-    queryKey: ["admin-staff"],
+    queryKey: ["admin-staff", activeCanteenId],
     enabled: tab === "staff" || tab === "support",
-    queryFn: async () => (await api.get("/staff")).data,
+    queryFn: async () => (await api.get(`/staff${activeCanteenId ? `?canteen_id=${activeCanteenId}` : ""}`)).data,
   });
 
   const { data: tickets = [], refetch: refetchTickets } = useQuery<any[]>({
-    queryKey: ["admin-tickets"],
+    queryKey: ["admin-tickets", activeCanteenId],
     enabled: tab === "support",
-    queryFn: async () => (await api.get("/support/tickets")).data,
+    queryFn: async () => (await api.get(`/support/tickets${!isCollegeAdmin && activeCanteenId ? `?canteen_id=${activeCanteenId}` : ""}`)).data,
   });
 
   const { data: auditLogs = [] } = useQuery<any[]>({
     queryKey: ["admin-audits"],
-    enabled: tab === "system",
+    enabled: tab === "system" && isCollegeAdmin,
     queryFn: async () => (await api.get("/admin/audit-logs?limit=40")).data,
   });
 
   const { data: health } = useQuery<any>({
     queryKey: ["admin-health"],
-    enabled: tab === "system",
+    enabled: tab === "system" && isCollegeAdmin,
     queryFn: async () => (await api.get("/admin/health")).data,
   });
 
   const [replyByTicket, setReplyByTicket] = useState<Record<string, string>>({});
 
   const downloadBlob = async (url: string, filename: string) => {
-    const res = await api.get(url, { responseType: "blob" });
-    const objUrl = URL.createObjectURL(res.data);
-    const a = document.createElement("a");
-    a.href = objUrl;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(objUrl);
+    try {
+      const res = await api.get(url, { responseType: "blob" });
+      const objUrl = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = objUrl;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(objUrl);
+    } catch (err) {
+      pushToast(getApiError(err, "Export failed"), "error");
+    }
   };
 
   return (
@@ -110,6 +118,7 @@ export const AdminConsolePage: React.FC = () => {
         </div>
         <Select
           value={activeCanteenId}
+          disabled={!isCollegeAdmin && Boolean(user?.assigned_canteen_id)}
           onChange={(e) => setCanteenId(e.target.value)}
           className="w-56 bg-slate-800 border-slate-700 text-white"
         >
@@ -132,7 +141,7 @@ export const AdminConsolePage: React.FC = () => {
           { k: "staff", l: "Staff, Attendance & Tasks" },
           { k: "promotions", l: "Coupons & Announcements" },
           { k: "support", l: "Support Tickets" },
-          { k: "system", l: "Settings, Reconcile & Audits" },
+          ...(isCollegeAdmin ? [{ k: "system", l: "Settings, Reconcile & Audits" }] : []),
         ].map((item) => (
           <Button
             key={item.k}
@@ -147,13 +156,27 @@ export const AdminConsolePage: React.FC = () => {
 
       {tab === "analytics" && report && (
         <div className="space-y-5">
-          <div className="flex justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={() => downloadBlob("/reports/export/csv", "collegebites-report.csv")}>
-              <Download className="h-3.5 w-3.5" /> Export CSV
-            </Button>
-            <Button size="sm" variant="primary" onClick={() => downloadBlob("/reports/export/pdf", "collegebites-report.pdf")}>
-              <Download className="h-3.5 w-3.5" /> Export PDF
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            {isCollegeAdmin ? (
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={scopeReportToCanteen}
+                  onChange={(e) => setScopeReportToCanteen(e.target.checked)}
+                />
+                Filter report to selected canteen
+              </label>
+            ) : (
+              <span className="text-xs font-semibold text-slate-500">Scoped to assigned canteen</span>
+            )}
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => downloadBlob(`/reports/export/csv${reportQueryCanteen}`, "collegebites-report.csv")}>
+                <Download className="h-3.5 w-3.5" /> Export CSV
+              </Button>
+              <Button size="sm" variant="primary" onClick={() => downloadBlob(`/reports/export/pdf${reportQueryCanteen}`, "collegebites-report.pdf")}>
+                <Download className="h-3.5 w-3.5" /> Export PDF
+              </Button>
+            </div>
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -257,9 +280,13 @@ export const AdminConsolePage: React.FC = () => {
                     value={t.assigned_to_user_id || ""}
                     onChange={async (e) => {
                       if (!e.target.value) return;
-                      await api.post(`/support/tickets/${t.id}/assign`, { assigned_to_user_id: e.target.value });
-                      pushToast("Ticket assigned", "success");
-                      refetchTickets();
+                      try {
+                        await api.post(`/support/tickets/${t.id}/assign`, { assigned_to_user_id: e.target.value });
+                        pushToast("Ticket assigned", "success");
+                        refetchTickets();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
                     }}
                     className="w-40"
                   >
@@ -275,8 +302,13 @@ export const AdminConsolePage: React.FC = () => {
                       size="sm"
                       variant="success"
                       onClick={async () => {
-                        await api.post(`/support/tickets/${t.id}/resolve?resolution_note=Resolved%20by%20admin`);
-                        refetchTickets();
+                        try {
+                          await api.post(`/support/tickets/${t.id}/resolve?resolution_note=Resolved%20by%20admin`);
+                          pushToast("Ticket marked resolved", "success");
+                          refetchTickets();
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
                       }}
                     >
                       Resolve
@@ -296,10 +328,14 @@ export const AdminConsolePage: React.FC = () => {
                   onClick={async () => {
                     const msg = replyByTicket[t.id];
                     if (!msg?.trim()) return;
-                    await api.post(`/support/tickets/${t.id}/messages`, { message: msg });
-                    setReplyByTicket((p) => ({ ...p, [t.id]: "" }));
-                    pushToast("Reply sent", "success");
-                    refetchTickets();
+                    try {
+                      await api.post(`/support/tickets/${t.id}/messages`, { message: msg });
+                      setReplyByTicket((p) => ({ ...p, [t.id]: "" }));
+                      pushToast("Reply sent", "success");
+                      refetchTickets();
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
                   }}
                 >
                   Send Reply

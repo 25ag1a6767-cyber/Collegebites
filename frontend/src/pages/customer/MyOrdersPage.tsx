@@ -11,20 +11,45 @@ export const MyOrdersPage: React.FC = () => {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { pushToast } = useToast();
-  const { user, guestOrderTokens, setSelectedCanteen } = useAppStore();
+  const { user, guestOrderTokens, saveGuestOrderToken, setSelectedCanteen } = useAppStore();
   const [lookupOrderNum, setLookupOrderNum] = useState("");
   const [lookupToken, setLookupToken] = useState("");
+  const [guestPhone, setGuestPhone] = useState("");
+  const [guestOtp, setGuestOtp] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
+  const [recoveredOrders, setRecoveredOrders] = useState<Order[]>([]);
+  const [busyRecover, setBusyRecover] = useState(false);
 
   const handleReorder = async (o: Order) => {
     try {
       let added = 0;
       for (const it of o.items) {
         if (!it.food_item_id) continue;
+        const addons: { addon_id: string; quantity: number }[] = [];
+        let spiceLevel: string | null = null;
+        let sugarLevel: string | null = null;
+        const removedIngredients: string[] = [];
+        for (const c of it.customizations || []) {
+          if (c.customization_type === "addon" && c.addon_id) {
+            addons.push({ addon_id: c.addon_id, quantity: c.quantity || 1 });
+          } else if (c.customization_type === "spice") {
+            spiceLevel = c.option_value;
+          } else if (c.customization_type === "sugar") {
+            sugarLevel = c.option_value;
+          } else if (c.customization_type === "remove_ingredient") {
+            removedIngredients.push(c.option_value);
+          }
+        }
         await api.post("/carts/items", {
           canteen_id: o.canteen_id,
           food_item_id: it.food_item_id,
           variant_id: it.variant_id || null,
           quantity: it.quantity,
+          spice_level: spiceLevel,
+          sugar_level: sugarLevel,
+          removed_ingredients: removedIngredients,
+          addons,
           special_instructions: it.special_instructions || null,
         });
         added += 1;
@@ -97,6 +122,96 @@ export const MyOrdersPage: React.FC = () => {
             ))}
           </div>
         )}
+
+        <div className="mt-4 border-t border-slate-100 pt-3 space-y-2">
+          <div className="text-[11px] font-bold uppercase text-slate-500">Lost your guest token? Recover orders by Mobile OTP</div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <Input
+              value={guestPhone}
+              onChange={(e) => setGuestPhone(e.target.value)}
+              placeholder="+919876543210"
+              className="w-44"
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busyRecover || !guestPhone.trim()}
+              onClick={async () => {
+                setBusyRecover(true);
+                try {
+                  const res = await api.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
+                  setOtpSent(true);
+                  setDevOtpHint(res.data.dev_otp || null);
+                  pushToast("Recovery OTP sent", "success");
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                } finally {
+                  setBusyRecover(false);
+                }
+              }}
+            >
+              {otpSent ? "Resend OTP" : "Send Recovery OTP"}
+            </Button>
+            {otpSent && (
+              <>
+                <Input
+                  value={guestOtp}
+                  onChange={(e) => setGuestOtp(e.target.value)}
+                  placeholder="6-digit OTP"
+                  maxLength={6}
+                  className="w-32"
+                />
+                <Button
+                  size="sm"
+                  disabled={busyRecover || guestOtp.trim().length < 6}
+                  onClick={async () => {
+                    setBusyRecover(true);
+                    try {
+                      const ver = await api.post("/auth/otp/verify", {
+                        target: guestPhone.trim(),
+                        purpose: "guest_checkout",
+                        code: guestOtp.trim(),
+                      });
+                      const list = await api.post<Order[]>("/orders/guest/lookup", {
+                        guest_phone: guestPhone.trim(),
+                        otp_verification_token: ver.data.verification_token,
+                      });
+                      list.data.forEach((o) => {
+                        if (o.guest_access_token) saveGuestOrderToken(o.order_number, o.guest_access_token);
+                      });
+                      setRecoveredOrders(list.data);
+                      pushToast(`Found ${list.data.length} guest order(s)`, "success");
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    } finally {
+                      setBusyRecover(false);
+                    }
+                  }}
+                >
+                  Find My Orders
+                </Button>
+              </>
+            )}
+          </div>
+          {devOtpHint && (
+            <div className="text-xs text-slate-600">
+              Dev OTP: <strong className="font-mono">{devOtpHint}</strong>
+            </div>
+          )}
+          {recoveredOrders.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-1">
+              {recoveredOrders.map((ro) => (
+                <Link
+                  key={ro.id}
+                  to={`/orders/${ro.order_number}${ro.guest_access_token ? `?guest_token=${encodeURIComponent(ro.guest_access_token)}` : ""}`}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-1.5 text-xs font-bold text-emerald-800"
+                >
+                  {ro.order_number} ({ro.status}) • ₹{ro.total_amount}
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
       </Card>
 
       {user ? (

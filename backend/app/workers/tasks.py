@@ -9,6 +9,7 @@ from app.models.auth import OTPVerification, RefreshToken
 from app.models.college import Canteen
 from app.models.engagement import Notification
 from app.services.inventory_service import get_inventory_alerts
+from app.services.order_service import release_expired_slot_reservations
 from app.workers.celery_app import celery_app
 
 
@@ -28,13 +29,18 @@ def dispatch_notification_task(self, channel: str, target: str, subject: str, bo
 
 @celery_app.task
 def cleanup_expired_auth_artifacts_task() -> dict:
-    """Remove expired OTP records and expired refresh tokens."""
+    """Remove expired OTP records, expired refresh tokens, and stale unpaid slot reservations."""
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
         otp_res = db.execute(delete(OTPVerification).where(OTPVerification.expires_at < now))
         tok_res = db.execute(delete(RefreshToken).where(RefreshToken.expires_at < now))
+        released_slots = release_expired_slot_reservations(db)
         db.commit()
-        return {"deleted_otps": otp_res.rowcount or 0, "deleted_refresh_tokens": tok_res.rowcount or 0}
+        return {
+            "deleted_otps": otp_res.rowcount or 0,
+            "deleted_refresh_tokens": tok_res.rowcount or 0,
+            "released_expired_slots": released_slots,
+        }
 
 
 @celery_app.task

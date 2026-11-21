@@ -34,7 +34,7 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
       await api.post(`/printing/receipts/${receipt.order_number}/print${tokenQuery}`, {
         printer_target: paperSize === "a4" ? "browser" : paperSize,
         paper_width: paperSize,
-        is_reprint: receipt.reprint_count > 0 || allowStaffReprint,
+        is_reprint: receipt.reprint_count > 0,
       });
       setPrinterStatus("Print job logged • Opening system print dialog");
       onPrinted?.();
@@ -46,7 +46,7 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
     }
   };
 
-  const handleDownloadPdf = async (format: "a4" | "80mm") => {
+  const handleDownloadPdf = async (format: "58mm" | "80mm" | "a4") => {
     try {
       const sep = guestToken ? `&guest_token=${encodeURIComponent(guestToken)}` : "";
       const res = await api.get(
@@ -183,6 +183,9 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
           </Button>
           <Button size="sm" variant="outline" onClick={() => handleDownloadPdf("80mm")}>
             <Download className="h-3.5 w-3.5" /> 80mm PDF
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => handleDownloadPdf("58mm")}>
+            <Download className="h-3.5 w-3.5" /> 58mm PDF
           </Button>
           <Button size="sm" variant="outline" onClick={handleUsbEscPos} disabled={printing}>
             <Usb className="h-3.5 w-3.5" /> USB/Serial Thermal

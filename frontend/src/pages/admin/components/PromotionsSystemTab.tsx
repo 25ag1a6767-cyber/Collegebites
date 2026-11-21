@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Megaphone, Shield, Tag } from "lucide-react";
+import { Megaphone, Monitor, Shield, Tag } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
 import type { CollegeSettings } from "../../../types";
 import { Badge, Button, Card, Input, Select, useToast } from "../../../components/ui/Primitives";
@@ -66,11 +66,30 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
         </Button>
         <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
           {coupons.map((c) => (
-            <div key={c.id} className="flex justify-between">
-              <span className="font-mono font-bold">{c.code}</span>
-              <span>
-                {c.discount_value} ({c.discount_type}) • Used {c.times_used}×
+            <div key={c.id} className="flex items-center justify-between gap-2">
+              <span className="font-mono font-bold">
+                {c.code} {!c.is_active && <span className="text-red-500">(Paused)</span>}
               </span>
+              <div className="flex items-center gap-2">
+                <span>
+                  {c.discount_value} ({c.discount_type}) • Used {c.times_used}×
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await api.patch(`/promotions/coupons/${c.id}`, { is_active: !c.is_active });
+                      refetchCoupons();
+                      pushToast(`Coupon ${!c.is_active ? "activated" : "paused"}`, "info");
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
+                  }}
+                  className="font-bold text-orange-600 hover:underline"
+                >
+                  {c.is_active ? "Pause" : "Activate"}
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -105,9 +124,26 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
         </Button>
         <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
           {announcements.map((a) => (
-            <div key={a.id} className="rounded-lg bg-amber-50 p-2">
-              <div className="font-bold">{a.title}</div>
-              <div className="text-slate-600">{a.body}</div>
+            <div key={a.id} className="flex items-start justify-between gap-2 rounded-lg bg-amber-50 p-2">
+              <div>
+                <div className="font-bold">{a.title}</div>
+                <div className="text-slate-600">{a.body}</div>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await api.delete(`/notifications/announcements/${a.id}`);
+                    refetchAnn();
+                    pushToast("Announcement removed", "info");
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+                className="text-red-600 font-bold hover:underline shrink-0"
+              >
+                Delete
+              </button>
             </div>
           ))}
         </div>
@@ -127,9 +163,36 @@ export const SystemTab: React.FC<{
     queryKey: ["admin-payments"],
     queryFn: async () => (await api.get("/payments?limit=20")).data,
   });
+  const { data: kioskStatus, refetch: refetchKiosk } = useQuery<any>({
+    queryKey: ["admin-kiosk-status"],
+    queryFn: async () => (await api.get("/kiosk/status")).data,
+  });
+  const { data: sysEvents = [] } = useQuery<any[]>({
+    queryKey: ["admin-system-events"],
+    queryFn: async () => (await api.get("/admin/system-events")).data,
+  });
 
   const [collegeName, setCollegeName] = useState(college?.college_name || "");
   const [policyText, setPolicyText] = useState(college?.cancellation_policy_text || "");
+  const [timezone, setTimezone] = useState(college?.college_timezone || "Asia/Kolkata");
+
+  useEffect(() => {
+    if (college) {
+      setCollegeName(college.college_name || "");
+      setPolicyText(college.cancellation_policy_text || "");
+      setTimezone(college.college_timezone || "Asia/Kolkata");
+    }
+  }, [college]);
+
+  const toggleSetting = async (field: keyof CollegeSettings, val: boolean, label: string) => {
+    try {
+      await api.put("/admin/college", { [field]: val });
+      refetchCollege();
+      pushToast(`${label} ${val ? "enabled" : "disabled"}`, "info");
+    } catch (err) {
+      pushToast(getApiError(err), "error");
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -148,23 +211,73 @@ export const SystemTab: React.FC<{
           )}
           {college && (
             <div className="space-y-3 border-t border-slate-100 pt-3 text-xs">
-              <Input value={collegeName} onChange={(e) => setCollegeName(e.target.value)} placeholder="College Name" />
+              <div className="grid grid-cols-2 gap-2">
+                <Input value={collegeName} onChange={(e) => setCollegeName(e.target.value)} placeholder="College Name" />
+                <Input value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="Timezone (Asia/Kolkata)" />
+              </div>
               <textarea
                 rows={3}
                 value={policyText}
                 onChange={(e) => setPolicyText(e.target.value)}
                 className="w-full rounded-xl border border-slate-300 p-2.5 text-xs"
               />
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(college.razorpay_enabled)}
+                    onChange={() => void toggleSetting("razorpay_enabled", !college.razorpay_enabled, "Razorpay")}
+                  />
+                  Razorpay Enabled
+                </label>
+                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(college.stripe_enabled ?? true)}
+                    onChange={() => void toggleSetting("stripe_enabled", !(college.stripe_enabled ?? true), "Stripe")}
+                  />
+                  Stripe Enabled
+                </label>
+                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(college.cash_at_counter_enabled)}
+                    onChange={() => void toggleSetting("cash_at_counter_enabled", !college.cash_at_counter_enabled, "Cash at Counter")}
+                  />
+                  Cash at Counter
+                </label>
+                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(college.pay_at_pickup_enabled)}
+                    onChange={() => void toggleSetting("pay_at_pickup_enabled", !college.pay_at_pickup_enabled, "Pay at Pickup")}
+                  />
+                  Pay at Pickup
+                </label>
+                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(college.guest_otp_required)}
+                    onChange={() => void toggleSetting("guest_otp_required", !college.guest_otp_required, "Guest OTP")}
+                  />
+                  Guest OTP Required
+                </label>
+              </div>
               <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
                   onClick={async () => {
-                    await api.put("/admin/college", {
-                      college_name: collegeName || college.college_name,
-                      cancellation_policy_text: policyText || college.cancellation_policy_text,
-                    });
-                    refetchCollege();
-                    pushToast("College settings saved", "success");
+                    try {
+                      await api.put("/admin/college", {
+                        college_name: collegeName || college.college_name,
+                        cancellation_policy_text: policyText || college.cancellation_policy_text,
+                        college_timezone: timezone || "Asia/Kolkata",
+                      });
+                      refetchCollege();
+                      pushToast("College settings saved", "success");
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
                   }}
                 >
                   Save Settings
@@ -172,27 +285,59 @@ export const SystemTab: React.FC<{
                 <Button
                   size="sm"
                   variant={college.kiosk_enabled ? "success" : "outline"}
-                  onClick={async () => {
-                    await api.put("/admin/college", { kiosk_enabled: !college.kiosk_enabled });
-                    refetchCollege();
-                    pushToast(`Kiosk mode ${!college.kiosk_enabled ? "enabled" : "disabled"}`, "info");
-                  }}
+                  onClick={() => void toggleSetting("kiosk_enabled", !college.kiosk_enabled, "Kiosk Mode")}
                 >
                   Kiosk: {college.kiosk_enabled ? "Enabled" : "Disabled"}
                 </Button>
               </div>
+
+              {kioskStatus?.devices?.length > 0 && (
+                <div className="border-t border-slate-100 pt-2 space-y-1.5">
+                  <div className="font-bold text-slate-700 flex items-center gap-1.5">
+                    <Monitor className="h-3.5 w-3.5" /> Registered Kiosk Terminals
+                  </div>
+                  {kioskStatus.devices.map((dev: any) => (
+                    <div key={dev.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-2.5 py-1.5">
+                      <span>
+                        <strong>{dev.name}</strong> ({dev.device_code})
+                      </span>
+                      <Button
+                        size="sm"
+                        variant={dev.is_enabled ? "success" : "outline"}
+                        onClick={async () => {
+                          try {
+                            await api.patch(`/kiosk/devices/${dev.id}`, { is_enabled: !dev.is_enabled });
+                            refetchKiosk();
+                            pushToast(`Device ${dev.device_code} ${!dev.is_enabled ? "enabled" : "disabled"}`, "info");
+                          } catch (err) {
+                            pushToast(getApiError(err), "error");
+                          }
+                        }}
+                      >
+                        {dev.is_enabled ? "Device On" : "Device Off"}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </Card>
 
         <Card className="p-5 space-y-2 max-h-96 overflow-y-auto">
-          <h2 className="font-bold text-slate-900">Recent Audit Logs</h2>
+          <h2 className="font-bold text-slate-900">Recent Audit Logs & System Events</h2>
           {auditLogs.map((a) => (
             <div key={a.id} className="border-b border-slate-100 py-1.5 text-xs flex justify-between gap-2">
               <span className="font-mono font-semibold text-slate-800">{a.action}</span>
               <span className="text-slate-500">
                 {a.entity_type}:{a.entity_id}
               </span>
+            </div>
+          ))}
+          {sysEvents.slice(0, 10).map((ev) => (
+            <div key={ev.id} className="border-b border-slate-100 py-1.5 text-xs flex justify-between gap-2">
+              <span className="font-semibold text-amber-700">{ev.event_type}</span>
+              <span className="text-slate-500 truncate">{ev.message}</span>
             </div>
           ))}
         </Card>
@@ -220,9 +365,13 @@ export const SystemTab: React.FC<{
                     size="sm"
                     variant="outline"
                     onClick={async () => {
-                      await api.post("/payments/reconcile", { payment_id: p.id, settled_amount: p.amount, notes: "Matched" });
-                      pushToast("Payment reconciled", "success");
-                      refetchPayments();
+                      try {
+                        await api.post("/payments/reconcile", { payment_id: p.id, settled_amount: p.amount, notes: "Matched" });
+                        pushToast("Payment reconciled", "success");
+                        refetchPayments();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
                     }}
                   >
                     Reconcile

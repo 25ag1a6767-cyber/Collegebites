@@ -16,24 +16,24 @@ import {
   User as UserIcon,
   UtensilsCrossed,
 } from "lucide-react";
-import { api } from "../../api/client";
+import { api, buildWsUrl, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings } from "../../types";
-import { Badge, Button, crowdBadgeTone } from "../ui/Primitives";
+import { Badge, Button, crowdBadgeTone, useToast } from "../ui/Primitives";
 
 export const Navbar: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const { user, logout, selectedCanteenId, setSelectedCanteen } = useAppStore();
+  const { pushToast } = useToast();
+  const { user, accessToken, logout, selectedCanteenId, setSelectedCanteen } = useAppStore();
   const [notifOpen, setNotifOpen] = useState(false);
 
   useEffect(() => {
-    if (!user?.id) return;
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    if (!user?.id || !accessToken) return;
     let ws: WebSocket | null = null;
     try {
-      ws = new WebSocket(`${proto}://${window.location.host}/api/v1/ws/notifications/${user.id}`);
+      ws = new WebSocket(buildWsUrl(`/ws/notifications/${user.id}`, { token: accessToken }));
       ws.onmessage = () => {
         qc.invalidateQueries({ queryKey: ["notifications-my"] });
         qc.invalidateQueries({ queryKey: ["my-orders"] });
@@ -42,7 +42,7 @@ export const Navbar: React.FC = () => {
       // polling fallback handles it
     }
     return () => ws?.close();
-  }, [user?.id, qc]);
+  }, [user?.id, accessToken, qc]);
 
   const { data: college } = useQuery<CollegeSettings>({
     queryKey: ["college-settings"],
@@ -209,16 +209,34 @@ export const Navbar: React.FC = () => {
                   <div className="absolute right-0 mt-2 w-80 rounded-2xl border border-slate-200 bg-white p-3 shadow-xl z-50">
                     <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-2">
                       <span className="text-xs font-extrabold text-slate-900">Notifications ({unreadCount} unread)</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setNotifOpen(false);
-                          navigate("/profile");
-                        }}
-                        className="text-[11px] font-bold text-orange-600"
-                      >
-                        Manage
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {unreadCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await api.post("/notifications/mark-all-read");
+                                qc.invalidateQueries({ queryKey: ["notifications-my"] });
+                              } catch (err) {
+                                pushToast(getApiError(err), "error");
+                              }
+                            }}
+                            className="text-[11px] font-bold text-slate-600 hover:text-orange-600"
+                          >
+                            Mark all
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNotifOpen(false);
+                            navigate("/profile");
+                          }}
+                          className="text-[11px] font-bold text-orange-600"
+                        >
+                          Manage
+                        </button>
+                      </div>
                     </div>
                     <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
                       {notifications.length === 0 ? (
@@ -237,8 +255,12 @@ export const Navbar: React.FC = () => {
                               <button
                                 type="button"
                                 onClick={async () => {
-                                  await api.post(`/notifications/${n.id}/read`);
-                                  qc.invalidateQueries({ queryKey: ["notifications-my"] });
+                                  try {
+                                    await api.post(`/notifications/${n.id}/read`);
+                                    qc.invalidateQueries({ queryKey: ["notifications-my"] });
+                                  } catch (err) {
+                                    pushToast(getApiError(err), "error");
+                                  }
                                 }}
                                 className="mt-1 text-[10px] font-bold text-orange-700"
                               >
@@ -266,6 +288,7 @@ export const Navbar: React.FC = () => {
                     // ignore
                   }
                   logout();
+                  qc.clear();
                   navigate("/");
                 }}
               >

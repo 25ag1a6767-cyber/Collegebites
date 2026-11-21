@@ -8,9 +8,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.core.redis_client import get_redis
+from app.core.security import sha256_hex
 from app.integrations.razorpay_client import razorpay_gateway
 from app.integrations.stripe_client import stripe_gateway
+from app.models.college import Canteen
 from app.models.order import Order, OrderItem, PickupSlot, SlotReservation
 from app.models.payment import (
     Payment,
@@ -28,10 +31,33 @@ from app.schemas.payment import (
     StripeVerifyRequest,
 )
 from app.services.audit_service import record_audit_log
-from app.services.order_service import serialize_order, transition_order_status
+from app.services.order_service import rollback_unpaid_incentives, serialize_order, transition_order_status
 from app.services.receipt_service import create_receipt_for_order
 from app.services.token_service import generate_token_and_qr_for_confirmed_order
 from app.websockets import emit_order_event_sync
+
+
+def _authorize_payment_actor(
+    order: Order,
+    *,
+    user_id: Optional[UUID] = None,
+    is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
+    guest_access_token: Optional[str] = None,
+    provider_order_id: Optional[str] = None,
+    expected_provider_order_id: Optional[str] = None,
+) -> None:
+    if is_staff:
+        if staff_canteen_id and order.canteen_id != staff_canteen_id:
+            raise HTTPException(status_code=403, detail="Staff user is not authorized for this canteen")
+        return
+    if order.customer_id and user_id == order.customer_id:
+        return
+    if order.is_guest and guest_access_token and order.guest_access_token_hash == sha256_hex(guest_access_token):
+        return
+    if provider_order_id and expected_provider_order_id and provider_order_id == expected_provider_order_id:
+        return
+    raise HTTPException(status_code=403, detail="Not authorized to update payment state for this order")
 
 
 def _finalize_confirmed_payment(
@@ -51,6 +77,42 @@ def _finalize_confirmed_payment(
     Idempotent across retries and duplicate webhook deliveries.
     """
     now = datetime.now(timezone.utc)
+    if order.status in ("CANCELLED", "REJECTED", "PAYMENT_FAILED"):
+        db.add(
+            PaymentTransaction(
+                payment_id=payment.id,
+                order_id=order.id,
+                transaction_type="late_capture_conflict",
+                amount=payment.amount,
+                status="CONFLICT",
+                external_reference=payment_reference,
+                raw_summary={"order_status": order.status, **(raw_summary or {})},
+            )
+        )
+        record_audit_log(
+            db,
+            action="payment.late_conflict_retained",
+            entity_type="order",
+            entity_id=order.order_number,
+            actor_user_id=actor_user_id,
+            details={"order_status": order.status, "payment_reference": payment_reference},
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail=f"Order {order.order_number} is already {order.status}; token cannot be issued.",
+        )
+
+    if provider_payment_id:
+        dup_pay = db.scalar(
+            select(Payment).where(
+                Payment.provider_payment_id == provider_payment_id,
+                Payment.id != payment.id,
+            )
+        )
+        if dup_pay:
+            raise HTTPException(status_code=409, detail="Payment reference already used for another order")
+
     if payment.status == "CONFIRMED" and order.payment_status == "CONFIRMED":
         # Already finalized cleanly; ensure token/QR/receipt exist and return without duplicating
         token, qr = generate_token_and_qr_for_confirmed_order(db, order)
@@ -190,7 +252,10 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
     ):
         raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature")
 
-    payload = json.loads(raw_body.decode("utf-8"))
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Malformed Razorpay webhook JSON payload") from exc
     event_type = payload.get("event", "unknown")
     payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
     event_id = payload.get("event_id") or f"{event_type}:{payment_entity.get('id', 'none')}"
@@ -218,10 +283,18 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
     rzp_order_id = payment_entity.get("order_id")
     rzp_payment_id = payment_entity.get("id")
     if event_type in ("payment.captured", "order.paid") and rzp_order_id:
-        payment = db.scalar(select(Payment).where(Payment.provider_order_id == rzp_order_id).with_for_update())
-        if payment:
-            order = db.scalar(select(Order).where(Order.id == payment.order_id).with_for_update())
-            if order:
+        pay_ref = db.scalar(select(Payment.id, Payment.order_id).where(Payment.provider_order_id == rzp_order_id))
+        pay_row_ro = db.scalar(select(Payment).where(Payment.provider_order_id == rzp_order_id))
+        if pay_row_ro:
+            # Always acquire Order lock BEFORE Payment lock to avoid deadlocks with verify endpoint
+            order = db.scalar(select(Order).where(Order.id == pay_row_ro.order_id).with_for_update())
+            payment = db.scalar(select(Payment).where(Payment.id == pay_row_ro.id).with_for_update())
+            if order and payment:
+                evt.processed = True
+                evt.processed_at = datetime.now(timezone.utc)
+                if order.status in ("CANCELLED", "REJECTED", "PAYMENT_FAILED"):
+                    db.commit()
+                    return {"status": "ignored_terminal_order", "event_id": event_id}
                 _finalize_confirmed_payment(
                     db,
                     order=order,
@@ -232,13 +305,18 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
                     actor_user_id=order.customer_id,
                     raw_summary={"webhook_event": event_type, "method": payment_entity.get("method")},
                 )
+                return {"status": "processed", "event_id": event_id}
 
     elif event_type == "payment.failed" and rzp_order_id:
-        payment = db.scalar(select(Payment).where(Payment.provider_order_id == rzp_order_id).with_for_update())
-        if payment and payment.status == "PENDING":
-            order = db.scalar(select(Order).where(Order.id == payment.order_id).with_for_update())
-            if order and order.status == "PAYMENT_PENDING":
+        pay_row_ro = db.scalar(select(Payment).where(Payment.provider_order_id == rzp_order_id))
+        if pay_row_ro:
+            order = db.scalar(select(Order).where(Order.id == pay_row_ro.order_id).with_for_update())
+            payment = db.scalar(select(Payment).where(Payment.id == pay_row_ro.id).with_for_update())
+            if payment and payment.status == "PENDING" and order and order.status == "PAYMENT_PENDING":
+                evt.processed = True
+                evt.processed_at = datetime.now(timezone.utc)
                 mark_payment_failed(db, order=order, payment=payment, reason=payment_entity.get("error_description") or "Webhook payment failed")
+                return {"status": "processed", "event_id": event_id}
 
     evt.processed = True
     evt.processed_at = datetime.now(timezone.utc)
@@ -254,6 +332,7 @@ def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: 
     order.payment_status = "FAILED"
     if order.status in ("CREATED", "PAYMENT_PENDING"):
         transition_order_status(db, order, "PAYMENT_FAILED", reason=reason)
+    rollback_unpaid_incentives(db, order)
 
     # Release reserved slot
     resv = db.scalar(select(SlotReservation).where(SlotReservation.order_id == order.id))
@@ -278,7 +357,15 @@ def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: 
     return order
 
 
-def record_razorpay_failure(db: Session, payload: RazorpayFailureRequest) -> OrderOut:
+def record_razorpay_failure(
+    db: Session,
+    payload: RazorpayFailureRequest,
+    *,
+    user_id: Optional[UUID] = None,
+    is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
+    guest_access_token: Optional[str] = None,
+) -> OrderOut:
     order = db.scalar(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
@@ -290,6 +377,15 @@ def record_razorpay_failure(db: Session, payload: RazorpayFailureRequest) -> Ord
     payment = db.scalar(select(Payment).where(Payment.order_id == order.id).with_for_update())
     if not payment:
         raise HTTPException(status_code=404, detail="Payment record not found")
+    _authorize_payment_actor(
+        order,
+        user_id=user_id,
+        is_staff=is_staff,
+        staff_canteen_id=staff_canteen_id,
+        guest_access_token=guest_access_token,
+        provider_order_id=payload.razorpay_order_id,
+        expected_provider_order_id=payment.provider_order_id,
+    )
     mark_payment_failed(db, order=order, payment=payment, reason=payload.reason)
     db.expire_all()
     loaded = db.scalar(
@@ -357,7 +453,10 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
     ):
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
 
-    payload = json.loads(raw_body.decode("utf-8"))
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Malformed Stripe webhook JSON payload") from exc
     event_type = payload.get("type", "unknown")
     event_id = payload.get("id") or f"evt_stripe_{event_type}"
     obj = payload.get("data", {}).get("object", {})
@@ -384,10 +483,16 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
 
     session_id = obj.get("id") if event_type.startswith("checkout.session.") else obj.get("metadata", {}).get("stripe_session_id")
     if event_type == "checkout.session.completed" and session_id:
-        payment = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe").with_for_update())
-        if payment:
-            order = db.scalar(select(Order).where(Order.id == payment.order_id).with_for_update())
-            if order:
+        pay_ro = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe"))
+        if pay_ro:
+            order = db.scalar(select(Order).where(Order.id == pay_ro.order_id).with_for_update())
+            payment = db.scalar(select(Payment).where(Payment.id == pay_ro.id).with_for_update())
+            if order and payment:
+                evt.processed = True
+                evt.processed_at = datetime.now(timezone.utc)
+                if order.status in ("CANCELLED", "REJECTED", "PAYMENT_FAILED"):
+                    db.commit()
+                    return {"status": "ignored_terminal_order", "event_id": event_id}
                 pi_id = obj.get("payment_intent") or session_id
                 _finalize_confirmed_payment(
                     db,
@@ -399,12 +504,17 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
                     actor_user_id=order.customer_id,
                     raw_summary={"webhook_event": event_type, "stripe_session_id": session_id},
                 )
+                return {"status": "processed", "event_id": event_id}
     elif event_type in ("checkout.session.expired", "payment_intent.payment_failed") and session_id:
-        payment = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe").with_for_update())
-        if payment and payment.status == "PENDING":
-            order = db.scalar(select(Order).where(Order.id == payment.order_id).with_for_update())
-            if order and order.status == "PAYMENT_PENDING":
+        pay_ro = db.scalar(select(Payment).where(Payment.provider_order_id == session_id, Payment.provider == "stripe"))
+        if pay_ro:
+            order = db.scalar(select(Order).where(Order.id == pay_ro.order_id).with_for_update())
+            payment = db.scalar(select(Payment).where(Payment.id == pay_ro.id).with_for_update())
+            if payment and payment.status == "PENDING" and order and order.status == "PAYMENT_PENDING":
+                evt.processed = True
+                evt.processed_at = datetime.now(timezone.utc)
                 mark_payment_failed(db, order=order, payment=payment, reason="Stripe webhook payment failed or expired")
+                return {"status": "processed", "event_id": event_id}
 
     evt.processed = True
     evt.processed_at = datetime.now(timezone.utc)
@@ -412,7 +522,15 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
     return {"status": "processed", "event_id": event_id}
 
 
-def record_stripe_failure(db: Session, payload: StripeFailureRequest) -> OrderOut:
+def record_stripe_failure(
+    db: Session,
+    payload: StripeFailureRequest,
+    *,
+    user_id: Optional[UUID] = None,
+    is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
+    guest_access_token: Optional[str] = None,
+) -> OrderOut:
     order = db.scalar(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
@@ -424,6 +542,15 @@ def record_stripe_failure(db: Session, payload: StripeFailureRequest) -> OrderOu
     payment = db.scalar(select(Payment).where(Payment.order_id == order.id).with_for_update())
     if not payment:
         raise HTTPException(status_code=404, detail="Payment record not found")
+    _authorize_payment_actor(
+        order,
+        user_id=user_id,
+        is_staff=is_staff,
+        staff_canteen_id=staff_canteen_id,
+        guest_access_token=guest_access_token,
+        provider_order_id=payload.stripe_session_id,
+        expected_provider_order_id=payment.provider_order_id,
+    )
     mark_payment_failed(db, order=order, payment=payment, reason=payload.reason)
     db.expire_all()
     loaded = db.scalar(
@@ -431,6 +558,86 @@ def record_stripe_failure(db: Session, payload: StripeFailureRequest) -> OrderOu
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
         .where(Order.id == order.id)
     )
+    return serialize_order(db, loaded)
+
+
+def retry_online_payment(
+    db: Session,
+    order_id: UUID,
+    method: str,
+    *,
+    user_id: Optional[UUID] = None,
+    is_staff: bool = False,
+    guest_access_token: Optional[str] = None,
+) -> OrderOut:
+    if method not in ("razorpay", "stripe"):
+        raise HTTPException(status_code=400, detail="Only razorpay or stripe can be retried online")
+    order = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == order_id)
+        .with_for_update()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    _authorize_payment_actor(order, user_id=user_id, is_staff=is_staff, guest_access_token=guest_access_token)
+    if order.payment_status == "CONFIRMED":
+        return serialize_order(db, order)
+    if order.status in ("CANCELLED", "REJECTED"):
+        raise HTTPException(status_code=409, detail="Cancelled or rejected orders cannot be retried")
+
+    canteen = db.get(Canteen, order.canteen_id)
+    if not canteen or not canteen.allow_online_payment:
+        raise HTTPException(status_code=400, detail="Online payment is disabled for this canteen")
+
+    if order.status == "PAYMENT_FAILED":
+        order.status = "PAYMENT_PENDING"
+        order.payment_status = "PENDING"
+        db.add(OrderStatusHistory(order_id=order.id, from_status="PAYMENT_FAILED", to_status="PAYMENT_PENDING", changed_by_user_id=user_id, reason="Customer initiated online payment retry"))
+
+    order.payment_method = method
+    provider_order_id = None
+    checkout_url = None
+    if method == "razorpay":
+        rzp = razorpay_gateway.create_order(amount_inr=order.total_amount, receipt_ref=f"{order.order_number}-R", notes={"order_number": order.order_number})
+        provider_order_id = rzp["id"]
+    else:
+        guest_q = f"?guest_token={guest_access_token}&" if guest_access_token else "?"
+        base_web = settings.PUBLIC_BASE_URL.rstrip("/")
+        sess = stripe_gateway.create_checkout_session(
+            amount_inr=order.total_amount,
+            order_number=order.order_number,
+            success_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_cancelled=1",
+        )
+        provider_order_id = sess["id"]
+        checkout_url = sess.get("url")
+
+    payment = db.scalar(select(Payment).where(Payment.order_id == order.id).with_for_update())
+    if not payment:
+        payment = Payment(
+            order_id=order.id,
+            provider=method,
+            method=method,
+            provider_order_id=provider_order_id,
+            amount=order.total_amount,
+            currency="INR",
+            status="PENDING",
+            gateway_metadata={"checkout_url": checkout_url} if checkout_url else {},
+        )
+        db.add(payment)
+    else:
+        payment.provider = method
+        payment.method = method
+        payment.provider_order_id = provider_order_id
+        payment.status = "PENDING"
+        payment.failure_reason = None
+        payment.gateway_metadata = {"checkout_url": checkout_url} if checkout_url else {}
+    db.flush()
+    db.add(PaymentTransaction(payment_id=payment.id, order_id=order.id, transaction_type="retry_initiate", amount=order.total_amount, status="PENDING", external_reference=provider_order_id))
+    db.commit()
+    db.expire_all()
+    loaded = db.scalar(select(Order).options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history)).where(Order.id == order.id))
     return serialize_order(db, loaded)
 
 

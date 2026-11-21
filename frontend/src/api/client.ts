@@ -50,6 +50,23 @@ api.interceptors.response.use(
   }
 );
 
+export function buildWsUrl(
+  path: string,
+  opts?: { token?: string | null; guestToken?: string | null }
+): string {
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  const base = (import.meta.env.VITE_API_BASE_URL || "/api/v1").replace(/\/$/, "");
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  const rawUrl =
+    base.startsWith("http://") || base.startsWith("https://")
+      ? `${base.replace(/^http/, "ws")}${cleanPath}`
+      : `${proto}://${window.location.host}${base}${cleanPath}`;
+  const url = new URL(rawUrl);
+  if (opts?.token) url.searchParams.set("token", opts.token);
+  if (opts?.guestToken) url.searchParams.set("guest_token", opts.guestToken);
+  return url.toString();
+}
+
 export function getApiError(err: unknown, fallback = "Request failed"): string {
   if (axios.isAxiosError(err)) {
     const detail = err.response?.data?.detail;

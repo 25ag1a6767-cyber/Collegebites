@@ -91,8 +91,10 @@ class StripeGateway:
         body = f"{stripe_session_id}|{stripe_payment_intent_id}".encode("utf-8")
         return hmac.new(self.secret_key.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
-    def verify_webhook_signature(self, *, raw_body: bytes, stripe_signature_header: str) -> bool:
-        """Verify Stripe-Signature header (`t=<timestamp>,v1=<hmac>`)."""
+    def verify_webhook_signature(
+        self, *, raw_body: bytes, stripe_signature_header: str, tolerance_seconds: int = 300
+    ) -> bool:
+        """Verify Stripe-Signature header (`t=<timestamp>,v1=<hmac>`) with timestamp replay tolerance."""
         parts: dict[str, str] = {}
         for item in stripe_signature_header.split(","):
             if "=" in item:
@@ -101,6 +103,12 @@ class StripeGateway:
         ts = parts.get("t")
         v1 = parts.get("v1")
         if not ts or not v1:
+            return False
+        try:
+            ts_int = int(ts)
+        except ValueError:
+            return False
+        if abs(int(time.time()) - ts_int) > tolerance_seconds:
             return False
         signed_payload = f"{ts}.".encode("utf-8") + raw_body
         expected = hmac.new(self.webhook_secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()

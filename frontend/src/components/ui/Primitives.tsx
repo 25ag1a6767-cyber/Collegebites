@@ -156,3 +156,90 @@ export function crowdBadgeTone(level?: string): "green" | "amber" | "red" | "sla
   if (level === "HIGH" || level === "VERY_HIGH") return "red";
   return "slate";
 }
+
+export const ConfirmModal: React.FC<{
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  confirmVariant?: "danger" | "primary" | "success";
+  onConfirm: () => void | Promise<void>;
+  onCancel: () => void;
+  busy?: boolean;
+}> = ({
+  open,
+  title,
+  message,
+  confirmLabel = "Confirm",
+  confirmVariant = "danger",
+  onConfirm,
+  onCancel,
+  busy = false,
+}) => (
+  <Modal open={open} onClose={onCancel} title={title} maxWidth="max-w-md">
+    <div className="space-y-4">
+      <p className="text-sm text-slate-700 leading-relaxed">{message}</p>
+      <div className="flex justify-end gap-2">
+        <Button size="sm" variant="outline" onClick={onCancel} disabled={busy}>
+          Cancel
+        </Button>
+        <Button size="sm" variant={confirmVariant} onClick={onConfirm} disabled={busy}>
+          {busy ? "Working..." : confirmLabel}
+        </Button>
+      </div>
+    </div>
+  </Modal>
+);
+
+export const InputPromptModal: React.FC<{
+  open: boolean;
+  title: string;
+  label: string;
+  placeholder?: string;
+  defaultValue?: string;
+  submitLabel?: string;
+  onSubmit: (value: string) => void | Promise<void>;
+  onCancel: () => void;
+  busy?: boolean;
+}> = ({
+  open,
+  title,
+  label,
+  placeholder,
+  defaultValue = "",
+  submitLabel = "Submit",
+  onSubmit,
+  onCancel,
+  busy = false,
+}) => {
+  const [val, setVal] = useState(defaultValue);
+  React.useEffect(() => {
+    if (open) setVal(defaultValue);
+  }, [open, defaultValue]);
+
+  return (
+    <Modal open={open} onClose={onCancel} title={title} maxWidth="max-w-md">
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!val.trim()) return;
+          void onSubmit(val.trim());
+        }}
+        className="space-y-4"
+      >
+        <div>
+          <label className="mb-1 block text-xs font-bold text-slate-700">{label}</label>
+          <Input autoFocus required value={val} onChange={(e) => setVal(e.target.value)} placeholder={placeholder} />
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={busy}>
+            Cancel
+          </Button>
+          <Button type="submit" size="sm" variant="primary" disabled={busy || !val.trim()}>
+            {busy ? "Saving..." : submitLabel}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+};

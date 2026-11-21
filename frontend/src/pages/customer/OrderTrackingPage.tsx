@@ -1,12 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clock, HelpCircle, PackageCheck, Utensils, XCircle } from "lucide-react";
-import { api, getApiError } from "../../api/client";
+import { CheckCircle2, Clock, HelpCircle, PackageCheck, RefreshCw, Utensils, XCircle } from "lucide-react";
+import { api, buildWsUrl, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Order, ReceiptSnapshot } from "../../types";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
-import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
+import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
 
 const STEPS = [
   { key: "PAYMENT_CONFIRMED", label: "Payment Verified" },
@@ -23,10 +23,13 @@ export const OrderTrackingPage: React.FC = () => {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { pushToast } = useToast();
-  const { guestOrderTokens } = useAppStore();
+  const { accessToken, guestOrderTokens } = useAppStore();
 
   const guestToken = searchParams.get("guest_token") || (orderNumber ? guestOrderTokens[orderNumber] : undefined);
   const [manualGuestToken, setManualGuestToken] = useState(guestToken || "");
+  const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const handledStripeRef = useRef<string | null>(null);
   const effectiveToken = guestToken || manualGuestToken || undefined;
   const querySuffix = effectiveToken ? `?guest_token=${encodeURIComponent(effectiveToken)}` : "";
 
@@ -43,29 +46,48 @@ export const OrderTrackingPage: React.FC = () => {
     queryFn: async () => (await api.get(`/tokens/receipts/${orderNumber}${querySuffix}`)).data,
   });
 
-  // Complete live Stripe redirect verification when returning from Stripe Checkout
+  // Complete or record cancelled Stripe Checkout redirect
   useEffect(() => {
     const stripeSid = searchParams.get("stripe_session_id");
-    if (!stripeSid || !order || order.payment_status === "CONFIRMED") return;
-    api
-      .post("/payments/stripe/verify", {
-        order_id: order.id,
-        stripe_session_id: stripeSid,
-        payment_method: "card",
-      })
-      .then(() => {
-        pushToast("Stripe payment verified! Token issued.", "success");
-        refetch();
-        refetchReceipt();
-      })
-      .catch((err) => pushToast(getApiError(err, "Stripe session verification pending webhook"), "info"));
-  }, [searchParams, order, refetch, refetchReceipt, pushToast]);
+    const stripeCancelled = searchParams.get("stripe_cancelled");
+    if (!order || order.payment_status === "CONFIRMED") return;
+    if (stripeCancelled === "1" && handledStripeRef.current !== "cancelled" && order.status === "PAYMENT_PENDING") {
+      handledStripeRef.current = "cancelled";
+      api
+        .post(`/payments/stripe/fail${querySuffix}`, {
+          order_id: order.id,
+          stripe_session_id: order.stripe_session_id,
+          reason: "Stripe checkout cancelled by customer",
+        })
+        .then(() => {
+          pushToast("Stripe checkout cancelled. You can retry payment anytime below.", "info");
+          refetch();
+        })
+        .catch(() => {});
+      return;
+    }
+    if (stripeSid && handledStripeRef.current !== stripeSid) {
+      handledStripeRef.current = stripeSid;
+      api
+        .post("/payments/stripe/verify", {
+          order_id: order.id,
+          stripe_session_id: stripeSid,
+          payment_method: "card",
+        })
+        .then(() => {
+          pushToast("Stripe payment verified! Token issued.", "success");
+          refetch();
+          refetchReceipt();
+        })
+        .catch((err) => pushToast(getApiError(err, "Stripe session verification pending webhook"), "info"));
+    }
+  }, [searchParams, order, querySuffix, refetch, refetchReceipt, pushToast]);
 
   // WebSocket real-time updates
   useEffect(() => {
     if (!order?.id) return;
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
-    const wsUrl = `${proto}://${window.location.host}/api/v1/ws/orders/${order.id}`;
+    if (!accessToken && !effectiveToken) return;
+    const wsUrl = buildWsUrl(`/ws/orders/${order.id}`, { token: accessToken, guestToken: effectiveToken });
     let ws: WebSocket | null = null;
     try {
       ws = new WebSocket(wsUrl);
@@ -79,19 +101,56 @@ export const OrderTrackingPage: React.FC = () => {
     return () => {
       ws?.close();
     };
-  }, [order?.id, orderNumber, qc]);
+  }, [order?.id, orderNumber, accessToken, effectiveToken, qc]);
 
-  const handleCancelOrder = async () => {
+  const handleConfirmCancelOrder = async () => {
     if (!order) return;
-    if (!window.confirm("Cancel this order? Note: Paid orders cannot be refunded through CollegeBites.")) return;
+    setBusy(true);
     try {
       await api.post(`/orders/${order.id}/cancel${querySuffix}`, {
         reason: "Cancelled by customer before preparation",
       });
       pushToast("Order cancelled (payment record retained per policy)", "info");
+      setConfirmCancelOpen(false);
       refetch();
     } catch (err) {
       pushToast(getApiError(err, "Cannot cancel order at this stage"), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRetryOnlinePayment = async (method: "razorpay" | "stripe") => {
+    if (!order) return;
+    setBusy(true);
+    try {
+      const res = await api.post<Order>(`/payments/retry/${order.id}${querySuffix}`, { payment_method: method });
+      if (method === "stripe" && res.data.stripe_checkout_url && res.data.stripe_checkout_url.startsWith("http") && !res.data.stripe_checkout_url.includes("test-checkout")) {
+        window.location.href = res.data.stripe_checkout_url;
+        return;
+      }
+      if (method === "stripe" && res.data.stripe_session_id) {
+        await api.post("/payments/stripe/verify", {
+          order_id: res.data.id,
+          stripe_session_id: res.data.stripe_session_id,
+          payment_method: "card",
+        });
+      } else if (res.data.razorpay_order_id) {
+        await api.post("/payments/razorpay/verify", {
+          order_id: res.data.id,
+          razorpay_order_id: res.data.razorpay_order_id,
+          razorpay_payment_id: `pay_retry_${Date.now()}`,
+          razorpay_signature: "test_mode_signature",
+          method_detail: "upi",
+        });
+      }
+      pushToast("Payment verified! Pickup token issued.", "success");
+      refetch();
+      refetchReceipt();
+    } catch (err) {
+      pushToast(getApiError(err, "Retry failed"), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -198,8 +257,18 @@ export const OrderTrackingPage: React.FC = () => {
             <Utensils className="h-4 w-4" /> Est. Ready: ~{order.estimated_prep_minutes} mins
           </div>
           <div className="flex flex-wrap gap-2">
+            {order.payment_status !== "CONFIRMED" && ["PAYMENT_PENDING", "PAYMENT_FAILED"].includes(order.status) && (
+              <>
+                <Button size="sm" variant="primary" disabled={busy} onClick={() => void handleRetryOnlinePayment("razorpay")}>
+                  <RefreshCw className="h-3.5 w-3.5" /> Pay via Razorpay
+                </Button>
+                <Button size="sm" variant="secondary" disabled={busy} onClick={() => void handleRetryOnlinePayment("stripe")}>
+                  <RefreshCw className="h-3.5 w-3.5" /> Pay via Stripe
+                </Button>
+              </>
+            )}
             {["PAYMENT_PENDING", "PLACED", "ACCEPTED"].includes(order.status) && (
-              <Button size="sm" variant="outline" onClick={handleCancelOrder}>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirmCancelOpen(true)}>
                 Cancel Order
               </Button>
             )}
@@ -226,6 +295,16 @@ export const OrderTrackingPage: React.FC = () => {
           Pickup token, QR code, and complete receipt are generated automatically once backend payment confirmation succeeds.
         </Card>
       )}
+
+      <ConfirmModal
+        open={confirmCancelOpen}
+        title={`Cancel Order ${order.order_number}?`}
+        message="Are you sure you want to cancel this order? Note: Paid orders cannot be refunded through the CollegeBites app per college policy."
+        confirmLabel="Confirm Cancellation"
+        busy={busy}
+        onCancel={() => setConfirmCancelOpen(false)}
+        onConfirm={handleConfirmCancelOrder}
+      />
     </div>
   );
 };

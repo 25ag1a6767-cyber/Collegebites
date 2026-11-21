@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.security import generate_signed_qr_token
+from app.core.time_utils import today_college
 from app.models.college import Canteen
 from app.models.order import Order
 from app.models.payment import OrderQRCode, OrderTokenSequence, PickupToken
@@ -25,7 +26,7 @@ def generate_token_and_qr_for_confirmed_order(db: Session, order: Order) -> tupl
 
     canteen = db.get(Canteen, order.canteen_id)
     prefix = (canteen.token_prefix if canteen and canteen.token_prefix else "A").upper()
-    service_day = date.today()
+    service_day = today_college()
 
     if db.bind and db.bind.dialect.name == "postgresql":
         db.execute(

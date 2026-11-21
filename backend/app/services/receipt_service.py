@@ -1,5 +1,6 @@
 import base64
 import io
+import ipaddress
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.core.security import mask_mobile, sha256_hex
+from app.core.time_utils import get_college_tz
 from app.integrations.printers.escpos import build_escpos_receipt_bytes, send_escpos_network_tcp
 from app.models.auth import User
 from app.models.college import Canteen, Counter
@@ -85,8 +87,8 @@ def create_receipt_for_order(db: Session, order: Order, pickup_token: PickupToke
             ],
         })
 
-    confirmed_ts = payment.confirmed_at or datetime.now(timezone.utc)
-    est_pickup_ts = order.estimated_pickup_at or confirmed_ts
+    confirmed_ts = (payment.confirmed_at or datetime.now(timezone.utc)).astimezone(get_college_tz(college.college_timezone))
+    est_pickup_ts = (order.estimated_pickup_at or payment.confirmed_at or datetime.now(timezone.utc)).astimezone(get_college_tz(college.college_timezone))
     receipt_number = f"REC-{order.order_number[3:]}" if order.order_number.startswith("CB-") else f"REC-{order.order_number}"
 
     snapshot: dict[str, Any] = {
@@ -144,6 +146,7 @@ def _resolve_order_and_receipt(
     *,
     user_id: Optional[UUID] = None,
     is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
     guest_access_token: Optional[str] = None,
 ) -> tuple[Order, Receipt]:
     try:
@@ -155,7 +158,10 @@ def _resolve_order_and_receipt(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if not is_staff:
+    if is_staff:
+        if staff_canteen_id and order.canteen_id != staff_canteen_id:
+            raise HTTPException(status_code=403, detail="Staff user is not authorized for this canteen")
+    else:
         if order.is_guest:
             if not guest_access_token or order.guest_access_token_hash != sha256_hex(guest_access_token):
                 raise HTTPException(status_code=403, detail="Valid guest access token required")
@@ -174,10 +180,16 @@ def get_receipt_payload(
     *,
     user_id: Optional[UUID] = None,
     is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
     guest_access_token: Optional[str] = None,
 ) -> dict[str, Any]:
     order, receipt = _resolve_order_and_receipt(
-        db, order_id_or_number, user_id=user_id, is_staff=is_staff, guest_access_token=guest_access_token
+        db,
+        order_id_or_number,
+        user_id=user_id,
+        is_staff=is_staff,
+        staff_canteen_id=staff_canteen_id,
+        guest_access_token=guest_access_token,
     )
     snap = dict(receipt.receipt_snapshot)
     snap["order_status"] = order.status
@@ -197,17 +209,30 @@ def generate_receipt_pdf_bytes(
     is_reprint_view: bool = False,
     user_id: Optional[UUID] = None,
     is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
     guest_access_token: Optional[str] = None,
 ) -> tuple[bytes, str]:
     snap = get_receipt_payload(
-        db, order_id_or_number, user_id=user_id, is_staff=is_staff, guest_access_token=guest_access_token
+        db,
+        order_id_or_number,
+        user_id=user_id,
+        is_staff=is_staff,
+        staff_canteen_id=staff_canteen_id,
+        guest_access_token=guest_access_token,
     )
     show_reprint = is_reprint_view or snap.get("reprint_count", 0) > 0
 
     buf = io.BytesIO()
-    if paper_format == "80mm":
+    if paper_format == "58mm":
+        page_w = 58 * mm
+        est_lines = sum(3 + len(it.get("customizations", [])) for it in snap.get("items", []))
+        page_h = max(210 * mm, (140 + est_lines * 5.5) * mm)
+        c = canvas.Canvas(buf, pagesize=(page_w, page_h))
+        margin = 3 * mm
+    elif paper_format == "80mm":
         page_w = 80 * mm
-        page_h = max(210 * mm, (145 + len(snap.get("items", [])) * 18) * mm)
+        est_lines = sum(2 + len(it.get("customizations", [])) for it in snap.get("items", []))
+        page_h = max(210 * mm, (140 + est_lines * 5.5) * mm)
         c = canvas.Canvas(buf, pagesize=(page_w, page_h))
         margin = 5 * mm
     else:
@@ -217,80 +242,115 @@ def generate_receipt_pdf_bytes(
 
     y = page_h - margin
     center_x = page_w / 2.0
+    max_text_w = page_w - (margin * 2)
 
-    def draw_center(text: str, font: str = "Helvetica-Bold", size: int = 11, dy: float = 5 * mm, color=colors.black):
+    def ensure_space(needed: float = 12 * mm):
+        nonlocal y
+        if paper_format == "a4" and y - needed < margin:
+            c.showPage()
+            y = page_h - margin
+
+    def _split_pdf_text(text: str, font: str, size: float, limit_w: float) -> list[str]:
+        if c.stringWidth(text, font, size) <= limit_w:
+            return [text]
+        words = text.split(" ")
+        lines: list[str] = []
+        cur = ""
+        for w in words:
+            cand = f"{cur} {w}".strip()
+            if c.stringWidth(cand, font, size) <= limit_w:
+                cur = cand
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        return lines or [text[:40]]
+
+    def draw_center(text: str, font: str = "Helvetica-Bold", size: float = 11, dy: float = 4.8 * mm, color=colors.black):
         nonlocal y
         c.setFillColor(color)
         c.setFont(font, size)
-        c.drawCentredString(center_x, y, text)
-        y -= dy
+        for line in _split_pdf_text(text, font, size, max_text_w):
+            ensure_space(dy)
+            c.drawCentredString(center_x, y, line)
+            y -= dy
 
-    def draw_lr(left: str, right: str, font: str = "Helvetica", size: int = 9, dy: float = 4.5 * mm):
+    def draw_lr(left: str, right: str, font: str = "Helvetica", size: float = 9, dy: float = 4.4 * mm):
         nonlocal y
         c.setFillColor(colors.black)
         c.setFont(font, size)
-        c.drawString(margin, y, left)
-        c.drawRightString(page_w - margin, y, right)
-        y -= dy
+        right_w = c.stringWidth(right, font, size) if right else 0
+        avail_left = max(16 * mm, max_text_w - right_w - 3 * mm)
+        left_lines = _split_pdf_text(left, font, size, avail_left)
+        for i, line in enumerate(left_lines):
+            ensure_space(dy)
+            c.drawString(margin, y, line)
+            if i == 0 and right:
+                c.drawRightString(page_w - margin, y, right)
+            y -= dy
 
     def draw_sep():
         nonlocal y
+        ensure_space(5 * mm)
         c.setStrokeColor(colors.grey)
         c.setLineWidth(0.5)
         c.line(margin, y, page_w - margin, y)
         y -= 4 * mm
 
-    draw_center("COLLEGEBITES", "Helvetica-Bold", 14 if paper_format == "a4" else 11, 5.5 * mm)
-    draw_center(snap["college_name"].upper(), "Helvetica-Bold", 10 if paper_format == "a4" else 8.5, 4.5 * mm)
-    draw_center(f"{snap['canteen_name']} ({snap.get('canteen_location', '')})", "Helvetica", 8.5, 4.5 * mm)
+    base_font_sz = 7.2 if paper_format == "58mm" else 8.5 if paper_format == "80mm" else 9
+    draw_center("COLLEGEBITES", "Helvetica-Bold", 14 if paper_format == "a4" else 10.5, 5.2 * mm)
+    draw_center(snap["college_name"].upper(), "Helvetica-Bold", 10 if paper_format == "a4" else 8, 4.3 * mm)
+    draw_center(f"{snap['canteen_name']} ({snap.get('canteen_location', '')})", "Helvetica", base_font_sz, 4 * mm)
     if show_reprint:
-        draw_center(f"*** REPRINT #{max(1, snap.get('reprint_count', 1))} ***", "Helvetica-Bold", 10, 5 * mm, colors.red)
+        draw_center(f"*** REPRINT #{max(1, snap.get('reprint_count', 1))} ***", "Helvetica-Bold", 9.5, 5 * mm, colors.red)
     draw_sep()
 
-    draw_lr(f"ORDER NO: {snap['order_number']}", f"RECEIPT: {snap['receipt_number']}", "Helvetica-Bold", 8.5)
-    draw_center("PICKUP TOKEN", "Helvetica-Bold", 9, 6 * mm)
-    draw_center(snap["pickup_token"], "Helvetica-Bold", 24 if paper_format == "a4" else 18, 9 * mm)
+    draw_lr(f"ORDER NO: {snap['order_number']}", f"REC: {snap['receipt_number']}", "Helvetica-Bold", base_font_sz)
+    draw_center("PICKUP TOKEN", "Helvetica-Bold", 8.5, 5.5 * mm)
+    draw_center(snap["pickup_token"], "Helvetica-Bold", 24 if paper_format == "a4" else 17, 8.5 * mm)
 
-    # Crisp QR code image
     qr_png = render_qr_png_bytes(snap["qr_payload"], box_size=8)
-    qr_size = 34 * mm if paper_format == "a4" else 28 * mm
+    qr_size = 34 * mm if paper_format == "a4" else (24 * mm if paper_format == "58mm" else 28 * mm)
+    ensure_space(qr_size + 5 * mm)
     c.drawImage(ImageReader(io.BytesIO(qr_png)), center_x - qr_size / 2, y - qr_size + 2 * mm, width=qr_size, height=qr_size)
     y -= qr_size + 3 * mm
     draw_sep()
 
-    draw_lr(f"CUSTOMER: {snap['customer_name']} ({snap['customer_type_label']})", f"MOBILE: {snap.get('customer_mobile_masked') or 'N/A'}", "Helvetica", 8.5)
-    draw_lr(f"DATE: {snap['order_date']}  TIME: {snap['order_time']}", f"EST PICKUP: {snap['estimated_pickup_time']}", "Helvetica", 8.5)
-    draw_lr(f"COUNTER: {snap['counter_name']}", f"TYPE: {snap['order_type'].upper()}", "Helvetica-Bold", 8.5)
+    draw_lr(f"CUSTOMER: {snap['customer_name']} ({snap['customer_type_label']})", f"MOBILE: {snap.get('customer_mobile_masked') or 'N/A'}", "Helvetica", base_font_sz)
+    draw_lr(f"DATE: {snap['order_date']}  TIME: {snap['order_time']}", f"EST PICKUP: {snap['estimated_pickup_time']}", "Helvetica", base_font_sz)
+    draw_lr(f"COUNTER: {snap['counter_name']}", f"TYPE: {snap['order_type'].upper()}", "Helvetica-Bold", base_font_sz)
     draw_sep()
 
-    draw_lr("ORDERED ITEMS", "QTY / AMOUNT", "Helvetica-Bold", 9)
+    draw_lr("ORDERED ITEMS", "QTY / AMOUNT", "Helvetica-Bold", base_font_sz)
     for idx, item in enumerate(snap.get("items", []), start=1):
         var_label = f" ({item['variant_name']})" if item.get("variant_name") else ""
         draw_lr(
             f"{idx}. {item['item_name']}{var_label}",
             f"{item['quantity']} x Rs.{Decimal(item['unit_price']):.2f} = Rs.{Decimal(item['line_subtotal']):.2f}",
             "Helvetica-Bold",
-            8.5,
-            4.2 * mm,
+            base_font_sz,
+            4.0 * mm,
         )
         for cust in item.get("customizations", []):
             price_txt = f"Rs.{Decimal(cust['total_price']):.2f}" if Decimal(cust["total_price"]) > 0 else "Included"
-            draw_lr(f"    {cust['option_name']}: {cust['option_value']}", price_txt, "Helvetica", 8, 3.8 * mm)
+            draw_lr(f"    {cust['option_name']}: {cust['option_value']}", price_txt, "Helvetica", max(6.8, base_font_sz - 0.7), 3.6 * mm)
         if item.get("special_instructions"):
-            draw_lr(f"    Note: {item['special_instructions']}", "", "Helvetica-Oblique", 7.8, 3.8 * mm)
+            draw_lr(f"    Note: {item['special_instructions']}", "", "Helvetica-Oblique", max(6.8, base_font_sz - 0.8), 3.6 * mm)
 
     draw_sep()
-    draw_lr("SUBTOTAL", f"Rs.{Decimal(snap['subtotal_amount']):.2f}", "Helvetica", 9)
-    draw_lr("DISCOUNT", f"-Rs.{Decimal(snap['discount_amount']):.2f}", "Helvetica", 9)
-    draw_lr("TAX", f"Rs.{Decimal(snap['tax_amount']):.2f}", "Helvetica", 9)
-    draw_lr("TOTAL PAID", f"Rs.{Decimal(snap['total_paid']):.2f}", "Helvetica-Bold", 11, 5.5 * mm)
-    draw_lr(f"PAYMENT STATUS: {snap['payment_status']}", f"METHOD: {snap['payment_method'].upper()}", "Helvetica-Bold", 8.5)
-    draw_lr(f"PAYMENT REF: {snap['payment_reference']}", f"STATUS: {snap['order_status']}", "Helvetica", 8)
+    draw_lr("SUBTOTAL", f"Rs.{Decimal(snap['subtotal_amount']):.2f}", "Helvetica", base_font_sz)
+    draw_lr("DISCOUNT", f"-Rs.{Decimal(snap['discount_amount']):.2f}", "Helvetica", base_font_sz)
+    draw_lr("TAX", f"Rs.{Decimal(snap['tax_amount']):.2f}", "Helvetica", base_font_sz)
+    draw_lr("TOTAL PAID", f"Rs.{Decimal(snap['total_paid']):.2f}", "Helvetica-Bold", base_font_sz + 1.5, 5.2 * mm)
+    draw_lr(f"PAYMENT: {snap['payment_status']}", f"METHOD: {snap['payment_method'].upper()}", "Helvetica-Bold", base_font_sz)
+    draw_lr(f"PAY REF: {snap['payment_reference']}", f"STATUS: {snap['order_status']}", "Helvetica", max(6.8, base_font_sz - 0.5))
     draw_sep()
 
     for line in snap.get("pickup_instructions", []):
-        draw_center(line, "Helvetica", 7.5, 3.6 * mm)
-    draw_center("THANK YOU FOR ORDERING WITH COLLEGEBITES!", "Helvetica-Bold", 8.5, 4 * mm)
+        draw_center(line, "Helvetica", max(6.5, base_font_sz - 1), 3.5 * mm)
+    draw_center("THANK YOU FOR ORDERING WITH COLLEGEBITES!", "Helvetica-Bold", base_font_sz, 4 * mm)
 
     c.showPage()
     c.save()
@@ -324,6 +384,19 @@ def get_escpos_payload(
     }
 
 
+def _validate_printer_host(host: str) -> str:
+    clean = host.strip()
+    if not clean or clean.lower() in ("localhost", "0.0.0.0"):
+        raise HTTPException(status_code=400, detail="Disallowed printer host target")
+    try:
+        ip = ipaddress.ip_address(clean)
+        if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+            raise HTTPException(status_code=400, detail="Disallowed printer IP range")
+    except ValueError:
+        pass
+    return clean
+
+
 def trigger_print_job(
     db: Session,
     order_id_or_number: str,
@@ -332,24 +405,45 @@ def trigger_print_job(
     actor_user_id: Optional[UUID],
     actor_label: str,
     is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
     guest_access_token: Optional[str] = None,
 ) -> ReceiptPrintJob:
     order, receipt = _resolve_order_and_receipt(
-        db, order_id_or_number, user_id=actor_user_id, is_staff=is_staff, guest_access_token=guest_access_token
+        db,
+        order_id_or_number,
+        user_id=actor_user_id,
+        is_staff=is_staff,
+        staff_canteen_id=staff_canteen_id,
+        guest_access_token=guest_access_token,
     )
+    receipt = db.scalar(select(Receipt).where(Receipt.id == receipt.id).with_for_update())
 
-    # First print is original if no prior successful print exists, otherwise automatically mark reprint
-    prior_prints = db.scalar(select(func.count(ReceiptPrintHistory.id)).where(ReceiptPrintHistory.receipt_id == receipt.id)) or 0
+    if payload.printer_target == "network_escpos" and not is_staff:
+        raise HTTPException(status_code=403, detail="Only authorized canteen staff may dispatch jobs to network thermal printers")
+
+    # First print is original if no prior completed print exists, otherwise automatically mark reprint
+    prior_prints = (
+        db.scalar(
+            select(func.count(ReceiptPrintHistory.id)).where(
+                ReceiptPrintHistory.receipt_id == receipt.id,
+                ReceiptPrintHistory.status == "completed",
+            )
+        )
+        or 0
+    )
     is_reprint = payload.is_reprint or prior_prints > 0
     if is_reprint:
         receipt.reprint_count += 1
 
+    resolved_host = _validate_printer_host(payload.network_host) if (payload.printer_target == "network_escpos" and payload.network_host) else None
     job = ReceiptPrintJob(
         receipt_id=receipt.id,
         order_id=order.id,
         printer_target=payload.printer_target,
         printer_name=payload.printer_name,
         paper_width=payload.paper_width,
+        network_host=resolved_host,
+        network_port=payload.network_port if payload.printer_target == "network_escpos" else None,
         is_reprint=is_reprint,
         status="queued",
         requested_by_user_id=actor_user_id,
@@ -359,7 +453,7 @@ def trigger_print_job(
 
     now = datetime.now(timezone.utc)
     if payload.printer_target == "network_escpos":
-        host = payload.network_host or settings.DEFAULT_PRINTER_IP
+        host = resolved_host or settings.DEFAULT_PRINTER_IP
         port = payload.network_port or settings.DEFAULT_PRINTER_PORT
         if not settings.NETWORK_PRINTER_ENABLED and not payload.network_host:
             job.status = "failed"
@@ -420,8 +514,8 @@ def retry_print_job(db: Session, job_id: UUID, actor_user_id: UUID, actor_label:
     job.retry_count += 1
 
     if job.printer_target == "network_escpos":
-        host = settings.DEFAULT_PRINTER_IP
-        port = settings.DEFAULT_PRINTER_PORT
+        host = job.network_host or settings.DEFAULT_PRINTER_IP
+        port = job.network_port or settings.DEFAULT_PRINTER_PORT
         try:
             esc_bytes = build_escpos_receipt_bytes(
                 receipt.receipt_snapshot,

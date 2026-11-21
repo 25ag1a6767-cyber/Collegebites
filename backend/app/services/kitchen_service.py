@@ -15,25 +15,30 @@ from app.schemas.operations import DelayReportRequest, ItemUnavailableRequest
 from app.schemas.order import OrderOut
 from app.services.audit_service import record_audit_log
 from app.services.inventory_service import refresh_food_item_ingredient_sufficiency
-from app.services.order_service import cancel_or_reject_order, serialize_order, transition_order_status
-from app.websockets import emit_order_event_sync
+from app.services.notification_service import notify_customer_order_event
+from app.services.order_service import cancel_or_reject_order, serialize_order, serialize_orders_batch, transition_order_status
+from app.websockets import emit_order_event_sync, ws_manager
 
 KITCHEN_ACTIVE_STATUSES = ("PLACED", "ACCEPTED", "PREPARING", "READY")
 
 
-def list_kitchen_orders(db: Session, canteen_id: UUID, status_filter: Optional[str] = None) -> list[OrderOut]:
+def list_kitchen_orders(
+    db: Session, canteen_id: UUID, status_filter: Optional[str] = None, kitchen_id: Optional[UUID] = None
+) -> list[OrderOut]:
     stmt = (
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
         .where(Order.canteen_id == canteen_id)
         .order_by(Order.created_at.asc())
     )
+    if kitchen_id:
+        stmt = stmt.where(Order.kitchen_id == kitchen_id)
     if status_filter:
         stmt = stmt.where(Order.status == status_filter)
     else:
         stmt = stmt.where(Order.status.in_(KITCHEN_ACTIVE_STATUSES))
     orders = db.scalars(stmt).all()
-    return [serialize_order(db, o) for o in orders]
+    return serialize_orders_batch(db, list(orders))
 
 
 def accept_order(db: Session, order_id: UUID, staff_user_id: UUID) -> OrderOut:
@@ -46,6 +51,13 @@ def accept_order(db: Session, order_id: UUID, staff_user_id: UUID) -> OrderOut:
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     transition_order_status(db, order, "ACCEPTED", actor_user_id=staff_user_id, reason="Accepted by kitchen")
+    notify_customer_order_event(
+        db,
+        order,
+        event_type="order_accepted",
+        title="Order Accepted by Kitchen",
+        message=f"Your order {order.order_number} has been accepted and queued for preparation.",
+    )
     record_audit_log(db, action="kitchen.order_accepted", entity_type="order", entity_id=order.order_number, actor_user_id=staff_user_id)
     db.commit()
     db.expire_all()
@@ -68,6 +80,13 @@ def start_preparing_order(db: Session, order_id: UUID, staff_user_id: UUID) -> O
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     transition_order_status(db, order, "PREPARING", actor_user_id=staff_user_id, reason="Kitchen started preparation")
+    notify_customer_order_event(
+        db,
+        order,
+        event_type="order_preparing",
+        title="Preparation Started",
+        message=f"Chefs started preparing your order {order.order_number}.",
+    )
     record_audit_log(db, action="kitchen.order_preparing", entity_type="order", entity_id=order.order_number, actor_user_id=staff_user_id)
     db.commit()
     db.expire_all()
@@ -122,6 +141,14 @@ def report_order_delay(db: Session, order_id: UUID, payload: DelayReportRequest,
     order.delay_reason = payload.reason
     base_pickup = order.estimated_pickup_at or datetime.now(timezone.utc)
     order.estimated_pickup_at = base_pickup + timedelta(minutes=payload.additional_minutes)
+    notify_customer_order_event(
+        db,
+        order,
+        event_type="order_delayed",
+        title=f"Order Delayed +{payload.additional_minutes} min",
+        message=f"Order {order.order_number} delayed by {payload.additional_minutes} mins ({payload.reason}).",
+        send_external=True,
+    )
     record_audit_log(
         db,
         action="kitchen.order_delayed",
@@ -162,12 +189,20 @@ def toggle_item_availability_from_kitchen(
         details={"name": item.name, "is_available": payload.is_available, "reason": payload.reason},
     )
     db.commit()
+    ws_manager.schedule_broadcast(
+        f"board:{item.canteen_id}",
+        {"event": "menu.availability_changed", "canteen_id": str(item.canteen_id), "data": {"food_item_id": str(item.id), "is_available": item.is_available}},
+    )
+    ws_manager.schedule_broadcast(
+        f"kitchen:{item.canteen_id}",
+        {"event": "menu.availability_changed", "canteen_id": str(item.canteen_id), "data": {"food_item_id": str(item.id), "is_available": item.is_available}},
+    )
     return {"id": str(item.id), "name": item.name, "is_available": item.is_available}
 
 
 def reject_order_from_kitchen(db: Session, order_id: UUID, reason: str, staff_user_id: UUID) -> OrderOut:
     """Reject an order from kitchen before handover while preserving immutable payment records (no refunds)."""
-    return cancel_or_reject_order(
+    out = cancel_or_reject_order(
         db,
         order_id,
         cancellation_type="rejected",
@@ -175,6 +210,18 @@ def reject_order_from_kitchen(db: Session, order_id: UUID, reason: str, staff_us
         actor_user_id=staff_user_id,
         is_staff=True,
     )
+    order = db.get(Order, order_id)
+    if order:
+        notify_customer_order_event(
+            db,
+            order,
+            event_type="order_rejected",
+            title=f"Order {order.order_number} Rejected",
+            message=f"Rejected by kitchen ({reason}). Payment record is retained; contact college finance for exceptional adjustments.",
+            send_external=True,
+        )
+        db.commit()
+    return out
 
 
 def list_canteen_ingredients_for_kitchen(db: Session, canteen_id: UUID) -> list[dict]:
@@ -240,6 +287,14 @@ def report_ingredient_unavailable(db: Session, inventory_item_id: UUID, reason: 
         details={"ingredient": ing.name if ing else None, "reason": reason, "blocked_items": blocked},
     )
     db.commit()
+    ws_manager.schedule_broadcast(
+        f"board:{inv.canteen_id}",
+        {"event": "menu.availability_changed", "canteen_id": str(inv.canteen_id), "data": {"blocked_food_items": blocked}},
+    )
+    ws_manager.schedule_broadcast(
+        f"kitchen:{inv.canteen_id}",
+        {"event": "menu.availability_changed", "canteen_id": str(inv.canteen_id), "data": {"blocked_food_items": blocked}},
+    )
     return {
         "inventory_item_id": str(inv.id),
         "ingredient_name": ing.name if ing else "",

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
@@ -9,10 +10,33 @@ from sqlalchemy.orm import Session
 from app.integrations.email_provider import send_email
 from app.integrations.expo_push_provider import send_expo_push
 from app.integrations.sms_provider import send_sms_or_whatsapp
-from app.models.auth import User
+from app.models.auth import CustomerProfile, User
 from app.models.engagement import Announcement, Notification, NotificationPreference
 from app.models.order import Order
 from app.websockets import emit_user_notification_sync
+
+logger = logging.getLogger("collegebites.notifications")
+
+
+def _safe_send_email(to_email: str, subject: str, body: str) -> None:
+    try:
+        send_email(to_email, subject, body)
+    except Exception as exc:
+        logger.warning("Non-fatal email delivery failure to %s: %s", to_email, exc)
+
+
+def _safe_send_sms(phone: str, msg: str, channel: str = "sms") -> None:
+    try:
+        send_sms_or_whatsapp(phone, msg, channel)
+    except Exception as exc:
+        logger.warning("Non-fatal %s delivery failure to %s: %s", channel, phone, exc)
+
+
+def _safe_send_push(token: str, title: str, msg: str, data: Optional[dict] = None) -> None:
+    try:
+        send_expo_push(token, title, msg, data or {})
+    except Exception as exc:
+        logger.warning("Non-fatal push delivery failure: %s", exc)
 
 
 def _create_notification(
@@ -44,32 +68,48 @@ def _create_notification(
     return n
 
 
+def _dispatch_user_notifications(
+    db: Session,
+    *,
+    order: Order,
+    title: str,
+    msg: str,
+    event_type: str,
+    send_external: bool = True,
+) -> None:
+    if order.customer_id:
+        pref = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == order.customer_id))
+        cust_prof = db.scalar(select(CustomerProfile).where(CustomerProfile.user_id == order.customer_id))
+        opt_in = True if cust_prof is None else cust_prof.notification_opt_in
+        if not pref or pref.in_app_enabled:
+            _create_notification(
+                db,
+                user_id=order.customer_id,
+                canteen_id=order.canteen_id,
+                order_id=order.id,
+                title=title,
+                message=msg,
+                event_type=event_type,
+            )
+        if not opt_in or not send_external:
+            return
+        user = db.get(User, order.customer_id)
+        if user and user.email and (not pref or pref.email_enabled):
+            _safe_send_email(user.email, title, msg)
+        if user and user.phone and (not pref or pref.sms_enabled):
+            _safe_send_sms(user.phone, msg, "sms")
+        if user and user.phone and pref and pref.whatsapp_enabled:
+            _safe_send_sms(user.phone, msg, "whatsapp")
+        if pref and pref.push_enabled and pref.expo_push_token:
+            _safe_send_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
+    elif order.guest_phone and send_external:
+        _safe_send_sms(order.guest_phone, msg, "sms")
+
+
 def notify_order_confirmed(db: Session, order: Order, pickup_token: str) -> None:
     title = f"Order Confirmed • Token {pickup_token}"
     msg = f"Payment confirmed for {order.order_number}. Show token {pickup_token} at pickup."
-    if order.customer_id:
-        pref = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == order.customer_id))
-        _create_notification(
-            db,
-            user_id=order.customer_id,
-            canteen_id=order.canteen_id,
-            order_id=order.id,
-            title=title,
-            message=msg,
-            event_type="order_confirmed",
-        )
-        user = db.get(User, order.customer_id)
-        if user and user.email and (not pref or pref.email_enabled):
-            send_email(user.email, title, msg)
-        if user and user.phone and (not pref or pref.sms_enabled):
-            send_sms_or_whatsapp(user.phone, msg, "sms")
-        if user and user.phone and pref and pref.whatsapp_enabled:
-            send_sms_or_whatsapp(user.phone, msg, "whatsapp")
-        if pref and pref.push_enabled and pref.expo_push_token:
-            send_expo_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
-    elif order.guest_phone:
-        send_sms_or_whatsapp(order.guest_phone, msg, "sms")
-
+    _dispatch_user_notifications(db, order=order, title=title, msg=msg, event_type="order_confirmed", send_external=True)
     _create_notification(
         db,
         role_target="kitchen_staff",
@@ -84,57 +124,61 @@ def notify_order_confirmed(db: Session, order: Order, pickup_token: str) -> None
 def notify_order_ready(db: Session, order: Order) -> None:
     title = "Food Ready for Pickup!"
     msg = f"Order {order.order_number} is ready! Please proceed to your pickup counter with your QR code."
-    if order.customer_id:
-        pref = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == order.customer_id))
-        _create_notification(
-            db,
-            user_id=order.customer_id,
-            canteen_id=order.canteen_id,
-            order_id=order.id,
-            title=title,
-            message=msg,
-            event_type="order_ready",
-        )
-        if pref and pref.push_enabled and pref.expo_push_token:
-            send_expo_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
-        user = db.get(User, order.customer_id)
-        if user and user.phone and pref and pref.sms_enabled:
-            send_sms_or_whatsapp(user.phone, msg, "sms")
-    elif order.guest_phone:
-        send_sms_or_whatsapp(order.guest_phone, msg, "sms")
+    _dispatch_user_notifications(db, order=order, title=title, msg=msg, event_type="order_ready", send_external=True)
 
 
 def notify_order_completed(db: Session, order: Order) -> None:
-    if order.customer_id:
-        _create_notification(
-            db,
-            user_id=order.customer_id,
-            canteen_id=order.canteen_id,
-            order_id=order.id,
-            title="Order Collected",
-            message=f"Order {order.order_number} handover completed. Enjoy your meal!",
-            event_type="order_completed",
-        )
+    title = "Order Collected"
+    msg = f"Order {order.order_number} handover completed. Enjoy your meal!"
+    _dispatch_user_notifications(db, order=order, title=title, msg=msg, event_type="order_completed", send_external=False)
 
 
-def list_my_notifications(db: Session, user_id: UUID, roles: set[str]) -> list[Notification]:
+def notify_customer_order_event(
+    db: Session, order: Order, *, event_type: str, title: str, message: str, send_external: bool = False
+) -> None:
+    _dispatch_user_notifications(db, order=order, title=title, msg=message, event_type=event_type, send_external=send_external)
+
+
+def list_my_notifications(
+    db: Session, user_id: UUID, roles: set[str], assigned_canteen_id: Optional[UUID] = None
+) -> list[Notification]:
     conds = [Notification.user_id == user_id]
     if roles:
         conds.append(Notification.role_target.in_(list(roles)))
-    return list(
-        db.scalars(select(Notification).where(or_(*conds)).order_by(Notification.created_at.desc()).limit(100)).all()
-    )
+    rows = db.scalars(select(Notification).where(or_(*conds)).order_by(Notification.created_at.desc()).limit(150)).all()
+    filtered = []
+    for n in rows:
+        if n.user_id is None and n.role_target and assigned_canteen_id and n.canteen_id and n.canteen_id != assigned_canteen_id:
+            continue
+        filtered.append(n)
+    return filtered[:100]
 
 
-def mark_notification_read(db: Session, notification_id: UUID, user_id: UUID) -> Notification:
+def mark_notification_read(db: Session, notification_id: UUID, user_id: UUID, roles: Optional[set[str]] = None) -> Notification:
     n = db.get(Notification, notification_id)
     if not n:
         raise HTTPException(status_code=404, detail="Notification not found")
+    role_match = bool(n.role_target and roles and n.role_target in roles)
+    if n.user_id != user_id and not role_match:
+        raise HTTPException(status_code=403, detail="Not authorized to modify this notification")
     n.is_read = True
     n.read_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(n)
     return n
+
+
+def mark_all_notifications_read(db: Session, user_id: UUID, roles: Optional[set[str]] = None) -> int:
+    now = datetime.now(timezone.utc)
+    conds = [Notification.user_id == user_id]
+    if roles:
+        conds.append(Notification.role_target.in_(list(roles)))
+    rows = db.scalars(select(Notification).where(or_(*conds), Notification.is_read.is_(False))).all()
+    for n in rows:
+        n.is_read = True
+        n.read_at = now
+    db.commit()
+    return len(rows)
 
 
 def get_or_create_preferences(db: Session, user_id: UUID) -> NotificationPreference:

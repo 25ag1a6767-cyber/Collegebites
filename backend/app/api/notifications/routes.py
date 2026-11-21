@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -12,9 +12,12 @@ from app.core.permissions import (
     ROLE_COLLEGE_ADMIN,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
+    enforce_canteen_scope,
     get_current_principal,
     require_roles,
+    scoped_canteen_for_principal,
 )
+from app.models.engagement import Announcement
 from app.services import notification_service
 
 router = APIRouter(prefix="/notifications", tags=["Notifications & Announcements"])
@@ -43,7 +46,9 @@ def get_my_notifications(
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
-    return notification_service.list_my_notifications(db, principal.user.id, principal.roles)
+    return notification_service.list_my_notifications(
+        db, principal.user.id, principal.roles, assigned_canteen_id=principal.assigned_canteen_id
+    )
 
 
 @router.post("/{notification_id}/read")
@@ -52,7 +57,16 @@ def mark_read(
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
-    return notification_service.mark_notification_read(db, notification_id, principal.user.id)
+    return notification_service.mark_notification_read(db, notification_id, principal.user.id, principal.roles)
+
+
+@router.post("/mark-all-read")
+def mark_all_read(
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    count = notification_service.mark_all_notifications_read(db, principal.user.id, principal.roles)
+    return {"marked_read": count}
 
 
 @router.get("/preferences")
@@ -83,4 +97,22 @@ def create_announcement(
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
 ):
-    return notification_service.create_announcement(db, payload.model_dump(), principal.user.id)
+    data = payload.model_dump()
+    if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        data["canteen_id"] = scoped_canteen_for_principal(principal, payload.canteen_id)
+    return notification_service.create_announcement(db, data, principal.user.id)
+
+
+@router.delete("/announcements/{announcement_id}")
+def deactivate_announcement(
+    announcement_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    ann = db.get(Announcement, announcement_id)
+    if not ann:
+        raise HTTPException(status_code=404, detail="Announcement not found")
+    enforce_canteen_scope(principal, ann.canteen_id)
+    ann.is_active = False
+    db.commit()
+    return {"status": "deactivated", "id": str(announcement_id)}

@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
-import { mobileApi } from "../src/api/client";
+import { getMobileApiError, mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 const CATEGORIES = [
@@ -15,15 +15,21 @@ const CATEGORIES = [
 
 export default function SupportScreen() {
   const { order_id } = useLocalSearchParams<{ order_id?: string }>();
-  const { user } = useMobileStore();
+  const { user, selectedCanteenId } = useMobileStore();
   const [category, setCategory] = useState("food_quality");
   const [subject, setSubject] = useState("");
   const [description, setDescription] = useState("");
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
+  const [guestOtp, setGuestOtp] = useState("");
+  const [guestOtpTok, setGuestOtpTok] = useState("");
+  const [devOtp, setDevOtp] = useState<string | null>(null);
+  const [guestTickets, setGuestTickets] = useState<any[]>([]);
+  const [guestMessages, setGuestMessages] = useState<any[]>([]);
   const [statusMsg, setStatusMsg] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const { data: tickets = [], refetch } = useQuery<any[]>({
     queryKey: ["m-my-tickets"],
@@ -37,11 +43,28 @@ export default function SupportScreen() {
     queryFn: async () => (await mobileApi.get(`/support/tickets/${selectedId}/messages`)).data,
   });
 
+  const loadGuestThread = async (ticketId: string, tokenOverride?: string) => {
+    const tok = tokenOverride || guestOtpTok;
+    if (!tok || !guestPhone.trim()) return;
+    try {
+      const res = await mobileApi.post(`/support/tickets/${ticketId}/guest-thread`, {
+        guest_phone: guestPhone.trim(),
+        otp_verification_token: tok,
+      });
+      setSelectedId(ticketId);
+      setGuestMessages(res.data.messages || []);
+    } catch (e: unknown) {
+      setStatusMsg(getMobileApiError(e, "Could not load conversation"));
+    }
+  };
+
   const submitTicket = async () => {
     setStatusMsg("");
+    setBusy(true);
     try {
-      await mobileApi.post("/support/tickets", {
+      const res = await mobileApi.post("/support/tickets", {
         order_id: order_id || null,
+        canteen_id: selectedCanteenId || null,
         category,
         subject,
         description,
@@ -50,18 +73,38 @@ export default function SupportScreen() {
       });
       setSubject("");
       setDescription("");
-      setStatusMsg("Support ticket submitted.");
+      setStatusMsg(`Ticket ${res.data.ticket_number} submitted.`);
       if (user) refetch();
-    } catch (e: any) {
-      setStatusMsg(e?.response?.data?.detail || "Could not submit ticket");
+      else setGuestTickets((prev) => [res.data, ...prev]);
+    } catch (e: unknown) {
+      setStatusMsg(getMobileApiError(e, "Could not submit ticket"));
+    } finally {
+      setBusy(false);
     }
   };
 
   const sendReply = async () => {
     if (!selectedId || !replyText.trim()) return;
-    await mobileApi.post(`/support/tickets/${selectedId}/messages`, { message: replyText.trim() });
-    setReplyText("");
-    refetchMessages();
+    setBusy(true);
+    try {
+      if (user) {
+        await mobileApi.post(`/support/tickets/${selectedId}/messages`, { message: replyText.trim() });
+        setReplyText("");
+        refetchMessages();
+      } else if (guestOtpTok) {
+        await mobileApi.post(`/support/tickets/${selectedId}/guest-messages`, {
+          guest_phone: guestPhone.trim(),
+          otp_verification_token: guestOtpTok,
+          message: replyText.trim(),
+        });
+        setReplyText("");
+        await loadGuestThread(selectedId);
+      }
+    } catch (e: unknown) {
+      setStatusMsg(getMobileApiError(e, "Could not send message"));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -97,40 +140,100 @@ export default function SupportScreen() {
           placeholder="Describe what happened..."
         />
         {Boolean(statusMsg) && <Text style={{ color: "#ea580c", fontWeight: "700", fontSize: 12 }}>{statusMsg}</Text>}
-        <Pressable onPress={submitTicket} style={styles.btn}>
-          <Text style={styles.btnTxt}>Submit Ticket</Text>
+        <Pressable disabled={busy} onPress={submitTicket} style={styles.btn}>
+          <Text style={styles.btnTxt}>{busy ? "Submitting..." : "Submit Ticket"}</Text>
         </Pressable>
       </View>
 
-      {user && (
+      {!user && (
         <View style={styles.card}>
-          <Text style={styles.secTitle}>Your Tickets ({tickets.length})</Text>
-          {tickets.map((t) => (
+          <Text style={styles.secTitle}>Guest Ticket OTP Lookup</Text>
+          <View style={{ flexDirection: "row", gap: 6 }}>
+            <TextInput style={[styles.input, { flex: 1 }]} value={guestPhone} onChangeText={setGuestPhone} placeholder="Guest Phone" />
+            <Pressable
+              disabled={busy || !guestPhone.trim()}
+              onPress={async () => {
+                setBusy(true);
+                try {
+                  const r = await mobileApi.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
+                  setDevOtp(r.data.dev_otp || null);
+                } catch (e: unknown) {
+                  setStatusMsg(getMobileApiError(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              style={[styles.btn, { paddingHorizontal: 12 }]}
+            >
+              <Text style={styles.btnTxt}>Send OTP</Text>
+            </Pressable>
+          </View>
+          {devOtp && <Text style={{ fontSize: 11, color: "#b45309" }}>Dev OTP: {devOtp}</Text>}
+          <View style={{ flexDirection: "row", gap: 6 }}>
+            <TextInput style={[styles.input, { flex: 1 }]} value={guestOtp} onChangeText={setGuestOtp} placeholder="6-digit OTP" maxLength={6} />
+            <Pressable
+              disabled={busy || guestOtp.trim().length < 6}
+              onPress={async () => {
+                setBusy(true);
+                try {
+                  const ver = await mobileApi.post("/auth/otp/verify", {
+                    target: guestPhone.trim(),
+                    purpose: "guest_checkout",
+                    code: guestOtp.trim(),
+                  });
+                  const tok = ver.data.verification_token;
+                  setGuestOtpTok(tok);
+                  const rows = await mobileApi.post("/support/tickets/guest/lookup", {
+                    guest_phone: guestPhone.trim(),
+                    otp_verification_token: tok,
+                  });
+                  setGuestTickets(rows.data || []);
+                } catch (e: unknown) {
+                  setStatusMsg(getMobileApiError(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              style={[styles.btn, { paddingHorizontal: 12, backgroundColor: "#0f172a" }]}
+            >
+              <Text style={styles.btnTxt}>Verify</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {(user || guestTickets.length > 0) && (
+        <View style={styles.card}>
+          <Text style={styles.secTitle}>Your Tickets ({(user ? tickets : guestTickets).length})</Text>
+          {(user ? tickets : guestTickets).map((t) => (
             <Pressable
               key={t.id}
-              onPress={() => setSelectedId(t.id)}
+              onPress={() => (user ? setSelectedId(t.id) : void loadGuestThread(t.id))}
               style={[styles.ticketRow, selectedId === t.id && { borderColor: "#ea580c", backgroundColor: "#fff7ed" }]}
             >
               <Text style={{ fontWeight: "800", fontSize: 13 }}>{t.ticket_number} • {t.subject}</Text>
               <Text style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
                 {t.category} • {t.status}
+                {t.resolution_minutes != null ? ` • Resolved in ${t.resolution_minutes}m` : ""}
               </Text>
             </Pressable>
           ))}
           {selectedId && (
             <View style={{ gap: 8, marginTop: 8 }}>
-              {messages.map((m) => (
+              {(user ? messages : guestMessages).map((m) => (
                 <View key={m.id} style={styles.msgBubble}>
                   <Text style={{ fontWeight: "700", fontSize: 11, color: "#475569" }}>{m.sender_role}</Text>
                   <Text style={{ fontSize: 12 }}>{m.message}</Text>
                 </View>
               ))}
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <TextInput style={[styles.input, { flex: 1 }]} value={replyText} onChangeText={setReplyText} placeholder="Write reply..." />
-                <Pressable onPress={sendReply} style={[styles.btn, { paddingHorizontal: 14 }]}>
-                  <Text style={styles.btnTxt}>Send</Text>
-                </Pressable>
-              </View>
+              {(user || guestOtpTok) && (
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  <TextInput style={[styles.input, { flex: 1 }]} value={replyText} onChangeText={setReplyText} placeholder="Write reply..." />
+                  <Pressable disabled={busy} onPress={sendReply} style={[styles.btn, { paddingHorizontal: 14 }]}>
+                    <Text style={styles.btnTxt}>Send</Text>
+                  </Pressable>
+                </View>
+              )}
             </View>
           )}
         </View>

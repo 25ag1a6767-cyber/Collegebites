@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.redis_client import get_redis
 from app.core.security import generate_guest_access_token, mask_mobile, sha256_hex
+from app.core.time_utils import now_college, today_college
 from app.integrations.razorpay_client import razorpay_gateway
 from app.integrations.stripe_client import stripe_gateway
 from app.models.college import Canteen, Counter, DiningTable, Kitchen, LocationQRCode
-from app.models.menu import FoodAddon, FoodItem, FoodItemAddon, FoodVariant
+from app.models.inventory import InventoryItem
+from app.models.menu import FoodAddon, FoodItem, FoodItemAddon, FoodVariant, Recipe, RecipeIngredient
 from app.models.order import (
     Cart,
     Order,
@@ -26,12 +28,13 @@ from app.models.order import (
     SlotReservation,
 )
 from app.models.payment import OrderQRCode, Payment, PaymentTransaction, PickupToken
-from app.models.promotion import CouponRedemption
+from app.models.promotion import Coupon, CouponRedemption, LoyaltyAccount, LoyaltyTransaction
 from app.schemas.order import CheckoutItemDirectIn, CheckoutRequest, OrderItemOut, OrderOut, PickupSlotOut
 from app.services.audit_service import record_audit_log
 from app.services.auth_service import validate_guest_otp_token
 from app.services.cart_service import evaluate_coupon, get_active_cart
 from app.services.college_service import compute_canteen_live_status, get_or_create_college_settings
+from app.services.menu_service import compute_schedule_availability_map
 from app.websockets import emit_order_event_sync
 
 ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
@@ -56,7 +59,7 @@ def _quantize(val: Decimal) -> Decimal:
 def _generate_order_number(db: Session) -> str:
     if db.bind and db.bind.dialect.name == "postgresql":
         db.execute(text("SELECT pg_advisory_xact_lock(918273645)"))
-    today_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    today_str = today_college().strftime("%Y%m%d")
     prefix = f"CB-{today_str}-"
     max_num = db.scalar(select(func.max(Order.order_number)).where(Order.order_number.like(f"{prefix}%")))
     if max_num:
@@ -74,18 +77,99 @@ def _generate_order_number(db: Session) -> str:
         seq += 1
 
 
-def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str] = None) -> OrderOut:
-    canteen = db.get(Canteen, order.canteen_id)
-    counter = db.get(Counter, order.counter_id)
-    token_row = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
-    qr_row = db.scalar(select(OrderQRCode).where(OrderQRCode.order_id == order.id))
-    pay_row = db.scalar(select(Payment).where(Payment.order_id == order.id).order_by(Payment.created_at.desc()))
-    college = get_or_create_college_settings(db)
+def rollback_unpaid_incentives(db: Session, order: Order) -> None:
+    """Release coupon usage and refund redeemed loyalty points ONLY when payment was never confirmed."""
+    if order.payment_status == "CONFIRMED":
+        return
+    redemptions = db.scalars(select(CouponRedemption).where(CouponRedemption.order_id == order.id)).all()
+    for red in redemptions:
+        coupon = db.scalar(select(Coupon).where(Coupon.id == red.coupon_id).with_for_update())
+        if coupon and coupon.times_used > 0:
+            coupon.times_used -= 1
+        db.delete(red)
 
-    items_out: list[OrderItemOut] = []
-    for item in order.items:
-        items_out.append(OrderItemOut.model_validate(item))
+    if order.customer_id:
+        redeemed_txns = db.scalars(
+            select(LoyaltyTransaction).where(
+                LoyaltyTransaction.order_id == order.id,
+                LoyaltyTransaction.transaction_type == "redeem",
+            )
+        ).all()
+        already_restored = db.scalar(
+            select(LoyaltyTransaction.id).where(
+                LoyaltyTransaction.order_id == order.id,
+                LoyaltyTransaction.transaction_type == "redeem_restore",
+            )
+        )
+        if redeemed_txns and not already_restored:
+            acct = db.scalar(
+                select(LoyaltyAccount).where(LoyaltyAccount.user_id == order.customer_id).with_for_update()
+            )
+            if acct:
+                pts_to_restore = sum((-t.points_delta for t in redeemed_txns if t.points_delta < 0), 0)
+                if pts_to_restore > 0:
+                    acct.points_balance += pts_to_restore
+                    db.add(
+                        LoyaltyTransaction(
+                            loyalty_account_id=acct.id,
+                            order_id=order.id,
+                            points_delta=pts_to_restore,
+                            transaction_type="redeem_restore",
+                            description=f"Restored redeemed points from unpaid order {order.order_number}",
+                        )
+                    )
 
+
+def release_expired_slot_reservations(db: Session) -> int:
+    """Release expired pending online checkout slot reservations cleanly."""
+    now = datetime.now(timezone.utc)
+    expired_resvs = db.scalars(
+        select(SlotReservation)
+        .where(
+            SlotReservation.status == "reserved",
+            SlotReservation.expires_at.is_not(None),
+            SlotReservation.expires_at <= now,
+        )
+        .limit(50)
+    ).all()
+    released = 0
+    for resv in expired_resvs:
+        order = db.scalar(select(Order).where(Order.id == resv.order_id).with_for_update())
+        if not order or order.payment_status == "CONFIRMED" or order.status != "PAYMENT_PENDING":
+            continue
+        resv.status = "released"
+        slot = db.scalar(select(PickupSlot).where(PickupSlot.id == resv.pickup_slot_id).with_for_update())
+        if slot and slot.reserved_count > 0:
+            slot.reserved_count -= 1
+            get_redis().decr(f"cb:slot:{slot.id}:reserved")
+        order.payment_status = "FAILED"
+        transition_order_status(db, order, "PAYMENT_FAILED", reason="Checkout payment window expired")
+        pay = db.scalar(select(Payment).where(Payment.order_id == order.id, Payment.status == "PENDING"))
+        if pay:
+            pay.status = "FAILED"
+            pay.failure_reason = "Checkout window expired"
+        rollback_unpaid_incentives(db, order)
+        released += 1
+    if released:
+        db.commit()
+    return released
+
+
+def _serialize_order_with_maps(
+    order: Order,
+    *,
+    canteen: Optional[Canteen],
+    counter: Optional[Counter],
+    token_row: Optional[PickupToken],
+    qr_row: Optional[OrderQRCode],
+    pay_row: Optional[Payment],
+    policy_text: str,
+    raw_guest_token: Optional[str] = None,
+) -> OrderOut:
+    items_out = [OrderItemOut.model_validate(item) for item in order.items]
+    checkout_url = None
+    if pay_row and pay_row.provider == "stripe" and isinstance(pay_row.gateway_metadata, dict):
+        checkout_url = pay_row.gateway_metadata.get("checkout_url")
     return OrderOut(
         id=order.id,
         order_number=order.order_number,
@@ -120,8 +204,9 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
         razorpay_order_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "razorpay") else None,
         razorpay_key_id=razorpay_gateway.key_id if order.payment_method == "razorpay" else None,
         stripe_session_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "stripe") else None,
+        stripe_checkout_url=checkout_url,
         stripe_publishable_key=stripe_gateway.publishable_key if order.payment_method == "stripe" else None,
-        cancellation_policy_text=college.cancellation_policy_text,
+        cancellation_policy_text=policy_text,
         created_at=order.created_at,
         confirmed_at=order.confirmed_at,
         accepted_at=order.accepted_at,
@@ -133,10 +218,64 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
     )
 
 
+def serialize_orders_batch(db: Session, orders: list[Order]) -> list[OrderOut]:
+    if not orders:
+        return []
+    oids = [o.id for o in orders]
+    cids = list({o.canteen_id for o in orders})
+    cnt_ids = list({o.counter_id for o in orders})
+    canteens = {c.id: c for c in db.scalars(select(Canteen).where(Canteen.id.in_(cids))).all()}
+    counters = {c.id: c for c in db.scalars(select(Counter).where(Counter.id.in_(cnt_ids))).all()}
+    tokens = {t.order_id: t for t in db.scalars(select(PickupToken).where(PickupToken.order_id.in_(oids))).all()}
+    qrs = {q.order_id: q for q in db.scalars(select(OrderQRCode).where(OrderQRCode.order_id.in_(oids))).all()}
+    pays: dict[UUID, Payment] = {}
+    for p in db.scalars(select(Payment).where(Payment.order_id.in_(oids)).order_by(Payment.created_at.desc())).all():
+        if p.order_id not in pays:
+            pays[p.order_id] = p
+    college = get_or_create_college_settings(db)
+    return [
+        _serialize_order_with_maps(
+            o,
+            canteen=canteens.get(o.canteen_id),
+            counter=counters.get(o.counter_id),
+            token_row=tokens.get(o.id),
+            qr_row=qrs.get(o.id),
+            pay_row=pays.get(o.id),
+            policy_text=college.cancellation_policy_text,
+        )
+        for o in orders
+    ]
+
+
+def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str] = None) -> OrderOut:
+    canteen = db.get(Canteen, order.canteen_id)
+    counter = db.get(Counter, order.counter_id)
+    token_row = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
+    qr_row = db.scalar(select(OrderQRCode).where(OrderQRCode.order_id == order.id))
+    pay_row = db.scalar(select(Payment).where(Payment.order_id == order.id).order_by(Payment.created_at.desc()))
+    college = get_or_create_college_settings(db)
+    return _serialize_order_with_maps(
+        order,
+        canteen=canteen,
+        counter=counter,
+        token_row=token_row,
+        qr_row=qr_row,
+        pay_row=pay_row,
+        policy_text=college.cancellation_policy_text,
+        raw_guest_token=raw_guest_token,
+    )
+
+
 def list_pickup_slots(db: Session, canteen_id: UUID) -> list[PickupSlotOut]:
+    release_expired_slot_reservations(db)
+    today = today_college()
     slots = db.scalars(
         select(PickupSlot)
-        .where(PickupSlot.canteen_id == canteen_id, PickupSlot.is_active.is_(True))
+        .where(
+            PickupSlot.canteen_id == canteen_id,
+            PickupSlot.is_active.is_(True),
+            PickupSlot.slot_date >= today,
+        )
         .order_by(PickupSlot.slot_date.asc(), PickupSlot.start_time.asc())
     ).all()
     results: list[PickupSlotOut] = []
@@ -156,21 +295,30 @@ def checkout_order(
     cashier_user_id: Optional[UUID] = None,
     ip_address: Optional[str] = None,
 ) -> OrderOut:
-    # 1. Idempotency protection
+    # 1. Scoped idempotency protection (never leaks across users/guests)
     if payload.idempotency_key:
-        existing_order = db.scalar(
+        idem_stmt = (
             select(Order)
             .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
             .where(Order.idempotency_key == payload.idempotency_key)
         )
+        if user_id:
+            idem_stmt = idem_stmt.where(Order.customer_id == user_id)
+        elif payload.guest_phone:
+            idem_stmt = idem_stmt.where(Order.is_guest.is_(True), Order.guest_phone == payload.guest_phone.strip())
+        else:
+            idem_stmt = idem_stmt.where(Order.is_guest.is_(True))
+        existing_order = db.scalar(idem_stmt)
         if existing_order:
             return serialize_order(db, existing_order)
 
     if not payload.accepted_policy:
         raise HTTPException(status_code=400, detail="You must acknowledge the college cancellation and payment policy before checkout")
 
+    release_expired_slot_reservations(db)
+
     college = get_or_create_college_settings(db)
-    canteen = db.get(Canteen, payload.canteen_id)
+    canteen = db.scalar(select(Canteen).where(Canteen.id == payload.canteen_id).with_for_update())
     if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Selected canteen is unavailable")
 
@@ -180,22 +328,25 @@ def checkout_order(
     if canteen.auto_throttle_enabled and active_count >= canteen.max_concurrent_orders:
         raise HTTPException(status_code=429, detail="Canteen queue is at full capacity. Please retry shortly.")
 
-    # Payment method authorization per canteen
+    # Payment method authorization per college & canteen settings
     if payload.payment_method == "razorpay" and not (college.razorpay_enabled and canteen.allow_online_payment):
-        raise HTTPException(status_code=400, detail="Online payment is disabled for this canteen")
+        raise HTTPException(status_code=400, detail="Razorpay online payment is disabled for this canteen")
+    if payload.payment_method == "stripe" and not (college.stripe_enabled and canteen.allow_online_payment):
+        raise HTTPException(status_code=400, detail="Stripe online payment is disabled for this canteen")
     if payload.payment_method == "cash" and not (cashier_user_id or (college.cash_at_counter_enabled and canteen.allow_cash_at_counter)):
         raise HTTPException(status_code=400, detail="Cash at counter is disabled for this canteen")
     if payload.payment_method == "pay_at_pickup" and not (college.pay_at_pickup_enabled and canteen.allow_pay_at_pickup):
         raise HTTPException(status_code=400, detail="Pay at pickup is disabled for this canteen")
 
+    now = datetime.now(timezone.utc)
     # Resolve location QR if passed
     location_qr_id: Optional[UUID] = None
     counter_id = payload.counter_id
     table_id = payload.table_id
     if payload.location_qr_code:
         loc_qr = db.scalar(select(LocationQRCode).where(LocationQRCode.code == payload.location_qr_code.strip()))
-        if not loc_qr or not loc_qr.is_active or loc_qr.revoked_at is not None:
-            raise HTTPException(status_code=400, detail="Scanned location QR code is invalid or revoked")
+        if not loc_qr or not loc_qr.is_active or loc_qr.revoked_at is not None or (loc_qr.expires_at and loc_qr.expires_at <= now):
+            raise HTTPException(status_code=400, detail="Scanned location QR code is invalid, expired, or revoked")
         if loc_qr.canteen_id != canteen.id:
             raise HTTPException(status_code=400, detail="Location QR belongs to a different canteen")
         location_qr_id = loc_qr.id
@@ -293,234 +444,305 @@ def checkout_order(
             raise HTTPException(status_code=409, detail="Selected pickup slot capacity reached")
         pickup_slot.reserved_count += 1
 
-    # Recalculate ALL prices strictly on backend
-    subtotal = Decimal("0.00")
-    max_item_prep = canteen.default_prep_time_minutes
-    items_for_coupon: list[tuple[UUID, UUID, Decimal]] = []
-    prepared_items: list[tuple[FoodItem, Optional[FoodVariant], int, Decimal, Decimal, Decimal, Optional[str], list[dict]]] = []
+    redis_slot_key: Optional[str] = None
+    redis_incremented = False
+    try:
+        # Recalculate ALL prices strictly on backend
+        subtotal = Decimal("0.00")
+        max_item_prep = canteen.default_prep_time_minutes
+        items_for_coupon: list[tuple[UUID, UUID, Decimal]] = []
+        line_tax_specs: list[tuple[Decimal, Decimal]] = []
+        prepared_items: list[tuple[FoodItem, Optional[FoodVariant], int, Decimal, Decimal, Decimal, Optional[str], list[dict]]] = []
 
-    for spec in line_specs:
-        food = db.get(FoodItem, spec.food_item_id)
-        if not food or food.canteen_id != canteen.id or not food.is_active:
-            raise HTTPException(status_code=400, detail="Food item not found in canteen")
-        if not food.is_available or food.insufficient_ingredients:
-            raise HTTPException(status_code=400, detail=f"{food.name} is currently out of stock or unavailable")
+        sched_map = compute_schedule_availability_map(db, [s.food_item_id for s in line_specs])
+        needed_ingredients: dict[UUID, Decimal] = {}
 
-        max_item_prep = max(max_item_prep, food.prep_time_minutes)
-        variant: Optional[FoodVariant] = None
-        unit_price = food.base_price
-        if spec.variant_id:
-            variant = db.get(FoodVariant, spec.variant_id)
-            if not variant or variant.food_item_id != food.id or not variant.is_available:
-                raise HTTPException(status_code=400, detail=f"Selected variant for {food.name} is unavailable")
-            unit_price = variant.absolute_price if variant.absolute_price is not None else (food.base_price + variant.price_delta)
-        unit_price = _quantize(unit_price)
+        for spec in line_specs:
+            food = db.get(FoodItem, spec.food_item_id)
+            if not food or food.canteen_id != canteen.id or not food.is_active:
+                raise HTTPException(status_code=400, detail="Food item not found in canteen")
+            if not food.is_available or food.insufficient_ingredients:
+                raise HTTPException(status_code=400, detail=f"{food.name} is currently out of stock or unavailable")
+            if not sched_map.get(food.id, True):
+                raise HTTPException(status_code=400, detail=f"{food.name} is outside its scheduled serving hours")
 
-        addon_per_unit = Decimal("0.00")
-        cust_dicts: list[dict] = []
-        if spec.spice_level:
-            cust_dicts.append({"customization_type": "spice", "option_name": "Spice Level", "option_value": spec.spice_level, "quantity": 1, "unit_price": Decimal("0.00"), "total_price": Decimal("0.00")})
-        if spec.sugar_level:
-            cust_dicts.append({"customization_type": "sugar", "option_name": "Sugar Level", "option_value": spec.sugar_level, "quantity": 1, "unit_price": Decimal("0.00"), "total_price": Decimal("0.00")})
-        for rem in spec.removed_ingredients:
-            cust_dicts.append({"customization_type": "remove_ingredient", "option_name": "Remove", "option_value": rem, "quantity": 1, "unit_price": Decimal("0.00"), "total_price": Decimal("0.00")})
+            recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == food.id))
+            if recipe:
+                for req in db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all():
+                    per_unit = (req.quantity_required * Decimal(spec.quantity)) / Decimal(max(1, recipe.yield_portions))
+                    needed_ingredients[req.ingredient_id] = needed_ingredients.get(req.ingredient_id, Decimal("0.000")) + per_unit
 
-        for ad in spec.addons:
-            link = db.scalar(select(FoodItemAddon).where(FoodItemAddon.food_item_id == food.id, FoodItemAddon.addon_id == ad.addon_id))
-            addon = db.get(FoodAddon, ad.addon_id)
-            if not link or not addon or not addon.is_available:
-                raise HTTPException(status_code=400, detail="Invalid or unavailable add-on")
-            if ad.quantity > link.max_quantity:
-                raise HTTPException(status_code=400, detail=f"Maximum {link.max_quantity} allowed for {addon.name}")
-            line_addon_total = _quantize(addon.price * ad.quantity)
-            addon_per_unit += line_addon_total
-            cust_dicts.append({
-                "customization_type": "addon",
-                "option_name": addon.name,
-                "option_value": f"x{ad.quantity}",
-                "quantity": ad.quantity,
-                "unit_price": addon.price,
-                "total_price": line_addon_total,
-            })
+            max_item_prep = max(max_item_prep, food.prep_time_minutes)
+            variant: Optional[FoodVariant] = None
+            unit_price = food.base_price
+            if spec.variant_id:
+                variant = db.get(FoodVariant, spec.variant_id)
+                if not variant or variant.food_item_id != food.id or not variant.is_available:
+                    raise HTTPException(status_code=400, detail=f"Selected variant for {food.name} is unavailable")
+                unit_price = variant.absolute_price if variant.absolute_price is not None else (food.base_price + variant.price_delta)
+            unit_price = _quantize(unit_price)
 
-        line_sub = _quantize((unit_price + addon_per_unit) * spec.quantity)
-        subtotal += line_sub
-        items_for_coupon.append((food.id, food.category_id, line_sub))
-        prepared_items.append((food, variant, spec.quantity, unit_price, addon_per_unit, line_sub, spec.special_instructions, cust_dicts))
+            addon_per_unit = Decimal("0.00")
+            cust_dicts: list[dict] = []
+            if spec.spice_level:
+                cust_dicts.append({"customization_type": "spice", "option_name": "Spice Level", "option_value": spec.spice_level, "quantity": 1, "unit_price": Decimal("0.00"), "total_price": Decimal("0.00")})
+            if spec.sugar_level:
+                cust_dicts.append({"customization_type": "sugar", "option_name": "Sugar Level", "option_value": spec.sugar_level, "quantity": 1, "unit_price": Decimal("0.00"), "total_price": Decimal("0.00")})
+            for rem in spec.removed_ingredients:
+                cust_dicts.append({"customization_type": "remove_ingredient", "option_name": "Remove", "option_value": rem, "quantity": 1, "unit_price": Decimal("0.00"), "total_price": Decimal("0.00")})
 
-    discount = Decimal("0.00")
-    applied_coupon = None
-    if payload.coupon_code:
-        ok, discount, msg, applied_coupon = evaluate_coupon(
-            db,
-            payload.coupon_code,
-            canteen.id,
-            subtotal,
-            items_for_coupon,
-            user_id=user_id,
-            guest_phone=payload.guest_phone,
-        )
-        if not ok:
-            raise HTTPException(status_code=400, detail=msg or "Invalid coupon code")
+            for ad in spec.addons:
+                link = db.scalar(select(FoodItemAddon).where(FoodItemAddon.food_item_id == food.id, FoodItemAddon.addon_id == ad.addon_id))
+                addon = db.get(FoodAddon, ad.addon_id)
+                if not link or not addon or not addon.is_available:
+                    raise HTTPException(status_code=400, detail="Invalid or unavailable add-on")
+                if ad.quantity > link.max_quantity:
+                    raise HTTPException(status_code=400, detail=f"Maximum {link.max_quantity} allowed for {addon.name}")
+                line_addon_total = _quantize(addon.price * ad.quantity)
+                addon_per_unit += line_addon_total
+                cust_dicts.append({
+                    "addon_id": addon.id,
+                    "customization_type": "addon",
+                    "option_name": addon.name,
+                    "option_value": f"x{ad.quantity}",
+                    "quantity": ad.quantity,
+                    "unit_price": addon.price,
+                    "total_price": line_addon_total,
+                })
 
-    taxable = max(Decimal("0.00"), subtotal - discount)
-    tax_amount = _quantize((taxable * canteen.tax_rate_percent) / Decimal("100"))
-    total_amount = _quantize(taxable + tax_amount)
+            line_sub = _quantize((unit_price + addon_per_unit) * spec.quantity)
+            subtotal += line_sub
+            eff_tax_rate = food.tax_rate_percent if food.tax_rate_percent is not None else canteen.tax_rate_percent
+            line_tax_specs.append((line_sub, eff_tax_rate))
+            items_for_coupon.append((food.id, food.category_id, line_sub))
+            prepared_items.append((food, variant, spec.quantity, unit_price, addon_per_unit, line_sub, spec.special_instructions, cust_dicts))
 
-    est_prep = max(eta, max_item_prep)
-    now = datetime.now(timezone.utc)
-    raw_guest_token = None
-    guest_token_hash = None
-    if is_guest:
-        raw_guest_token, guest_token_hash = generate_guest_access_token()
+        if needed_ingredients:
+            inv_rows = {
+                inv.ingredient_id: inv.current_quantity
+                for inv in db.scalars(
+                    select(InventoryItem).where(
+                        InventoryItem.canteen_id == canteen.id,
+                        InventoryItem.ingredient_id.in_(list(needed_ingredients.keys())),
+                    )
+                ).all()
+            }
+            for ing_id, req_qty in needed_ingredients.items():
+                if ing_id in inv_rows and inv_rows[ing_id] < req_qty:
+                    raise HTTPException(status_code=400, detail="Insufficient ingredient stock for requested quantity")
 
-    order = Order(
-        order_number=_generate_order_number(db),
-        idempotency_key=payload.idempotency_key,
-        canteen_id=canteen.id,
-        counter_id=counter_id,
-        kitchen_id=kitchen_id,
-        table_id=table_id,
-        customer_id=user_id,
-        cashier_id=cashier_user_id,
-        pickup_slot_id=pickup_slot.id if pickup_slot else None,
-        location_qr_id=location_qr_id,
-        is_guest=is_guest,
-        guest_name=payload.guest_name.strip() if payload.guest_name else None,
-        guest_phone=payload.guest_phone.strip() if payload.guest_phone else None,
-        guest_access_token_hash=guest_token_hash,
-        order_type=payload.order_type,
-        order_channel=payload.order_channel,
-        status="PAYMENT_PENDING",
-        payment_status="PENDING",
-        payment_method=payload.payment_method,
-        subtotal_amount=_quantize(subtotal),
-        discount_amount=_quantize(discount),
-        tax_amount=tax_amount,
-        total_amount=total_amount,
-        coupon_code=applied_coupon.code if applied_coupon else None,
-        estimated_prep_minutes=est_prep,
-        estimated_pickup_at=now + timedelta(minutes=est_prep),
-        notes=payload.notes,
-    )
-    db.add(order)
-    db.flush()
-
-    # Distribute tax proportionally to order items for complete historical line details
-    for food, variant, qty, unit_p, addon_u, line_sub, instr, custs in prepared_items:
-        ratio = (line_sub / subtotal) if subtotal > Decimal("0.00") else Decimal("0.00")
-        item_tax = _quantize(tax_amount * ratio)
-        item_disc = _quantize(discount * ratio)
-        line_total = _quantize(max(Decimal("0.00"), line_sub - item_disc) + item_tax)
-        oi = OrderItem(
-            order_id=order.id,
-            food_item_id=food.id,
-            variant_id=variant.id if variant else None,
-            item_name=food.name,
-            variant_name=variant.name if variant else None,
-            quantity=qty,
-            unit_price=unit_p,
-            addon_total_per_unit=addon_u,
-            line_subtotal=line_sub,
-            tax_amount=item_tax,
-            line_total=line_total,
-            special_instructions=instr,
-        )
-        db.add(oi)
-        db.flush()
-        for c in custs:
-            db.add(OrderItemCustomization(order_item_id=oi.id, **c))
-
-    db.add(OrderStatusHistory(order_id=order.id, from_status="CREATED", to_status="PAYMENT_PENDING", changed_by_user_id=user_id or cashier_user_id, reason="Order created and awaiting payment"))
-
-    if pickup_slot:
-        db.add(SlotReservation(pickup_slot_id=pickup_slot.id, order_id=order.id, status="reserved"))
-
-    if applied_coupon:
-        applied_coupon.times_used += 1
-        db.add(
-            CouponRedemption(
-                coupon_id=applied_coupon.id,
-                order_id=order.id,
+        discount = Decimal("0.00")
+        applied_coupon = None
+        if payload.coupon_code:
+            ok, discount, msg, applied_coupon = evaluate_coupon(
+                db,
+                payload.coupon_code,
+                canteen.id,
+                subtotal,
+                items_for_coupon,
                 user_id=user_id,
                 guest_phone=payload.guest_phone,
-                discount_applied=discount,
+            )
+            if not ok:
+                raise HTTPException(status_code=400, detail=msg or "Invalid coupon code")
+            applied_coupon = db.scalar(select(Coupon).where(Coupon.id == applied_coupon.id).with_for_update())
+
+        redeemed_pts = 0
+        loyalty_acct: Optional[LoyaltyAccount] = None
+        if payload.redeem_loyalty_points > 0:
+            if not user_id:
+                raise HTTPException(status_code=400, detail="Sign in to redeem loyalty points")
+            loyalty_acct = db.scalar(select(LoyaltyAccount).where(LoyaltyAccount.user_id == user_id).with_for_update())
+            if not loyalty_acct or loyalty_acct.points_balance < payload.redeem_loyalty_points:
+                raise HTTPException(status_code=400, detail="Insufficient loyalty points balance")
+            max_pts_allowed = int(max(Decimal("0.00"), subtotal - discount))
+            redeemed_pts = min(payload.redeem_loyalty_points, max_pts_allowed)
+            discount = _quantize(discount + Decimal(redeemed_pts))
+
+        discount_ratio = (discount / subtotal) if (subtotal > Decimal("0.00") and discount > Decimal("0.00")) else Decimal("0.00")
+        tax_calc = Decimal("0.00")
+        for l_sub, l_rate in line_tax_specs:
+            l_taxable = max(Decimal("0.00"), l_sub * (Decimal("1.00") - discount_ratio))
+            tax_calc += (l_taxable * l_rate) / Decimal("100")
+        tax_amount = _quantize(tax_calc)
+        taxable = max(Decimal("0.00"), subtotal - discount)
+        total_amount = _quantize(taxable + tax_amount)
+
+        if pickup_slot:
+            redis_slot_key = f"cb:slot:{pickup_slot.id}:reserved"
+            redis_incremented = True
+
+        est_prep = max(eta, max_item_prep)
+        raw_guest_token = None
+        guest_token_hash = None
+        if is_guest:
+            raw_guest_token, guest_token_hash = generate_guest_access_token()
+
+        order = Order(
+            order_number=_generate_order_number(db),
+            idempotency_key=payload.idempotency_key,
+            canteen_id=canteen.id,
+            counter_id=counter_id,
+            kitchen_id=kitchen_id,
+            table_id=table_id,
+            customer_id=user_id,
+            cashier_id=cashier_user_id,
+            pickup_slot_id=pickup_slot.id if pickup_slot else None,
+            location_qr_id=location_qr_id,
+            is_guest=is_guest,
+            guest_name=payload.guest_name.strip() if payload.guest_name else None,
+            guest_phone=payload.guest_phone.strip() if payload.guest_phone else None,
+            guest_access_token_hash=guest_token_hash,
+            order_type=payload.order_type,
+            order_channel=payload.order_channel,
+            status="PAYMENT_PENDING",
+            payment_status="PENDING",
+            payment_method=payload.payment_method,
+            subtotal_amount=_quantize(subtotal),
+            discount_amount=_quantize(discount),
+            tax_amount=tax_amount,
+            total_amount=total_amount,
+            coupon_code=applied_coupon.code if applied_coupon else None,
+            estimated_prep_minutes=est_prep,
+            estimated_pickup_at=now + timedelta(minutes=est_prep),
+            notes=payload.notes,
+        )
+        db.add(order)
+        db.flush()
+
+        for food, variant, qty, unit_p, addon_u, line_sub, instr, custs in prepared_items:
+            ratio = (line_sub / subtotal) if subtotal > Decimal("0.00") else Decimal("0.00")
+            item_tax = _quantize(tax_amount * ratio)
+            item_disc = _quantize(discount * ratio)
+            line_total = _quantize(max(Decimal("0.00"), line_sub - item_disc) + item_tax)
+            oi = OrderItem(
+                order_id=order.id,
+                food_item_id=food.id,
+                variant_id=variant.id if variant else None,
+                item_name=food.name,
+                variant_name=variant.name if variant else None,
+                quantity=qty,
+                unit_price=unit_p,
+                addon_total_per_unit=addon_u,
+                line_subtotal=line_sub,
+                tax_amount=item_tax,
+                line_total=line_total,
+                special_instructions=instr,
+            )
+            db.add(oi)
+            db.flush()
+            for c in custs:
+                db.add(OrderItemCustomization(order_item_id=oi.id, **c))
+
+        db.add(OrderStatusHistory(order_id=order.id, from_status="CREATED", to_status="PAYMENT_PENDING", changed_by_user_id=user_id or cashier_user_id, reason="Order created and awaiting payment"))
+
+        if pickup_slot:
+            slot_exp = (now + timedelta(minutes=15)) if payload.payment_method in ("razorpay", "stripe") else None
+            db.add(SlotReservation(pickup_slot_id=pickup_slot.id, order_id=order.id, status="reserved", expires_at=slot_exp))
+
+        if applied_coupon:
+            applied_coupon.times_used += 1
+            db.add(
+                CouponRedemption(
+                    coupon_id=applied_coupon.id,
+                    order_id=order.id,
+                    user_id=user_id,
+                    guest_phone=payload.guest_phone if (payload.guest_phone and payload.guest_phone.strip() != "0000000000") else None,
+                    discount_applied=discount - Decimal(redeemed_pts),
+                )
+            )
+
+        if loyalty_acct and redeemed_pts > 0:
+            loyalty_acct.points_balance -= redeemed_pts
+            db.add(
+                LoyaltyTransaction(
+                    loyalty_account_id=loyalty_acct.id,
+                    order_id=order.id,
+                    points_delta=-redeemed_pts,
+                    transaction_type="redeem",
+                    description=f"Redeemed {redeemed_pts} pts on order {order.order_number}",
+                )
+            )
+
+        # Create payment request
+        if payload.payment_method == "razorpay":
+            provider = "razorpay"
+        elif payload.payment_method == "stripe":
+            provider = "stripe"
+        else:
+            provider = "cash"
+
+        provider_order_id = None
+        stripe_checkout_url = None
+        if provider == "razorpay":
+            rzp_order = razorpay_gateway.create_order(
+                amount_inr=total_amount,
+                receipt_ref=order.order_number,
+                notes={"order_number": order.order_number, "canteen": canteen.code},
+            )
+            provider_order_id = rzp_order["id"]
+        elif provider == "stripe":
+            guest_q = f"?guest_token={raw_guest_token}&" if raw_guest_token else "?"
+            base_web = settings.PUBLIC_BASE_URL.rstrip("/")
+            sess = stripe_gateway.create_checkout_session(
+                amount_inr=total_amount,
+                order_number=order.order_number,
+                success_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_session_id={{CHECKOUT_SESSION_ID}}",
+                cancel_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_cancelled=1",
+            )
+            provider_order_id = sess["id"]
+            stripe_checkout_url = sess.get("url")
+
+        payment = Payment(
+            order_id=order.id,
+            provider=provider,
+            method=payload.payment_method,
+            provider_order_id=provider_order_id,
+            amount=total_amount,
+            currency="INR",
+            status="PENDING",
+            gateway_metadata={"checkout_url": stripe_checkout_url} if stripe_checkout_url else {},
+        )
+        db.add(payment)
+        db.flush()
+        db.add(
+            PaymentTransaction(
+                payment_id=payment.id,
+                order_id=order.id,
+                transaction_type="initiate",
+                amount=total_amount,
+                status="PENDING",
+                external_reference=provider_order_id,
             )
         )
 
-    # Create payment request
-    if payload.payment_method == "razorpay":
-        provider = "razorpay"
-    elif payload.payment_method == "stripe":
-        provider = "stripe"
-    else:
-        provider = "cash"
+        if cart:
+            cart.status = "converted"
 
-    provider_order_id = None
-    stripe_checkout_url = None
-    if provider == "razorpay":
-        rzp_order = razorpay_gateway.create_order(
-            amount_inr=total_amount,
-            receipt_ref=order.order_number,
-            notes={"order_number": order.order_number, "canteen": canteen.code},
+        record_audit_log(
+            db,
+            action="order.checkout_created",
+            entity_type="order",
+            entity_id=order.order_number,
+            actor_user_id=user_id or cashier_user_id,
+            ip_address=ip_address,
+            details={"total_amount": str(total_amount), "payment_method": payload.payment_method, "is_guest": is_guest},
         )
-        provider_order_id = rzp_order["id"]
-    elif provider == "stripe":
-        guest_q = f"?guest_token={raw_guest_token}&" if raw_guest_token else "?"
-        base_web = settings.PUBLIC_BASE_URL.rstrip("/")
-        sess = stripe_gateway.create_checkout_session(
-            amount_inr=total_amount,
-            order_number=order.order_number,
-            success_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{base_web}/orders/{order.order_number}{guest_q}stripe_cancelled=1",
-        )
-        provider_order_id = sess["id"]
-        stripe_checkout_url = sess.get("url")
+        db.commit()
+    except Exception:
+        if redis_incremented and redis_slot_key:
+            get_redis().decr(redis_slot_key)
+        raise
 
-    payment = Payment(
-        order_id=order.id,
-        provider=provider,
-        method=payload.payment_method,
-        provider_order_id=provider_order_id,
-        amount=total_amount,
-        currency="INR",
-        status="PENDING",
-    )
-    db.add(payment)
-    db.flush()
-    db.add(
-        PaymentTransaction(
-            payment_id=payment.id,
-            order_id=order.id,
-            transaction_type="initiate",
-            amount=total_amount,
-            status="PENDING",
-            external_reference=provider_order_id,
-        )
-    )
-
-    if cart:
-        cart.status = "converted"
-
-    record_audit_log(
-        db,
-        action="order.checkout_created",
-        entity_type="order",
-        entity_id=order.order_number,
-        actor_user_id=user_id or cashier_user_id,
-        ip_address=ip_address,
-        details={"total_amount": str(total_amount), "payment_method": payload.payment_method, "is_guest": is_guest},
-    )
-    db.commit()
     db.expire_all()
-
     loaded = db.scalar(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
         .where(Order.id == order.id)
     )
     out = serialize_order(db, loaded, raw_guest_token=raw_guest_token)
-    out.stripe_checkout_url = stripe_checkout_url
+    if stripe_checkout_url:
+        out.stripe_checkout_url = stripe_checkout_url
     return out
 
 
@@ -576,6 +798,7 @@ def cancel_or_reject_order(
     finance_note: Optional[str] = None,
     guest_access_token: Optional[str] = None,
     is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
 ) -> OrderOut:
     order = db.scalar(
         select(Order)
@@ -586,6 +809,8 @@ def cancel_or_reject_order(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    if is_staff and staff_canteen_id and order.canteen_id != staff_canteen_id:
+        raise HTTPException(status_code=403, detail="Staff user is not authorized for this canteen")
     if not is_staff:
         if order.customer_id and order.customer_id != actor_user_id:
             raise HTTPException(status_code=403, detail="Not authorized to cancel this order")
@@ -595,6 +820,19 @@ def cancel_or_reject_order(
 
     target_status = "REJECTED" if cancellation_type == "rejected" else "CANCELLED"
     transition_order_status(db, order, target_status, actor_user_id=actor_user_id, reason=reason)
+
+    now = datetime.now(timezone.utc)
+    # Revoke active token/QR if already generated so cancelled order cannot be collected
+    tok = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
+    if tok and tok.status == "ACTIVE":
+        tok.status = "REVOKED"
+    qr = db.scalar(select(OrderQRCode).where(OrderQRCode.order_id == order.id))
+    if qr and qr.revoked_at is None:
+        qr.revoked_at = now
+        qr.revocation_reason = f"Order {target_status.lower()}: {reason}"
+
+    if order.payment_status != "CONFIRMED":
+        rollback_unpaid_incentives(db, order)
 
     # Release reserved slot if not yet fulfilled
     resv = db.scalar(select(SlotReservation).where(SlotReservation.order_id == order.id))
@@ -636,6 +874,7 @@ def get_order_authorized(
     *,
     user_id: Optional[UUID] = None,
     is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
     guest_access_token: Optional[str] = None,
 ) -> OrderOut:
     stmt = select(Order).options(
@@ -651,7 +890,10 @@ def get_order_authorized(
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if not is_staff:
+    if is_staff:
+        if staff_canteen_id and order.canteen_id != staff_canteen_id:
+            raise HTTPException(status_code=403, detail="Staff user is not authorized for this canteen")
+    else:
         if order.is_guest:
             if not guest_access_token or order.guest_access_token_hash != sha256_hex(guest_access_token):
                 raise HTTPException(status_code=403, detail="Valid guest access token required")
@@ -659,3 +901,25 @@ def get_order_authorized(
             raise HTTPException(status_code=403, detail="Not authorized to view this order")
 
     return serialize_order(db, order)
+
+
+def lookup_guest_orders(
+    db: Session, *, guest_phone: str, otp_verification_token: str
+) -> list[OrderOut]:
+    clean_phone = guest_phone.strip()
+    if not validate_guest_otp_token(db, clean_phone, otp_verification_token):
+        raise HTTPException(status_code=403, detail="Valid guest mobile OTP verification is required")
+    orders = db.scalars(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.is_guest.is_(True), Order.guest_phone == clean_phone)
+        .order_by(Order.created_at.desc())
+        .limit(20)
+    ).all()
+    results: list[OrderOut] = []
+    for o in orders:
+        raw_tok, tok_hash = generate_guest_access_token()
+        o.guest_access_token_hash = tok_hash
+        results.append(serialize_order(db, o, raw_guest_token=raw_tok))
+    db.commit()
+    return results

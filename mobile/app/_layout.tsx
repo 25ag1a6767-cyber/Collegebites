@@ -1,4 +1,5 @@
 import React, { useEffect } from "react";
+import { ActivityIndicator, View } from "react-native";
 import { Tabs } from "expo-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useMobileStore } from "../src/store/useMobileStore";
@@ -7,9 +8,18 @@ const qc = new QueryClient();
 
 export default function RootLayout() {
   const hydrate = useMobileStore((s) => s.hydrate);
+  const hydrated = useMobileStore((s) => s.hydrated);
   useEffect(() => {
     hydrate();
   }, [hydrate]);
+
+  if (!hydrated) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f8fafc" }}>
+        <ActivityIndicator size="large" color="#ea580c" />
+      </View>
+    );
+  }
 
   return (
     <QueryClientProvider client={qc}>

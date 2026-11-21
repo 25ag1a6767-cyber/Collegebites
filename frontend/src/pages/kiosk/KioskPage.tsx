@@ -16,8 +16,11 @@ const LABELS: Record<string, { title: string; pay: string; empty: string }> = {
 export const KioskPage: React.FC = () => {
   const { pushToast } = useToast();
   const [lang, setLang] = useState<"en" | "hi" | "te">("en");
+  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe" | "cash">("razorpay");
   const [cartLines, setCartLines] = useState<{ item: FoodItem; quantity: number }[]>([]);
+  const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
   const [receipt, setReceipt] = useState<ReceiptSnapshot | null>(null);
+  const [busy, setBusy] = useState(false);
   const [idleSeconds, setIdleSeconds] = useState(90);
 
   const { data: kioskStatus } = useQuery<any>({
@@ -30,8 +33,8 @@ export const KioskPage: React.FC = () => {
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
-  const device = kioskStatus?.devices?.[0];
-  const canteenId = device?.canteen_id || canteens[0]?.id || "";
+  const enabledDevice = kioskStatus?.devices?.find((d: any) => d.is_enabled) || kioskStatus?.devices?.[0];
+  const canteenId = enabledDevice?.canteen_id || canteens[0]?.id || "";
 
   const { data: items = [] } = useQuery<FoodItem[]>({
     queryKey: ["kiosk-items", canteenId],
@@ -39,22 +42,32 @@ export const KioskPage: React.FC = () => {
     queryFn: async () => (await api.get(`/menus/canteens/${canteenId}/items?available_only=true`)).data,
   });
 
+  // Periodic device heartbeat when kiosk active
+  useEffect(() => {
+    if (!kioskStatus?.kiosk_enabled || !enabledDevice?.id) return;
+    const hb = setInterval(() => {
+      api.post(`/kiosk/devices/${enabledDevice.id}/heartbeat`).catch(() => {});
+    }, 30000);
+    return () => clearInterval(hb);
+  }, [kioskStatus?.kiosk_enabled, enabledDevice?.id]);
+
   // Idle timeout auto-reset
   useEffect(() => {
     const timer = setInterval(() => {
       setIdleSeconds((s) => {
         if (s <= 1) {
           setCartLines([]);
+          setPendingOrder(null);
           setReceipt(null);
-          return device?.idle_timeout_seconds || 90;
+          return enabledDevice?.idle_timeout_seconds || 90;
         }
         return s - 1;
       });
     }, 1000);
     return () => clearInterval(timer);
-  }, [device?.idle_timeout_seconds]);
+  }, [enabledDevice?.idle_timeout_seconds]);
 
-  const resetActivity = () => setIdleSeconds(device?.idle_timeout_seconds || 90);
+  const resetActivity = () => setIdleSeconds(enabledDevice?.idle_timeout_seconds || 90);
 
   if (!kioskStatus?.kiosk_enabled) {
     return (
@@ -73,21 +86,67 @@ export const KioskPage: React.FC = () => {
     );
   }
 
+  const fetchReceiptForOrder = async (ord: Order) => {
+    const tokenParam = ord.guest_access_token ? `?guest_token=${encodeURIComponent(ord.guest_access_token)}` : "";
+    const recRes = await api.get<ReceiptSnapshot>(`/tokens/receipts/${ord.order_number}${tokenParam}`);
+    setReceipt(recRes.data);
+  };
+
   const placeKioskOrder = async () => {
-    if (!device || cartLines.length === 0) return;
+    if (!enabledDevice || cartLines.length === 0) return;
     resetActivity();
+    setBusy(true);
     try {
       const res = await api.post<Order>("/kiosk/orders", {
-        device_code: device.device_code,
+        device_code: enabledDevice.device_code,
         canteen_id: canteenId,
-        payment_method: "razorpay",
+        payment_method: payMethod,
         language: lang,
         items: cartLines.map((l) => ({ food_item_id: l.item.id, quantity: l.quantity })),
       });
-      pushToast(`Kiosk Order ${res.data.order_number} created! Complete payment on terminal.`, "info");
+      const ord = res.data;
       setCartLines([]);
+      if (payMethod === "cash") {
+        pushToast(`Order ${ord.order_number} placed! Pay ₹${ord.total_amount} at counter.`, "info");
+        setPendingOrder(ord);
+        return;
+      }
+      setPendingOrder(ord);
     } catch (err) {
       pushToast(getApiError(err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const completeKioskPayment = async () => {
+    if (!pendingOrder) return;
+    setBusy(true);
+    try {
+      let confirmed: Order = pendingOrder;
+      if (pendingOrder.payment_method === "stripe" && pendingOrder.stripe_session_id) {
+        const res = await api.post<Order>("/payments/stripe/verify", {
+          order_id: pendingOrder.id,
+          stripe_session_id: pendingOrder.stripe_session_id,
+        });
+        confirmed = res.data;
+      } else if (pendingOrder.razorpay_order_id) {
+        const res = await api.post<Order>("/payments/razorpay/verify", {
+          order_id: pendingOrder.id,
+          razorpay_order_id: pendingOrder.razorpay_order_id,
+          razorpay_payment_id: `pay_kiosk_${Date.now()}`,
+          razorpay_signature: "test_mode_signature",
+          method_detail: "upi",
+        });
+        confirmed = res.data;
+      }
+      await fetchReceiptForOrder(confirmed);
+      setPendingOrder(null);
+      pushToast(`Token ${confirmed.pickup_token_code || ""} ready! Printing slip.`, "success");
+    } catch (err) {
+      pushToast(getApiError(err, "Payment verification failed"), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -118,7 +177,50 @@ export const KioskPage: React.FC = () => {
       </div>
 
       {receipt ? (
-        <ReceiptSlip receipt={receipt} />
+        <div className="space-y-4">
+          <ReceiptSlip receipt={receipt} />
+          <div className="text-center">
+            <Button
+              size="lg"
+              onClick={() => {
+                setReceipt(null);
+                setPendingOrder(null);
+                setCartLines([]);
+              }}
+            >
+              Start Next Kiosk Order
+            </Button>
+          </div>
+        </div>
+      ) : pendingOrder ? (
+        <Card className="mx-auto max-w-lg p-6 space-y-4 text-center">
+          <div className="text-xs font-bold uppercase text-slate-500">Kiosk Order Created</div>
+          <div className="text-2xl font-black text-slate-900">{pendingOrder.order_number}</div>
+          <div className="text-3xl font-black text-orange-600">₹{pendingOrder.total_amount}</div>
+          {pendingOrder.payment_method === "cash" ? (
+            <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-sm text-amber-900">
+              Please pay ₹{pendingOrder.total_amount} at the cashier counter quoting <strong>{pendingOrder.order_number}</strong> to generate your pickup token.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
+                Complete {pendingOrder.payment_method.toUpperCase()} payment verification to generate your printable pickup slip.
+              </div>
+              <Button size="lg" className="w-full" disabled={busy} onClick={completeKioskPayment}>
+                {busy ? "Verifying..." : "Verify Payment & Print Token Slip"}
+              </Button>
+            </div>
+          )}
+          <Button
+            variant="outline"
+            onClick={() => {
+              setPendingOrder(null);
+              setCartLines([]);
+            }}
+          >
+            New Order
+          </Button>
+        </Card>
       ) : (
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="lg:col-span-2 grid gap-4 sm:grid-cols-2">
@@ -161,8 +263,22 @@ export const KioskPage: React.FC = () => {
                     <span>₹{(Number(l.item.base_price) * l.quantity).toFixed(2)}</span>
                   </div>
                 ))}
-                <Button size="lg" className="w-full" onClick={placeKioskOrder}>
-                  {LABELS[lang].pay}
+                <div className="flex flex-wrap gap-1.5 pt-2">
+                  {(["razorpay", "stripe", "cash"] as const).map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setPayMethod(m)}
+                      className={`rounded-lg px-2.5 py-1 text-xs font-bold uppercase border ${
+                        payMethod === m ? "border-orange-600 bg-orange-50 text-orange-800" : "border-slate-200 text-slate-600"
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+                <Button size="lg" className="w-full" disabled={busy} onClick={placeKioskOrder}>
+                  {busy ? "Creating Order..." : LABELS[lang].pay}
                 </Button>
               </div>
             )}

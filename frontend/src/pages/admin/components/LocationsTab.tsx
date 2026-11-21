@@ -18,6 +18,24 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
     queryFn: async () => (await api.get(`/canteens/${activeCanteenId}`)).data,
   });
 
+  const { data: holidays = [], refetch: refetchHolidays } = useQuery<any[]>({
+    queryKey: ["admin-holidays", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/admin/holidays?canteen_id=${activeCanteenId}`)).data,
+  });
+
+  const { data: stations = [], refetch: refetchStations } = useQuery<any[]>({
+    queryKey: ["admin-kitchen-stations", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/admin/canteens/${activeCanteenId}/kitchen-stations`)).data,
+  });
+
+  const { data: pickupLocs = [], refetch: refetchPickupLocs } = useQuery<any[]>({
+    queryKey: ["admin-pickup-locs", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/admin/canteens/${activeCanteenId}/pickup-locations`)).data,
+  });
+
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [code, setCode] = useState("");
@@ -28,6 +46,11 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
   const [kitchenCode, setKitchenCode] = useState("");
   const [tableNo, setTableNo] = useState("");
   const [zone, setZone] = useState("Main Hall");
+  const [stationKitchenId, setStationKitchenId] = useState("");
+  const [stationName, setStationName] = useState("");
+  const [pickupCounterId, setPickupCounterId] = useState("");
+  const [pickupName, setPickupName] = useState("");
+  const [pickupCode, setPickupCode] = useState("");
   const [holDate, setHolDate] = useState("");
   const [holTitle, setHolTitle] = useState("");
   const [openTime, setOpenTime] = useState("07:30");
@@ -54,8 +77,13 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
                   size="sm"
                   variant={c.is_active ? "outline" : "success"}
                   onClick={async () => {
-                    await api.patch(`/admin/canteens/${c.id}`, { is_active: !c.is_active });
-                    refetchCanteens();
+                    try {
+                      await api.patch(`/admin/canteens/${c.id}`, { is_active: !c.is_active });
+                      refetchCanteens();
+                      pushToast(`Canteen ${!c.is_active ? "activated" : "deactivated"}`, "info");
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
                   }}
                 >
                   {c.is_active ? "Deactivate" : "Activate"}
@@ -64,8 +92,13 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
                   size="sm"
                   variant={c.is_temporarily_closed ? "danger" : "outline"}
                   onClick={async () => {
-                    await api.patch(`/admin/canteens/${c.id}`, { is_temporarily_closed: !c.is_temporarily_closed });
-                    refetchCanteens();
+                    try {
+                      await api.patch(`/admin/canteens/${c.id}`, { is_temporarily_closed: !c.is_temporarily_closed });
+                      refetchCanteens();
+                      pushToast(`Canteen ${!c.is_temporarily_closed ? "temporarily closed" : "reopened"}`, "info");
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
                   }}
                 >
                   {c.is_temporarily_closed ? "Reopen" : "Temp Close"}
@@ -113,10 +146,26 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
         <div className="grid gap-5 md:grid-cols-3">
           <Card className="p-4 space-y-3">
             <h3 className="font-bold text-sm text-slate-900">Counters ({detail.counters?.length || 0})</h3>
-            <div className="space-y-1 text-xs text-slate-600 max-h-28 overflow-y-auto">
+            <div className="space-y-1.5 text-xs text-slate-600 max-h-36 overflow-y-auto">
               {detail.counters?.map((cnt: any) => (
-                <div key={cnt.id}>
-                  • <strong>{cnt.name}</strong> ({cnt.code})
+                <div key={cnt.id} className="flex items-center justify-between gap-2">
+                  <span>
+                    • <strong>{cnt.name}</strong> ({cnt.code})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.patch(`/admin/counters/${cnt.id}`, { is_active: !cnt.is_active });
+                        refetchDetail();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${cnt.is_active ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}
+                  >
+                    {cnt.is_active ? "Active" : "Paused"}
+                  </button>
                 </div>
               ))}
             </div>
@@ -145,12 +194,75 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
             >
               Add Counter
             </Button>
+
+            <div className="border-t border-slate-100 pt-2 space-y-2">
+              <div className="text-[11px] font-bold text-slate-700">Pickup Locations ({pickupLocs.length})</div>
+              <div className="space-y-1 text-[11px] text-slate-600 max-h-20 overflow-y-auto">
+                {pickupLocs.map((pl) => (
+                  <div key={pl.id}>• {pl.name} ({pl.display_code})</div>
+                ))}
+              </div>
+              <Select value={pickupCounterId} onChange={(e) => setPickupCounterId(e.target.value)}>
+                <option value="">Select Counter</option>
+                {detail.counters?.map((cnt: any) => (
+                  <option key={cnt.id} value={cnt.id}>
+                    {cnt.name}
+                  </option>
+                ))}
+              </Select>
+              <div className="grid grid-cols-2 gap-2">
+                <Input value={pickupName} onChange={(e) => setPickupName(e.target.value)} placeholder="Parcel Shelf A" />
+                <Input value={pickupCode} onChange={(e) => setPickupCode(e.target.value)} placeholder="PK-A" />
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-full"
+                onClick={async () => {
+                  try {
+                    const cid = pickupCounterId || detail.counters?.[0]?.id;
+                    if (!cid) return pushToast("Create a counter first", "error");
+                    await api.post(`/admin/canteens/${activeCanteenId}/pickup-locations`, {
+                      counter_id: cid,
+                      name: pickupName,
+                      display_code: pickupCode,
+                    });
+                    setPickupName("");
+                    setPickupCode("");
+                    refetchPickupLocs();
+                    pushToast("Pickup location added", "success");
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                Add Pickup Location
+              </Button>
+            </div>
           </Card>
 
           <Card className="p-4 space-y-3">
-            <h3 className="font-bold text-sm text-slate-900">Kitchens & Tables</h3>
-            <div className="text-xs text-slate-600">
-              Kitchens: {detail.kitchens?.map((k: any) => k.name).join(", ") || "None"}
+            <h3 className="font-bold text-sm text-slate-900">Kitchens, Stations & Tables</h3>
+            <div className="space-y-1 text-xs text-slate-600 max-h-24 overflow-y-auto">
+              {detail.kitchens?.map((k: any) => (
+                <div key={k.id} className="flex items-center justify-between">
+                  <span>• {k.name} ({k.code})</span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.patch(`/admin/kitchens/${k.id}`, { is_active: !k.is_active });
+                        refetchDetail();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                    className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${k.is_active ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}
+                  >
+                    {k.is_active ? "Active" : "Paused"}
+                  </button>
+                </div>
+              ))}
             </div>
             <div className="grid grid-cols-2 gap-2">
               <Input value={kitchenName} onChange={(e) => setKitchenName(e.target.value)} placeholder="Bakery Kitchen" />
@@ -177,9 +289,71 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
             >
               Add Kitchen
             </Button>
-            <div className="border-t border-slate-100 pt-2 grid grid-cols-2 gap-2">
-              <Input value={tableNo} onChange={(e) => setTableNo(e.target.value)} placeholder="T-03" />
-              <Input value={zone} onChange={(e) => setZone(e.target.value)} placeholder="Zone" />
+
+            <div className="border-t border-slate-100 pt-2 space-y-2">
+              <div className="text-[11px] font-bold text-slate-700">Kitchen Stations ({stations.length})</div>
+              <div className="flex flex-wrap gap-1">
+                {stations.map((s) => (
+                  <Badge key={s.id} tone="slate">{s.name}</Badge>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <Select value={stationKitchenId} onChange={(e) => setStationKitchenId(e.target.value)}>
+                  <option value="">Select Kitchen</option>
+                  {detail.kitchens?.map((k: any) => (
+                    <option key={k.id} value={k.id}>
+                      {k.name}
+                    </option>
+                  ))}
+                </Select>
+                <Input value={stationName} onChange={(e) => setStationName(e.target.value)} placeholder="Tandoor / Grill" />
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-full"
+                onClick={async () => {
+                  try {
+                    const kid = stationKitchenId || detail.kitchens?.[0]?.id;
+                    if (!kid) return pushToast("Create a kitchen first", "error");
+                    await api.post(`/admin/kitchens/${kid}/stations`, { name: stationName, station_type: "general" });
+                    setStationName("");
+                    refetchStations();
+                    pushToast("Station added", "success");
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                Add Station
+              </Button>
+            </div>
+
+            <div className="border-t border-slate-100 pt-2 space-y-2">
+              <div className="text-[11px] font-bold text-slate-700">Dining Tables ({detail.tables?.length || 0})</div>
+              <div className="flex flex-wrap gap-1">
+                {detail.tables?.map((t: any) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.patch(`/admin/tables/${t.id}`, { is_active: !t.is_active });
+                        refetchDetail();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                    className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${t.is_active ? "bg-white border-slate-200 text-slate-700" : "bg-red-50 border-red-200 text-red-700"}`}
+                  >
+                    {t.table_number}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <Input value={tableNo} onChange={(e) => setTableNo(e.target.value)} placeholder="T-03" />
+                <Input value={zone} onChange={(e) => setZone(e.target.value)} placeholder="Zone" />
+              </div>
             </div>
             <Button
               size="sm"
@@ -220,11 +394,16 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
               variant="outline"
               className="w-full"
               onClick={async () => {
-                await api.put(`/admin/canteens/${activeCanteenId}/hours`, [
-                  { day_of_week: dayOfWeek, open_time: `${openTime}:00`, close_time: `${closeTime}:00`, is_closed: false },
-                ]);
-                refetchDetail();
-                pushToast("Operating hour updated", "success");
+                try {
+                  await api.put(`/admin/canteens/${activeCanteenId}/hours`, [
+                    { day_of_week: dayOfWeek, open_time: `${openTime}:00`, close_time: `${closeTime}:00`, is_closed: false },
+                  ]);
+                  refetchDetail();
+                  refetchCanteens();
+                  pushToast("Operating hour updated", "success");
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
               }}
             >
               Save Day Hours
@@ -247,6 +426,7 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
                   });
                   setHolTitle("");
                   refetchDetail();
+                  refetchHolidays();
                   refetchCanteens();
                   pushToast("Holiday scheduled", "info");
                 } catch (err) {
@@ -256,6 +436,29 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
             >
               Add Holiday Closure
             </Button>
+            <div className="space-y-1 max-h-32 overflow-y-auto text-xs border-t border-slate-100 pt-2">
+              {holidays.filter((h) => h.is_active).map((h) => (
+                <div key={h.id} className="flex items-center justify-between gap-2">
+                  <span>{h.holiday_date} • <strong>{h.title}</strong></span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.delete(`/admin/holidays/${h.id}`);
+                        refetchHolidays();
+                        refetchCanteens();
+                        pushToast("Holiday removed", "info");
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                    className="text-red-600 font-bold hover:underline"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
           </Card>
         </div>
       )}

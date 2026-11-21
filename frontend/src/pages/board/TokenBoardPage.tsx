@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Volume2, VolumeX } from "lucide-react";
-import { api } from "../../api/client";
+import { api, buildWsUrl } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
 import { Button, Select } from "../../components/ui/Primitives";
@@ -31,10 +31,9 @@ export const TokenBoardPage: React.FC = () => {
 
   useEffect(() => {
     if (!activeId) return;
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
     let ws: WebSocket | null = null;
     try {
-      ws = new WebSocket(`${proto}://${window.location.host}/api/v1/ws/board/${activeId}`);
+      ws = new WebSocket(buildWsUrl(`/ws/board/${activeId}`));
       ws.onmessage = () => qc.invalidateQueries({ queryKey: ["digital-board", activeId] });
     } catch {
       // polling fallback
@@ -84,7 +83,18 @@ export const TokenBoardPage: React.FC = () => {
               </option>
             ))}
           </Select>
-          <Button variant={voiceEnabled ? "primary" : "outline"} size="sm" onClick={() => setVoiceEnabled(!voiceEnabled)}>
+          <Button
+            variant={voiceEnabled ? "primary" : "outline"}
+            size="sm"
+            onClick={() => {
+              const next = !voiceEnabled;
+              setVoiceEnabled(next);
+              if (next && "speechSynthesis" in window) {
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.speak(new SpeechSynthesisUtterance("Voice announcements enabled"));
+              }
+            }}
+          >
             {voiceEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
             {voiceEnabled ? "Audio ON" : "Audio OFF"}
           </Button>

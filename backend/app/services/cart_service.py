@@ -20,6 +20,7 @@ from app.schemas.order import (
     CartSummaryOut,
 )
 from app.services.college_service import compute_canteen_live_status
+from app.services.menu_service import compute_schedule_availability_map
 
 
 def _quantize(val: Decimal) -> Decimal:
@@ -101,25 +102,38 @@ def evaluate_coupon(
             ) or 0
             if prior_orders > 0:
                 return False, Decimal("0.00"), "Coupon is valid on first order only", None
-    elif guest_phone:
+    elif guest_phone and guest_phone.strip() != "0000000000":
+        clean_phone = guest_phone.strip()
         guest_used = db.scalar(
             select(func.count(CouponRedemption.id)).where(
                 CouponRedemption.coupon_id == coupon.id,
-                CouponRedemption.guest_phone == guest_phone,
+                CouponRedemption.guest_phone == clean_phone,
             )
         ) or 0
         if guest_used >= coupon.usage_limit_per_user:
             return False, Decimal("0.00"), "Coupon usage limit reached for this phone", None
+        if coupon.first_order_only:
+            prior_guest_orders = db.scalar(
+                select(func.count(Order.id)).where(
+                    Order.guest_phone == clean_phone, Order.payment_status == "CONFIRMED"
+                )
+            ) or 0
+            if prior_guest_orders > 0:
+                return False, Decimal("0.00"), "Coupon is valid on first order only", None
 
     eligible_amount = subtotal
-    if coupon.discount_type == "category" and coupon.target_category_id:
+    if coupon.discount_type == "category":
+        if not coupon.target_category_id:
+            return False, Decimal("0.00"), "Coupon category target is not configured", None
         eligible_amount = sum(
             (line_sub for _fid, cat_id, line_sub in items_with_categories if cat_id == coupon.target_category_id),
             Decimal("0.00"),
         )
         if eligible_amount <= Decimal("0.00"):
             return False, Decimal("0.00"), "Coupon applies to a different category", None
-    elif coupon.discount_type == "food_item" and coupon.target_food_item_id:
+    elif coupon.discount_type == "food_item":
+        if not coupon.target_food_item_id:
+            return False, Decimal("0.00"), "Coupon item target is not configured", None
         eligible_amount = sum(
             (line_sub for fid, _cat_id, line_sub in items_with_categories if fid == coupon.target_food_item_id),
             Decimal("0.00"),
@@ -177,19 +191,30 @@ def calculate_cart_summary(
     items_out: list[CartItemOut] = []
     subtotal = Decimal("0.00")
     items_for_coupon: list[tuple[UUID, UUID, Decimal]] = []
+    line_tax_specs: list[tuple[Decimal, Decimal]] = []
+
+    food_ids = list({ci.food_item_id for ci in cart.items})
+    variant_ids = list({ci.variant_id for ci in cart.items if ci.variant_id})
+    addon_ids = list({c.addon_id for ci in cart.items for c in ci.customizations if c.customization_type == "addon" and c.addon_id})
+    food_map = {f.id: f for f in db.scalars(select(FoodItem).where(FoodItem.id.in_(food_ids))).all()} if food_ids else {}
+    variant_map = {v.id: v for v in db.scalars(select(FoodVariant).where(FoodVariant.id.in_(variant_ids))).all()} if variant_ids else {}
+    addon_map = {a.id: a for a in db.scalars(select(FoodAddon).where(FoodAddon.id.in_(addon_ids))).all()} if addon_ids else {}
+    sched_map = compute_schedule_availability_map(db, food_ids)
 
     for ci in cart.items:
-        food = db.get(FoodItem, ci.food_item_id)
+        food = food_map.get(ci.food_item_id)
         if not food or not food.is_active or food.canteen_id != canteen.id:
             validation_errors.append("One or more items in your cart are no longer active.")
             continue
         if not food.is_available or food.insufficient_ingredients:
             validation_errors.append(f"{food.name} is currently unavailable.")
+        if not sched_map.get(food.id, True):
+            validation_errors.append(f"{food.name} is outside its scheduled serving hours.")
 
         unit_price = food.base_price
         variant_name = None
         if ci.variant_id:
-            var = db.get(FoodVariant, ci.variant_id)
+            var = variant_map.get(ci.variant_id)
             if not var or var.food_item_id != food.id or not var.is_available:
                 validation_errors.append(f"Selected variant for {food.name} is unavailable.")
             else:
@@ -201,7 +226,7 @@ def calculate_cart_summary(
         cust_outs: list[CartCustomizationOut] = []
         for cust in ci.customizations:
             if cust.customization_type == "addon" and cust.addon_id:
-                addon = db.get(FoodAddon, cust.addon_id)
+                addon = addon_map.get(cust.addon_id)
                 if addon and addon.is_available:
                     line_addon_total = _quantize(addon.price * cust.quantity)
                     addon_per_unit += line_addon_total
@@ -231,6 +256,8 @@ def calculate_cart_summary(
 
         line_sub = _quantize((unit_price + addon_per_unit) * ci.quantity)
         subtotal += line_sub
+        eff_tax = food.tax_rate_percent if food.tax_rate_percent is not None else canteen.tax_rate_percent
+        line_tax_specs.append((line_sub, eff_tax))
         items_for_coupon.append((food.id, food.category_id, line_sub))
         items_out.append(
             CartItemOut(
@@ -256,8 +283,13 @@ def calculate_cart_summary(
             db, cart.coupon_code, canteen.id, subtotal, items_for_coupon, user_id=user_id
         )
 
+    discount_ratio = (discount / subtotal) if (subtotal > Decimal("0.00") and discount > Decimal("0.00")) else Decimal("0.00")
+    tax = Decimal("0.00")
+    for l_sub, l_rate in line_tax_specs:
+        l_taxable = max(Decimal("0.00"), l_sub * (Decimal("1.00") - discount_ratio))
+        tax += (l_taxable * l_rate) / Decimal("100")
+    tax = _quantize(tax)
     taxable = max(Decimal("0.00"), subtotal - discount)
-    tax = _quantize((taxable * canteen.tax_rate_percent) / Decimal("100"))
     total = _quantize(taxable + tax)
 
     return CartSummaryOut(
@@ -285,11 +317,20 @@ def add_item_to_cart(
     user_id: Optional[UUID] = None,
     guest_session_id: Optional[str] = None,
 ) -> CartSummaryOut:
+    canteen = db.get(Canteen, payload.canteen_id)
+    if not canteen or not canteen.is_active:
+        raise HTTPException(status_code=404, detail="Selected canteen is unavailable")
+    is_open, _, _, _ = compute_canteen_live_status(db, canteen)
+    if not is_open:
+        raise HTTPException(status_code=400, detail="Canteen is currently closed, paused, or on holiday")
+
     food = db.get(FoodItem, payload.food_item_id)
     if not food or food.canteen_id != payload.canteen_id or not food.is_active:
         raise HTTPException(status_code=404, detail="Food item not found in selected canteen")
     if not food.is_available or food.insufficient_ingredients:
         raise HTTPException(status_code=400, detail=f"{food.name} is currently unavailable")
+    if not compute_schedule_availability_map(db, [food.id]).get(food.id, True):
+        raise HTTPException(status_code=400, detail=f"{food.name} is not available in the current menu schedule")
 
     if payload.variant_id:
         var = db.get(FoodVariant, payload.variant_id)
@@ -348,7 +389,7 @@ def update_cart_item(
     if not ci:
         raise HTTPException(status_code=404, detail="Cart item not found")
     cart = db.get(Cart, ci.cart_id)
-    if not cart or (user_id and cart.user_id != user_id) or (not user_id and cart.guest_session_id != guest_session_id):
+    if not cart or cart.status != "active" or (user_id and cart.user_id != user_id) or (not user_id and cart.guest_session_id != guest_session_id):
         raise HTTPException(status_code=403, detail="Not authorized for this cart")
 
     if payload.quantity == 0:
@@ -361,6 +402,9 @@ def update_cart_item(
     if payload.quantity is not None:
         ci.quantity = payload.quantity
     if payload.variant_id is not None:
+        var = db.get(FoodVariant, payload.variant_id)
+        if not var or var.food_item_id != ci.food_item_id or not var.is_available:
+            raise HTTPException(status_code=400, detail="Invalid or unavailable variant selected")
         ci.variant_id = payload.variant_id
     if payload.special_instructions is not None:
         ci.special_instructions = payload.special_instructions
@@ -379,18 +423,22 @@ def update_cart_item(
         for rem in (payload.removed_ingredients or []):
             db.add(CartItemCustomization(cart_item_id=ci.id, customization_type="remove_ingredient", option_name="Remove", option_value=rem))
         for ad in (payload.addons or []):
+            link = db.scalar(select(FoodItemAddon).where(FoodItemAddon.food_item_id == ci.food_item_id, FoodItemAddon.addon_id == ad.addon_id))
             addon = db.get(FoodAddon, ad.addon_id)
-            if addon and addon.is_available:
-                db.add(
-                    CartItemCustomization(
-                        cart_item_id=ci.id,
-                        customization_type="addon",
-                        addon_id=addon.id,
-                        option_name=addon.name,
-                        option_value=f"x{ad.quantity}",
-                        quantity=ad.quantity,
-                    )
+            if not link or not addon or not addon.is_available:
+                raise HTTPException(status_code=400, detail="Invalid or unavailable add-on selected")
+            if ad.quantity > link.max_quantity:
+                raise HTTPException(status_code=400, detail=f"Maximum {link.max_quantity} allowed for {addon.name}")
+            db.add(
+                CartItemCustomization(
+                    cart_item_id=ci.id,
+                    customization_type="addon",
+                    addon_id=addon.id,
+                    option_name=addon.name,
+                    option_value=f"x{ad.quantity}",
+                    quantity=ad.quantity,
                 )
+            )
 
     db.commit()
     db.expire_all()

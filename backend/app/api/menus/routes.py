@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -15,17 +15,24 @@ from app.core.permissions import (
     enforce_canteen_scope,
     require_roles,
 )
+from app.models.menu import FoodAddon, FoodCategory, FoodItem, FoodVariant, MenuSchedule
 from app.schemas.menu import (
     FoodAddonCreate,
     FoodAddonOut,
+    FoodAddonUpdate,
     FoodCategoryCreate,
     FoodCategoryOut,
     FoodCategoryUpdate,
     FoodItemCreate,
     FoodItemOut,
     FoodItemUpdate,
+    FoodVariantIn,
+    FoodVariantOut,
+    FoodVariantUpdate,
+    MenuScheduleAssignItemsIn,
     MenuScheduleCreate,
     MenuScheduleOut,
+    MenuScheduleUpdate,
 )
 from app.services import menu_service
 
@@ -54,7 +61,26 @@ def update_category(
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
 ):
+    cat = db.get(FoodCategory, category_id)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    enforce_canteen_scope(principal, cat.canteen_id)
     return menu_service.update_category(db, category_id, payload, principal.user.id)
+
+
+@router.delete("/categories/{category_id}")
+def delete_category(
+    category_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    cat = db.get(FoodCategory, category_id)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    enforce_canteen_scope(principal, cat.canteen_id)
+    cat.is_active = False
+    db.commit()
+    return {"status": "deactivated", "id": str(category_id)}
 
 
 @router.get("/canteens/{canteen_id}/items", response_model=list[FoodItemOut])
@@ -116,13 +142,74 @@ def update_item(
     ),
     db: Session = Depends(get_db),
 ):
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, item.canteen_id)
     # Kitchen staff can only toggle availability
     if ROLE_KITCHEN_STAFF in principal.roles and not principal.has_role(
         ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER
     ):
+        if payload.is_available is None:
+            raise HTTPException(status_code=400, detail="is_available boolean is required")
         restricted = FoodItemUpdate(is_available=payload.is_available)
         return menu_service.update_food_item(db, item_id, restricted, principal.user.id)
     return menu_service.update_food_item(db, item_id, payload, principal.user.id)
+
+
+@router.post("/items/{item_id}/variants", response_model=FoodVariantOut, status_code=status.HTTP_201_CREATED)
+def add_variant(
+    item_id: UUID,
+    payload: FoodVariantIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, item.canteen_id)
+    var = FoodVariant(food_item_id=item.id, **payload.model_dump())
+    db.add(var)
+    db.commit()
+    db.refresh(var)
+    return var
+
+
+@router.patch("/variants/{variant_id}", response_model=FoodVariantOut)
+def update_variant(
+    variant_id: UUID,
+    payload: FoodVariantUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    var = db.get(FoodVariant, variant_id)
+    if not var:
+        raise HTTPException(status_code=404, detail="Variant not found")
+    item = db.get(FoodItem, var.food_item_id)
+    if item:
+        enforce_canteen_scope(principal, item.canteen_id)
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(var, k, v)
+    db.commit()
+    db.refresh(var)
+    return var
+
+
+@router.delete("/variants/{variant_id}")
+def delete_variant(
+    variant_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    var = db.get(FoodVariant, variant_id)
+    if not var:
+        raise HTTPException(status_code=404, detail="Variant not found")
+    item = db.get(FoodItem, var.food_item_id)
+    if item:
+        enforce_canteen_scope(principal, item.canteen_id)
+    db.delete(var)
+    db.commit()
+    return {"status": "deleted", "id": str(variant_id)}
 
 
 @router.get("/canteens/{canteen_id}/addons", response_model=list[FoodAddonOut])
@@ -140,6 +227,20 @@ def create_addon(
     return menu_service.create_addon(db, payload, principal.user.id)
 
 
+@router.patch("/addons/{addon_id}", response_model=FoodAddonOut)
+def update_addon(
+    addon_id: UUID,
+    payload: FoodAddonUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    addon = db.get(FoodAddon, addon_id)
+    if not addon:
+        raise HTTPException(status_code=404, detail="Addon not found")
+    enforce_canteen_scope(principal, addon.canteen_id)
+    return menu_service.update_addon(db, addon, payload, principal.user.id)
+
+
 @router.get("/canteens/{canteen_id}/schedules", response_model=list[MenuScheduleOut])
 def list_schedules(canteen_id: UUID, db: Session = Depends(get_db)):
     return menu_service.list_schedules(db, canteen_id)
@@ -153,6 +254,49 @@ def create_schedule(
 ):
     enforce_canteen_scope(principal, payload.canteen_id)
     return menu_service.create_schedule(db, payload, principal.user.id)
+
+
+@router.patch("/schedules/{schedule_id}", response_model=MenuScheduleOut)
+def update_schedule(
+    schedule_id: UUID,
+    payload: MenuScheduleUpdate,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    sched = db.get(MenuSchedule, schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Menu schedule not found")
+    enforce_canteen_scope(principal, sched.canteen_id)
+    return menu_service.update_schedule(db, sched, payload, principal.user.id)
+
+
+@router.put("/schedules/{schedule_id}/items", response_model=MenuScheduleOut)
+def assign_schedule_items(
+    schedule_id: UUID,
+    payload: MenuScheduleAssignItemsIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    sched = db.get(MenuSchedule, schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Menu schedule not found")
+    enforce_canteen_scope(principal, sched.canteen_id)
+    return menu_service.assign_schedule_items(db, sched, payload.food_item_ids, principal.user.id)
+
+
+@router.delete("/schedules/{schedule_id}")
+def delete_schedule(
+    schedule_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    sched = db.get(MenuSchedule, schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Menu schedule not found")
+    enforce_canteen_scope(principal, sched.canteen_id)
+    db.delete(sched)
+    db.commit()
+    return {"status": "deleted", "id": str(schedule_id)}
 
 
 @router.get("/canteens/{canteen_id}/export-csv")
@@ -179,4 +323,8 @@ async def import_csv(
 ):
     enforce_canteen_scope(principal, canteen_id)
     raw = await file.read()
-    return menu_service.import_menu_csv(db, canteen_id, raw.decode("utf-8-sig"), principal.user.id)
+    try:
+        decoded = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV file must be UTF-8 encoded") from exc
+    return menu_service.import_menu_csv(db, canteen_id, decoded, principal.user.id)

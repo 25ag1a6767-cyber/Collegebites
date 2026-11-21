@@ -15,6 +15,7 @@ os.environ["DATABASE_URL"] = TEST_DB_URL
 os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "memory://")
 os.environ["OTP_TEST_ECHO"] = "true"
 os.environ["RAZORPAY_TEST_MODE"] = "true"
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 
 from app.core.database import get_db  # noqa: E402
 from app.core.redis_client import get_redis_manager  # noqa: E402

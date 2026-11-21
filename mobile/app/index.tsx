@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { mobileApi } from "../src/api/client";
+import { getMobileApiError, mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 export default function MenuScreen() {
@@ -61,20 +61,19 @@ export default function MenuScreen() {
     queryFn: async () => (await mobileApi.get("/customers/profile")).data,
   });
 
-  const { data: items = [] } = useQuery<any[]>({
+  const { data: items = [], isLoading: itemsLoading } = useQuery<any[]>({
     queryKey: ["m-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, tagFilter, sortBy],
     enabled: Boolean(activeCanteen?.id),
     queryFn: async () => {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set("q", search.trim());
-      if (selectedCategoryId) params.set("category_id", selectedCategoryId);
-      if (vegFilter === "veg") params.set("is_veg", "true");
-      if (vegFilter === "nonveg") params.set("is_veg", "false");
-      if (tagFilter === "featured") params.set("featured", "true");
-      if (tagFilter === "popular") params.set("popular", "true");
-      if (tagFilter === "special") params.set("todays_special", "true");
-      params.set("sort_by", sortBy);
-      return (await mobileApi.get(`/menus/canteens/${activeCanteen.id}/items?${params.toString()}`)).data;
+      const qs: string[] = [`sort_by=${encodeURIComponent(sortBy)}`];
+      if (search.trim()) qs.push(`q=${encodeURIComponent(search.trim())}`);
+      if (selectedCategoryId) qs.push(`category_id=${encodeURIComponent(selectedCategoryId)}`);
+      if (vegFilter === "veg") qs.push("is_veg=true");
+      if (vegFilter === "nonveg") qs.push("is_veg=false");
+      if (tagFilter === "featured") qs.push("featured=true");
+      if (tagFilter === "popular") qs.push("popular=true");
+      if (tagFilter === "special") qs.push("todays_special=true");
+      return (await mobileApi.get(`/menus/canteens/${activeCanteen.id}/items?${qs.join("&")}`)).data;
     },
   });
 
@@ -92,7 +91,10 @@ export default function MenuScreen() {
 
   const openModal = (item: any) => {
     setActiveItem(item);
-    const defVar = item.variants?.find((v: any) => v.is_default) || item.variants?.[0];
+    const defVar =
+      item.variants?.find((v: any) => v.is_default && v.is_available) ||
+      item.variants?.find((v: any) => v.is_available) ||
+      item.variants?.[0];
     setSelVariantId(defVar?.id || "");
     setSelSpice(item.spice_levels?.[0] || "");
     setSelSugar(item.sugar_levels?.[0] || "");
@@ -127,15 +129,19 @@ export default function MenuScreen() {
       qc.invalidateQueries({ queryKey: ["m-cart", activeCanteen?.id] });
       setActiveItem(null);
     },
-    onError: (e: any) => setModalMsg(e?.response?.data?.detail || "Could not add item"),
+    onError: (e: unknown) => setModalMsg(getMobileApiError(e, "Could not add item")),
   });
 
   const toggleFav = async (foodId: string) => {
     if (!user) return;
-    const isFav = profile?.favourite_item_ids?.includes(foodId);
-    if (isFav) await mobileApi.delete(`/customers/favourites/${foodId}`);
-    else await mobileApi.post(`/customers/favourites/${foodId}`);
-    qc.invalidateQueries({ queryKey: ["m-profile"] });
+    try {
+      const isFav = profile?.favourite_item_ids?.includes(foodId);
+      if (isFav) await mobileApi.delete(`/customers/favourites/${foodId}`);
+      else await mobileApi.post(`/customers/favourites/${foodId}`);
+      qc.invalidateQueries({ queryKey: ["m-profile"] });
+    } catch {
+      // keep silent on quick toggle failure
+    }
   };
 
   const submitReview = async () => {
@@ -150,8 +156,8 @@ export default function MenuScreen() {
       qc.invalidateQueries({ queryKey: ["m-item-reviews", activeItem.id] });
       qc.invalidateQueries({ queryKey: ["m-items"] });
       setModalMsg("Review submitted!");
-    } catch (e: any) {
-      setModalMsg(e?.response?.data?.detail || "Sign in to submit review");
+    } catch (e: unknown) {
+      setModalMsg(getMobileApiError(e, "Sign in to submit review"));
     }
   };
 
@@ -265,8 +271,14 @@ export default function MenuScreen() {
         data={items}
         keyExtractor={(item) => item.id}
         contentContainerStyle={{ paddingBottom: 95, gap: 10 }}
+        ListEmptyComponent={
+          <Text style={{ textAlign: "center", color: "#64748b", marginTop: 24, fontSize: 13 }}>
+            {itemsLoading ? "Loading canteen menu..." : "No dishes matched your filters."}
+          </Text>
+        }
         renderItem={({ item }) => {
-          const unavailable = !item.is_available || item.insufficient_ingredients || !activeCanteen?.is_open_now;
+          const outOfSchedule = item.is_schedule_active_now === false;
+          const unavailable = !item.is_available || item.insufficient_ingredients || outOfSchedule || !activeCanteen?.is_open_now;
           const isFav = profile?.favourite_item_ids?.includes(item.id);
           return (
             <Pressable onPress={() => openModal(item)} style={styles.card}>
@@ -297,7 +309,9 @@ export default function MenuScreen() {
                 onPress={() => openModal(item)}
                 style={[styles.addBtn, unavailable && { backgroundColor: "#cbd5e1" }]}
               >
-                <Text style={styles.addBtnText}>{unavailable ? "Unavail" : "Customize"}</Text>
+                <Text style={styles.addBtnText}>
+                  {outOfSchedule ? "Off-Hours" : unavailable ? "Unavail" : "Customize"}
+                </Text>
               </Pressable>
             </Pressable>
           );
@@ -349,10 +363,11 @@ export default function MenuScreen() {
                   return (
                     <Pressable
                       key={v.id}
+                      disabled={!v.is_available}
                       onPress={() => setSelVariantId(v.id)}
-                      style={[styles.optRow, active && styles.optRowActive]}
+                      style={[styles.optRow, active && styles.optRowActive, !v.is_available && { opacity: 0.45 }]}
                     >
-                      <Text style={{ fontWeight: "700" }}>{v.name}</Text>
+                      <Text style={{ fontWeight: "700" }}>{v.name}{!v.is_available ? " (Out)" : ""}</Text>
                       <Text style={{ fontWeight: "800", color: "#ea580c" }}>₹{p.toFixed(2)}</Text>
                     </Pressable>
                   );
@@ -360,10 +375,12 @@ export default function MenuScreen() {
               </View>
             )}
 
-            {activeItem.addons?.length > 0 && (
+            {activeItem.addons?.filter((ad: any) => ad.is_available !== false).length > 0 && (
               <View style={styles.secBox}>
                 <Text style={styles.secTitle}>Add-ons & Extra Toppings</Text>
-                {activeItem.addons.map((ad: any) => {
+                {activeItem.addons
+                  .filter((ad: any) => ad.is_available !== false)
+                  .map((ad: any) => {
                   const cnt = selAddons[ad.id] || 0;
                   return (
                     <View key={ad.id} style={styles.optRow}>
@@ -379,7 +396,9 @@ export default function MenuScreen() {
                         </Pressable>
                         <Text style={{ fontWeight: "800" }}>{cnt}</Text>
                         <Pressable
-                          onPress={() => setSelAddons((p) => ({ ...p, [ad.id]: cnt + 1 }))}
+                          onPress={() =>
+                            setSelAddons((p) => ({ ...p, [ad.id]: Math.min(ad.max_quantity || 10, cnt + 1) }))
+                          }
                           style={styles.qtyBtn}
                         >
                           <Text style={{ fontWeight: "800" }}>+</Text>

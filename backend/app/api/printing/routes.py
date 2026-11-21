@@ -12,9 +12,12 @@ from app.core.permissions import (
     ROLE_COLLEGE_ADMIN,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
+    enforce_canteen_scope,
     get_optional_principal,
     require_roles,
+    scoped_canteen_for_principal,
 )
+from app.models.order import Order
 from app.models.payment import Receipt, ReceiptPrintHistory, ReceiptPrintJob
 from app.schemas.payment import PrintHistoryOut, PrintJobOut, PrintReceiptRequest
 from app.services import receipt_service
@@ -22,6 +25,14 @@ from app.services import receipt_service
 router = APIRouter(prefix="/printing", tags=["Receipt & Thermal Printing"])
 
 STAFF_PRINT_ROLES = (ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_CASHIER)
+
+
+def _print_staff_cid(principal: Optional[AuthenticatedPrincipal]) -> Optional[UUID]:
+    if not principal or not principal.has_role(*STAFF_PRINT_ROLES):
+        return None
+    if principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        return None
+    return principal.assigned_canteen_id
 
 
 @router.get("/receipts/{order_id_or_number}/escpos")
@@ -62,6 +73,7 @@ def print_receipt(
         actor_user_id=principal.user.id if principal else None,
         actor_label=actor_label,
         is_staff=is_staff,
+        staff_canteen_id=_print_staff_cid(principal),
         guest_access_token=guest_token or x_guest_token,
     )
 
@@ -72,6 +84,11 @@ def retry_print_job(
     principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_PRINT_ROLES)),
     db: Session = Depends(get_db),
 ):
+    job = db.get(ReceiptPrintJob, job_id)
+    if job:
+        ord_row = db.get(Order, job.order_id)
+        if ord_row:
+            enforce_canteen_scope(principal, ord_row.canteen_id)
     return receipt_service.retry_print_job(db, job_id, principal.user.id, principal.user.full_name)
 
 
@@ -80,7 +97,11 @@ def list_print_jobs(
     principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_PRINT_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return list(db.scalars(select(ReceiptPrintJob).order_by(ReceiptPrintJob.created_at.desc()).limit(100)).all())
+    scoped_cid = scoped_canteen_for_principal(principal, None)
+    stmt = select(ReceiptPrintJob).order_by(ReceiptPrintJob.created_at.desc()).limit(100)
+    if scoped_cid:
+        stmt = stmt.join(Order, Order.id == ReceiptPrintJob.order_id).where(Order.canteen_id == scoped_cid)
+    return list(db.scalars(stmt).all())
 
 
 @router.get("/history/{order_id_or_number}", response_model=list[PrintHistoryOut])
@@ -89,7 +110,9 @@ def get_print_history(
     principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_PRINT_ROLES)),
     db: Session = Depends(get_db),
 ):
-    _order, receipt = receipt_service._resolve_order_and_receipt(db, order_id_or_number, is_staff=True)
+    _order, receipt = receipt_service._resolve_order_and_receipt(
+        db, order_id_or_number, is_staff=True, staff_canteen_id=_print_staff_cid(principal)
+    )
     return list(
         db.scalars(
             select(ReceiptPrintHistory)
