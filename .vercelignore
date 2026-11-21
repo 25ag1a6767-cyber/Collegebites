@@ -11,5 +11,9 @@ frontend/dist
 mobile
 e2e
 docs
+Dockerfile
+docker-compose.yml
+backend/Dockerfile
+frontend/Dockerfile
 *.log
 __pycache__
