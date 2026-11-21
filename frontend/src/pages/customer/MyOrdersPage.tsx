@@ -1,17 +1,46 @@
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Receipt, Search } from "lucide-react";
-import { api } from "../../api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowRight, Receipt, RotateCcw, Search } from "lucide-react";
+import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Order } from "../../types";
-import { Badge, Button, Card, Input } from "../../components/ui/Primitives";
+import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 export const MyOrdersPage: React.FC = () => {
   const navigate = useNavigate();
-  const { user, guestOrderTokens } = useAppStore();
+  const qc = useQueryClient();
+  const { pushToast } = useToast();
+  const { user, guestOrderTokens, setSelectedCanteen } = useAppStore();
   const [lookupOrderNum, setLookupOrderNum] = useState("");
   const [lookupToken, setLookupToken] = useState("");
+
+  const handleReorder = async (o: Order) => {
+    try {
+      let added = 0;
+      for (const it of o.items) {
+        if (!it.food_item_id) continue;
+        await api.post("/carts/items", {
+          canteen_id: o.canteen_id,
+          food_item_id: it.food_item_id,
+          variant_id: it.variant_id || null,
+          quantity: it.quantity,
+          special_instructions: it.special_instructions || null,
+        });
+        added += 1;
+      }
+      if (added === 0) {
+        pushToast("No reorderable menu items found in this order", "info");
+        return;
+      }
+      setSelectedCanteen(o.canteen_id);
+      qc.invalidateQueries({ queryKey: ["cart", o.canteen_id] });
+      pushToast("Items added back to cart!", "success");
+      navigate("/checkout");
+    } catch (err) {
+      pushToast(getApiError(err, "Some items are currently unavailable to reorder"), "error");
+    }
+  };
 
   const { data: orders = [], isLoading } = useQuery<Order[]>({
     queryKey: ["my-orders"],
@@ -99,11 +128,16 @@ export const MyOrdersPage: React.FC = () => {
                     <div className="font-extrabold text-slate-900">₹{o.total_amount}</div>
                     <div className="text-[11px] text-slate-500">{o.payment_status}</div>
                   </div>
-                  <Link to={`/orders/${o.order_number}`}>
-                    <Button size="sm" variant="outline">
-                      Receipt & Track <ArrowRight className="h-3.5 w-3.5" />
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => handleReorder(o)}>
+                      <RotateCcw className="h-3.5 w-3.5" /> Reorder
                     </Button>
-                  </Link>
+                    <Link to={`/orders/${o.order_number}`}>
+                      <Button size="sm" variant="outline">
+                        Receipt & Track <ArrowRight className="h-3.5 w-3.5" />
+                      </Button>
+                    </Link>
+                  </div>
                 </div>
               </Card>
             ))}

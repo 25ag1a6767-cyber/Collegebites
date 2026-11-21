@@ -227,6 +227,7 @@ export interface Order {
   items: {
     id: string;
     food_item_id?: string | null;
+    variant_id?: string | null;
     item_name: string;
     variant_name?: string | null;
     quantity: number;

@@ -9,7 +9,8 @@ from app.core.permissions import AuthenticatedPrincipal, get_current_principal
 from app.models.auth import CustomerProfile
 from app.models.menu import FoodItem
 from app.models.promotion import LoyaltyAccount
-from app.schemas.menu import CustomerProfileOut, CustomerProfileUpdate
+from app.schemas.menu import CustomerProfileOut, CustomerProfileUpdate, FoodItemOut
+from app.services import menu_service
 
 router = APIRouter(prefix="/customers", tags=["Customer Profile & Favourites"])
 
@@ -69,6 +70,23 @@ def update_profile(
             setattr(profile, field, val)
     db.commit()
     return _build_profile_out(db, principal)
+
+
+@router.get("/favourites", response_model=list[FoodItemOut])
+def list_favourites(
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    profile = db.scalar(select(CustomerProfile).where(CustomerProfile.user_id == principal.user.id))
+    fav_ids = list(profile.favourite_item_ids or []) if profile else []
+    out: list[FoodItemOut] = []
+    for raw_id in fav_ids:
+        try:
+            fid = UUID(str(raw_id))
+            out.append(menu_service.get_food_item(db, fid))
+        except Exception:
+            continue
+    return out
 
 
 @router.post("/favourites/{food_item_id}", response_model=CustomerProfileOut)

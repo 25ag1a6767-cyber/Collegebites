@@ -38,6 +38,12 @@ export default function ProfileScreen() {
     queryFn: async () => (await mobileApi.get("/promotions/loyalty/me")).data,
   });
 
+  const { data: favourites = [] } = useQuery<any[]>({
+    queryKey: ["m-favourites"],
+    enabled: Boolean(user),
+    queryFn: async () => (await mobileApi.get("/customers/favourites")).data,
+  });
+
   const { data: notifications = [], refetch: refetchNotifs } = useQuery<any[]>({
     queryKey: ["m-notifs"],
     enabled: Boolean(user),
@@ -169,6 +175,24 @@ export default function ProfileScreen() {
             ))}
           </View>
         )}
+
+        <View style={styles.card}>
+          <Text style={styles.secTitle}>Saved Favourite Dishes ({favourites.length})</Text>
+          {favourites.length === 0 ? (
+            <Text style={styles.sub}>Tap the heart icon on any menu dish to save it.</Text>
+          ) : (
+            favourites.slice(0, 5).map((f) => (
+              <View key={f.id} style={styles.prefRow}>
+                <Text style={{ fontWeight: "700", fontSize: 12 }}>
+                  {f.name} • ₹{f.base_price}
+                </Text>
+                <Pressable onPress={() => router.push("/")}>
+                  <Text style={{ color: "#ea580c", fontWeight: "800", fontSize: 12 }}>Order</Text>
+                </Pressable>
+              </View>
+            ))
+          )}
+        </View>
 
         <View style={styles.card}>
           <Text style={styles.secTitle}>Notifications ({notifications.length})</Text>

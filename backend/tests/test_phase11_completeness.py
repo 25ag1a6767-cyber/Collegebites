@@ -6,6 +6,7 @@ import respx
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.integrations.expo_push_provider import EXPO_PUSH_URL, send_expo_push
 from app.integrations.sms_provider import send_sms_or_whatsapp
 from app.models.auth import OTPVerification
 from app.models.college import Canteen
@@ -93,3 +94,39 @@ def test_celery_maintenance_tasks(clean_db_and_seed, monkeypatch):
     assert scan1["alerts_created"] >= 1
     scan2 = tasks.scan_inventory_alerts_task()
     assert scan2["alerts_created"] == 0
+
+
+def test_expo_push_kitchen_ingredient_unavailable_and_favourites_list(client):
+    # Expo push dispatch via respx
+    with respx.mock:
+        push_route = respx.post(EXPO_PUSH_URL).mock(return_value=httpx.Response(200, json={"data": {"status": "ok"}}))
+        ok, st = send_expo_push("ExponentPushToken[test123]", "Ready", "Token A001 is ready")
+        assert ok is True
+        assert st == "sent_expo_push"
+        assert push_route.called
+
+    # Kitchen ingredient listing & mark unavailable
+    kitchen_hdrs = login_as(client, "kitchen@collegebites.edu", "Staff@12345")["headers"]
+    canteens = client.get("/api/v1/canteens").json()
+    main = next(c for c in canteens if c["code"] == "MAIN")
+
+    ings = client.get(f"/api/v1/kitchen/canteens/{main['id']}/ingredients", headers=kitchen_hdrs)
+    assert ings.status_code == 200
+    assert len(ings.json()) >= 1
+    first_ing = ings.json()[0]
+    rep = client.post(
+        f"/api/v1/kitchen/ingredients/{first_ing['inventory_item_id']}/unavailable",
+        json={"reason": "Finished in kitchen"},
+        headers=kitchen_hdrs,
+    )
+    assert rep.status_code == 200
+    assert rep.json()["current_quantity"] == "0.000"
+
+    # Saved favourites full item list
+    student_hdrs = login_as(client, "student@collegebites.edu", "Student@12345")["headers"]
+    menu_items = client.get(f"/api/v1/menus/canteens/{main['id']}/items").json()
+    assert client.post(f"/api/v1/customers/favourites/{menu_items[0]['id']}", headers=student_hdrs).status_code == 200
+    fav_list = client.get("/api/v1/customers/favourites", headers=student_hdrs)
+    assert fav_list.status_code == 200
+    assert len(fav_list.json()) >= 1
+    assert fav_list.json()[0]["id"] == menu_items[0]["id"]

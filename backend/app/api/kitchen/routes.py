@@ -2,6 +2,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -79,3 +80,41 @@ def mark_item_unavailable(
     db: Session = Depends(get_db),
 ):
     return kitchen_service.toggle_item_availability_from_kitchen(db, food_item_id, payload, principal.user.id)
+
+
+class KitchenRejectIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=255)
+
+
+class IngredientUnavailableIn(BaseModel):
+    reason: str = Field(default="Depleted in kitchen", min_length=2, max_length=255)
+
+
+@router.post("/orders/{order_id}/reject", response_model=OrderOut)
+def reject_order(
+    order_id: UUID,
+    payload: KitchenRejectIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    return kitchen_service.reject_order_from_kitchen(db, order_id, payload.reason, principal.user.id)
+
+
+@router.get("/canteens/{canteen_id}/ingredients")
+def list_kitchen_ingredients(
+    canteen_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return kitchen_service.list_canteen_ingredients_for_kitchen(db, canteen_id)
+
+
+@router.post("/ingredients/{inventory_item_id}/unavailable")
+def report_ingredient_unavailable(
+    inventory_item_id: UUID,
+    payload: IngredientUnavailableIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    return kitchen_service.report_ingredient_unavailable(db, inventory_item_id, payload.reason, principal.user.id)

@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Award, Bell, Check, Gift, Heart } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
+import type { FoodItem } from "../../types";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 export const ProfilePage: React.FC = () => {
-  const { user } = useAppStore();
+  const { user, setSelectedCanteen } = useAppStore();
   const qc = useQueryClient();
   const { pushToast } = useToast();
 
@@ -14,6 +16,12 @@ export const ProfilePage: React.FC = () => {
     queryKey: ["customer-profile"],
     enabled: Boolean(user),
     queryFn: async () => (await api.get("/customers/profile")).data,
+  });
+
+  const { data: favourites = [], refetch: refetchFavs } = useQuery<FoodItem[]>({
+    queryKey: ["customer-favourites"],
+    enabled: Boolean(user),
+    queryFn: async () => (await api.get("/customers/favourites")).data,
   });
 
   const { data: loyalty } = useQuery<any>({
@@ -203,6 +211,46 @@ export const ProfilePage: React.FC = () => {
           </div>
         </Card>
       </div>
+
+      {/* Saved Favourites */}
+      <Card className="p-5 space-y-3">
+        <div className="flex items-center gap-2 font-bold text-slate-900">
+          <Heart className="h-4 w-4 text-red-500 fill-red-500" /> Saved Favourite Dishes ({favourites.length})
+        </div>
+        {favourites.length === 0 ? (
+          <div className="text-xs text-slate-500">Tap the heart icon on any dish in the menu to save it here.</div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {favourites.map((item) => (
+              <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 p-3 text-xs">
+                <div>
+                  <div className="font-bold text-slate-900">{item.name}</div>
+                  <div className="text-slate-500">₹{item.base_price} • {item.category_name}</div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Link
+                    to="/"
+                    onClick={() => setSelectedCanteen(item.canteen_id)}
+                    className="rounded-lg bg-orange-600 px-2.5 py-1 font-bold text-white"
+                  >
+                    Order
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await api.delete(`/customers/favourites/${item.id}`);
+                      refetchFavs();
+                    }}
+                    className="rounded-lg border border-slate-200 px-2 py-1 text-slate-500 hover:text-red-600"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
   );
 };

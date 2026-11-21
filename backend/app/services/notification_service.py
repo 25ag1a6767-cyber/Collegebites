@@ -7,6 +7,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.integrations.email_provider import send_email
+from app.integrations.expo_push_provider import send_expo_push
 from app.integrations.sms_provider import send_sms_or_whatsapp
 from app.models.auth import User
 from app.models.engagement import Announcement, Notification, NotificationPreference
@@ -47,6 +48,7 @@ def notify_order_confirmed(db: Session, order: Order, pickup_token: str) -> None
     title = f"Order Confirmed • Token {pickup_token}"
     msg = f"Payment confirmed for {order.order_number}. Show token {pickup_token} at pickup."
     if order.customer_id:
+        pref = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == order.customer_id))
         _create_notification(
             db,
             user_id=order.customer_id,
@@ -57,10 +59,14 @@ def notify_order_confirmed(db: Session, order: Order, pickup_token: str) -> None
             event_type="order_confirmed",
         )
         user = db.get(User, order.customer_id)
-        if user and user.email:
+        if user and user.email and (not pref or pref.email_enabled):
             send_email(user.email, title, msg)
-        if user and user.phone:
+        if user and user.phone and (not pref or pref.sms_enabled):
             send_sms_or_whatsapp(user.phone, msg, "sms")
+        if user and user.phone and pref and pref.whatsapp_enabled:
+            send_sms_or_whatsapp(user.phone, msg, "whatsapp")
+        if pref and pref.push_enabled and pref.expo_push_token:
+            send_expo_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
     elif order.guest_phone:
         send_sms_or_whatsapp(order.guest_phone, msg, "sms")
 
@@ -76,16 +82,26 @@ def notify_order_confirmed(db: Session, order: Order, pickup_token: str) -> None
 
 
 def notify_order_ready(db: Session, order: Order) -> None:
+    title = "Food Ready for Pickup!"
+    msg = f"Order {order.order_number} is ready! Please proceed to your pickup counter with your QR code."
     if order.customer_id:
+        pref = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == order.customer_id))
         _create_notification(
             db,
             user_id=order.customer_id,
             canteen_id=order.canteen_id,
             order_id=order.id,
-            title="Food Ready for Pickup!",
-            message=f"Order {order.order_number} is ready! Please proceed to your pickup counter with your QR code.",
+            title=title,
+            message=msg,
             event_type="order_ready",
         )
+        if pref and pref.push_enabled and pref.expo_push_token:
+            send_expo_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
+        user = db.get(User, order.customer_id)
+        if user and user.phone and pref and pref.sms_enabled:
+            send_sms_or_whatsapp(user.phone, msg, "sms")
+    elif order.guest_phone:
+        send_sms_or_whatsapp(order.guest_phone, msg, "sms")
 
 
 def notify_order_completed(db: Session, order: Order) -> None:

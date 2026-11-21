@@ -43,6 +43,7 @@ export const KitchenDisplayPage: React.FC = () => {
   const [delayMins, setDelayMins] = useState(10);
   const [delayReason, setDelayReason] = useState("High kitchen load");
   const [showAvailabilityModal, setShowAvailabilityModal] = useState(false);
+  const [availModalTab, setAvailModalTab] = useState<"dishes" | "ingredients">("dishes");
 
   const prevPlacedIds = useRef<Set<string>>(new Set());
 
@@ -57,6 +58,12 @@ export const KitchenDisplayPage: React.FC = () => {
     queryKey: ["kitchen-menu", activeCanteenId],
     enabled: Boolean(activeCanteenId && showAvailabilityModal),
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items`)).data,
+  });
+
+  const { data: ingredients = [], refetch: refetchIngredients } = useQuery<any[]>({
+    queryKey: ["kitchen-ingredients", activeCanteenId],
+    enabled: Boolean(activeCanteenId && showAvailabilityModal),
+    queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/ingredients`)).data,
   });
 
   // Sound alert on new PLACED orders
@@ -258,6 +265,25 @@ export const KitchenDisplayPage: React.FC = () => {
                           Delay
                         </Button>
                       )}
+                      {o.status === "PLACED" && (
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={async () => {
+                            const reason = window.prompt("Reason for rejecting order (payment retained per college policy):", "Ingredient unavailable");
+                            if (!reason) return;
+                            try {
+                              await api.post(`/kitchen/orders/${o.id}/reject`, { reason });
+                              pushToast(`Order ${o.pickup_token_code} rejected`, "info");
+                              refetch();
+                            } catch (err) {
+                              pushToast(getApiError(err), "error");
+                            }
+                          }}
+                        >
+                          Reject
+                        </Button>
+                      )}
                     </div>
                   </Card>
                 );
@@ -288,34 +314,81 @@ export const KitchenDisplayPage: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Unavailable Item Modal */}
+      {/* Unavailable Item & Ingredient Modal */}
       <Modal
         open={showAvailabilityModal}
         onClose={() => setShowAvailabilityModal(false)}
-        title="Quick Toggle Dish Availability"
+        title="Kitchen Availability & Ingredient Reporting"
       >
-        <div className="space-y-2 max-h-96 overflow-y-auto">
-          {menuItems.map((item) => (
-            <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 p-3 text-xs">
-              <div>
-                <div className="font-bold text-slate-900">{item.name}</div>
-                <div className="text-slate-500">₹{item.base_price}</div>
-              </div>
-              <Button
-                size="sm"
-                variant={item.is_available ? "success" : "danger"}
-                onClick={async () => {
-                  await api.post(`/kitchen/items/${item.id}/unavailable`, {
-                    is_available: !item.is_available,
-                    reason: "Toggled from Kitchen Display",
-                  });
-                  refetchMenu();
-                }}
-              >
-                {item.is_available ? "Available" : "Unavailable"}
-              </Button>
-            </div>
-          ))}
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant={availModalTab === "dishes" ? "primary" : "outline"}
+              onClick={() => setAvailModalTab("dishes")}
+            >
+              Dishes ({menuItems.length})
+            </Button>
+            <Button
+              size="sm"
+              variant={availModalTab === "ingredients" ? "primary" : "outline"}
+              onClick={() => setAvailModalTab("ingredients")}
+            >
+              Ingredients ({ingredients.length})
+            </Button>
+          </div>
+          <div className="space-y-2 max-h-96 overflow-y-auto">
+            {availModalTab === "dishes"
+              ? menuItems.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 p-3 text-xs">
+                    <div>
+                      <div className="font-bold text-slate-900">{item.name}</div>
+                      <div className="text-slate-500">₹{item.base_price}</div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={item.is_available ? "success" : "danger"}
+                      onClick={async () => {
+                        await api.post(`/kitchen/items/${item.id}/unavailable`, {
+                          is_available: !item.is_available,
+                          reason: "Toggled from Kitchen Display",
+                        });
+                        refetchMenu();
+                      }}
+                    >
+                      {item.is_available ? "Available" : "Unavailable"}
+                    </Button>
+                  </div>
+                ))
+              : ingredients.map((ing) => (
+                  <div
+                    key={ing.inventory_item_id}
+                    className="flex items-center justify-between rounded-xl border border-slate-200 p-3 text-xs"
+                  >
+                    <div>
+                      <div className="font-bold text-slate-900">{ing.name}</div>
+                      <div className="text-slate-500">
+                        On hand: {ing.current_quantity} {ing.unit}
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={Number(ing.current_quantity) <= 0 ? "danger" : "outline"}
+                      disabled={Number(ing.current_quantity) <= 0}
+                      onClick={async () => {
+                        await api.post(`/kitchen/ingredients/${ing.inventory_item_id}/unavailable`, {
+                          reason: "Reported exhausted from Kitchen Display",
+                        });
+                        pushToast(`Reported ${ing.name} unavailable & notified Inventory Manager`, "info");
+                        refetchIngredients();
+                        refetchMenu();
+                      }}
+                    >
+                      {Number(ing.current_quantity) <= 0 ? "Reported Out" : "Report Out"}
+                    </Button>
+                  </div>
+                ))}
+          </div>
         </div>
       </Modal>
     </div>

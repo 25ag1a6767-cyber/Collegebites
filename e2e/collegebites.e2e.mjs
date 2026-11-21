@@ -161,6 +161,15 @@ async function main() {
       await adminPage.waitForTimeout(250);
     }
 
+    // 6. KDS Ingredients Modal & Inventory Recipe Page Smoke Check
+    await kitPage.getByRole("button", { name: /Ingredient \/ Item Availability/i }).click();
+    await kitPage.getByRole("button", { name: /^Ingredients \(/i }).click();
+    await kitPage.waitForTimeout(300);
+
+    await adminPage.goto(`${FRONTEND_URL}/inventory`, { waitUntil: "networkidle" });
+    await adminPage.getByText("Link Dish Recipe (Auto Stock Deduction)").waitFor({ timeout: 10000 });
+    await adminPage.getByText("Manual Stock Adjustment").waitFor({ timeout: 10000 });
+
     assert.equal(errors.length, 0, `Browser errors occurred:\n${errors.join("\n")}`);
     console.log("PLAYWRIGHT_E2E_SUCCESS");
   } finally {

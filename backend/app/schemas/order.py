@@ -126,6 +126,7 @@ class OrderItemCustomizationOut(ORMModel):
 class OrderItemOut(ORMModel):
     id: UUID
     food_item_id: Optional[UUID]
+    variant_id: Optional[UUID] = None
     item_name: str
     variant_name: Optional[str]
     quantity: int

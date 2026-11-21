@@ -41,6 +41,12 @@ export const InventoryPage: React.FC = () => {
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/purchase-orders`)).data,
   });
 
+  const { data: menuItems = [] } = useQuery<any[]>({
+    queryKey: ["inv-menu", activeId],
+    enabled: Boolean(activeId),
+    queryFn: async () => (await api.get(`/menus/canteens/${activeId}/items?include_inactive=true`)).data,
+  });
+
   // Form states
   const [ingName, setIngName] = useState("");
   const [ingSku, setIngSku] = useState("");
@@ -48,7 +54,7 @@ export const InventoryPage: React.FC = () => {
   const [ingQty, setIngQty] = useState("1000");
   const [ingReorder, setIngReorder] = useState("200");
   const [supName, setSupName] = useState("");
-  const [supPhone, setSupPhone] = useState("");
+  const [supPhone] = useState("");
   const [poSupId, setPoSupId] = useState("");
   const [poIngId, setPoIngId] = useState("");
   const [poQty, setPoQty] = useState("5000");
@@ -56,6 +62,13 @@ export const InventoryPage: React.FC = () => {
   const [wasteItemId, setWasteItemId] = useState("");
   const [wasteQty, setWasteQty] = useState("100");
   const [wasteReason, setWasteReason] = useState("Expired batch");
+  const [recipeFoodId, setRecipeFoodId] = useState("");
+  const [recipeIngId, setRecipeIngId] = useState("");
+  const [recipeQty, setRecipeQty] = useState("150");
+  const [recipeYield, setRecipeYield] = useState("1");
+  const [adjItemId, setAdjItemId] = useState("");
+  const [adjDelta, setAdjDelta] = useState("500");
+  const [adjReason, setAdjReason] = useState("Physical stock count");
 
   const refreshAll = () => {
     refetchItems();
@@ -322,6 +335,90 @@ export const InventoryPage: React.FC = () => {
           ))}
         </div>
       </Card>
+
+      {/* Recipe Mapping & Manual Stock Adjustments */}
+      <div className="grid gap-5 md:grid-cols-2">
+        <Card className="p-5 space-y-3">
+          <h2 className="font-bold text-slate-900 text-sm">Link Dish Recipe (Auto Stock Deduction)</h2>
+          <Select value={recipeFoodId} onChange={(e) => setRecipeFoodId(e.target.value)}>
+            <option value="">Select Menu Dish</option>
+            {menuItems.map((m: any) => (
+              <option key={m.id} value={m.id}>
+                {m.name} (₹{m.base_price})
+              </option>
+            ))}
+          </Select>
+          <Select value={recipeIngId} onChange={(e) => setRecipeIngId(e.target.value)}>
+            <option value="">Select Ingredient</option>
+            {items.map((it) => (
+              <option key={it.ingredient_id} value={it.ingredient_id}>
+                {it.name} ({it.unit})
+              </option>
+            ))}
+          </Select>
+          <div className="grid grid-cols-2 gap-2">
+            <Input value={recipeQty} onChange={(e) => setRecipeQty(e.target.value)} placeholder="Qty Required (e.g. 150)" />
+            <Input value={recipeYield} onChange={(e) => setRecipeYield(e.target.value)} placeholder="Yield Portions (1)" />
+          </div>
+          <Button
+            size="sm"
+            className="w-full"
+            onClick={async () => {
+              try {
+                await api.put(`/inventory/recipes/${recipeFoodId || menuItems[0]?.id}`, {
+                  yield_portions: Number(recipeYield) || 1,
+                  ingredients: [
+                    {
+                      ingredient_id: recipeIngId || items[0]?.ingredient_id,
+                      quantity_required: recipeQty,
+                    },
+                  ],
+                });
+                pushToast("Recipe linked! Orders will automatically deduct stock.", "success");
+                refreshAll();
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          >
+            Save Dish Recipe
+          </Button>
+        </Card>
+
+        <Card className="p-5 space-y-3">
+          <h2 className="font-bold text-slate-900 text-sm">Manual Stock Adjustment</h2>
+          <Select value={adjItemId} onChange={(e) => setAdjItemId(e.target.value)}>
+            <option value="">Select Inventory Item</option>
+            {items.map((it) => (
+              <option key={it.inventory_item_id} value={it.inventory_item_id}>
+                {it.name} ({it.current_quantity} {it.unit})
+              </option>
+            ))}
+          </Select>
+          <Input value={adjDelta} onChange={(e) => setAdjDelta(e.target.value)} placeholder="Delta (+/- qty)" />
+          <Input value={adjReason} onChange={(e) => setAdjReason(e.target.value)} placeholder="Reason" />
+          <Button
+            size="sm"
+            variant="outline"
+            className="w-full"
+            onClick={async () => {
+              try {
+                await api.post("/inventory/adjustments", {
+                  inventory_item_id: adjItemId || items[0]?.inventory_item_id,
+                  quantity_delta: adjDelta,
+                  reason: adjReason,
+                });
+                pushToast("Stock level adjusted", "success");
+                refreshAll();
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          >
+            Apply Stock Adjustment
+          </Button>
+        </Card>
+      </div>
     </div>
   );
 };

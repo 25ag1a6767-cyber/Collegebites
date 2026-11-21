@@ -18,6 +18,23 @@ export const MenuTab: React.FC<{
   const [newDishPrice, setNewDishPrice] = useState("60.00");
   const [newDishCatId, setNewDishCatId] = useState("");
   const [isVeg, setIsVeg] = useState(true);
+  const [editItem, setEditItem] = useState<FoodItem | null>(null);
+  const [editPrice, setEditPrice] = useState("");
+  const [editPrep, setEditPrep] = useState("10");
+  const [editDesc, setEditDesc] = useState("");
+  const [editImg, setEditImg] = useState("");
+  const [editFeatured, setEditFeatured] = useState(false);
+  const [editSpecial, setEditSpecial] = useState(false);
+
+  const openEditor = (it: FoodItem) => {
+    setEditItem(it);
+    setEditPrice(String(it.base_price));
+    setEditPrep(String(it.prep_time_minutes));
+    setEditDesc(it.description || "");
+    setEditImg(it.images?.[0]?.image_url || "");
+    setEditFeatured(Boolean(it.is_featured));
+    setEditSpecial(Boolean(it.is_todays_special));
+  };
 
   const handleCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -119,23 +136,87 @@ export const MenuTab: React.FC<{
 
       <Card className="p-4 space-y-2">
         {menuItems.map((it) => (
-          <div key={it.id} className="flex items-center justify-between border-b border-slate-100 py-2 text-xs">
+          <div key={it.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 py-2 text-xs">
             <div>
-              <span className="font-bold text-slate-900">{it.name}</span> • ₹{it.base_price} • {it.category_name}
+              <span className="font-bold text-slate-900">{it.name}</span> • ₹{it.base_price} • {it.category_name}{" "}
+              {it.is_featured && <Badge tone="amber">Featured</Badge>}
+              {it.is_todays_special && <Badge tone="blue">Special</Badge>}
             </div>
-            <Button
-              size="sm"
-              variant={it.is_available ? "success" : "danger"}
-              onClick={async () => {
-                await api.patch(`/menus/items/${it.id}`, { is_available: !it.is_available });
-                refetchMenu();
-              }}
-            >
-              {it.is_available ? "Available" : "Disabled"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => openEditor(it)}>
+                Edit Price & Details
+              </Button>
+              <Button
+                size="sm"
+                variant={it.is_available ? "success" : "danger"}
+                onClick={async () => {
+                  await api.patch(`/menus/items/${it.id}`, { is_available: !it.is_available });
+                  refetchMenu();
+                }}
+              >
+                {it.is_available ? "Available" : "Disabled"}
+              </Button>
+            </div>
           </div>
         ))}
       </Card>
+
+      <Modal open={Boolean(editItem)} onClose={() => setEditItem(null)} title={`Edit Dish • ${editItem?.name}`}>
+        {editItem && (
+          <div className="space-y-3 text-xs">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Price (₹)</label>
+                <Input value={editPrice} onChange={(e) => setEditPrice(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Prep Time (min)</label>
+                <Input type="number" value={editPrep} onChange={(e) => setEditPrep(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block font-bold text-slate-600">Description</label>
+              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
+            </div>
+            <div>
+              <label className="mb-1 block font-bold text-slate-600">Image URL</label>
+              <Input value={editImg} onChange={(e) => setEditImg(e.target.value)} placeholder="https://..." />
+            </div>
+            <div className="flex items-center gap-4 pt-1">
+              <label className="flex items-center gap-1.5 font-semibold">
+                <input type="checkbox" checked={editFeatured} onChange={(e) => setEditFeatured(e.target.checked)} />
+                Featured Dish
+              </label>
+              <label className="flex items-center gap-1.5 font-semibold">
+                <input type="checkbox" checked={editSpecial} onChange={(e) => setEditSpecial(e.target.checked)} />
+                Today&apos;s Special
+              </label>
+            </div>
+            <Button
+              className="w-full"
+              onClick={async () => {
+                try {
+                  await api.patch(`/menus/items/${editItem.id}`, {
+                    base_price: editPrice,
+                    prep_time_minutes: Number(editPrep) || 10,
+                    description: editDesc,
+                    image_url: editImg.trim() || null,
+                    is_featured: editFeatured,
+                    is_todays_special: editSpecial,
+                  });
+                  pushToast("Dish updated!", "success");
+                  setEditItem(null);
+                  refetchMenu();
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
+              }}
+            >
+              Save Dish Changes
+            </Button>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };

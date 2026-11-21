@@ -1,15 +1,37 @@
 import React, { useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { mobileApi } from "../src/api/client";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 export default function OrdersScreen() {
   const router = useRouter();
-  const { user, guestOrderTokens, saveGuestOrderToken } = useMobileStore();
+  const qc = useQueryClient();
+  const { user, guestOrderTokens, saveGuestOrderToken, setCanteen } = useMobileStore();
   const [lookupNo, setLookupNo] = useState("");
   const [lookupTok, setLookupTok] = useState("");
+  const [statusMsg, setStatusMsg] = useState("");
+
+  const reorder = async (o: any) => {
+    setStatusMsg("");
+    try {
+      for (const it of o.items || []) {
+        if (!it.food_item_id) continue;
+        await mobileApi.post("/carts/items", {
+          canteen_id: o.canteen_id,
+          food_item_id: it.food_item_id,
+          variant_id: it.variant_id || null,
+          quantity: it.quantity,
+        });
+      }
+      setCanteen(o.canteen_id);
+      qc.invalidateQueries({ queryKey: ["m-cart", o.canteen_id] });
+      router.push("/checkout");
+    } catch (e: any) {
+      setStatusMsg(e?.response?.data?.detail || "Some items unavailable to reorder");
+    }
+  };
 
   const { data: orders = [] } = useQuery<any[]>({
     queryKey: ["m-orders"],
@@ -68,20 +90,29 @@ export default function OrdersScreen() {
         </View>
       )}
 
+      {Boolean(statusMsg) && <Text style={{ color: "#dc2626", fontSize: 12, marginBottom: 8 }}>{statusMsg}</Text>}
+
       <FlatList
         data={orders}
         keyExtractor={(o) => o.id}
         contentContainerStyle={{ gap: 10, paddingBottom: 30 }}
         renderItem={({ item }) => (
-          <Pressable onPress={() => router.push(`/order/${item.order_number}`)} style={styles.card}>
-            <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-              <Text style={styles.ordNo}>{item.order_number}</Text>
-              <Text style={styles.token}>{item.pickup_token_code || item.status}</Text>
+          <View style={styles.card}>
+            <Pressable onPress={() => router.push(`/order/${item.order_number}`)}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                <Text style={styles.ordNo}>{item.order_number}</Text>
+                <Text style={styles.token}>{item.pickup_token_code || item.status}</Text>
+              </View>
+              <Text style={styles.meta}>
+                {item.canteen_name} • ₹{item.total_amount} • {item.status}
+              </Text>
+            </Pressable>
+            <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+              <Pressable onPress={() => reorder(item)} style={styles.reorderBtn}>
+                <Text style={{ fontSize: 11, fontWeight: "700", color: "#0f172a" }}>Reorder</Text>
+              </Pressable>
             </View>
-            <Text style={styles.meta}>
-              {item.canteen_name} • ₹{item.total_amount} • {item.status}
-            </Text>
-          </Pressable>
+          </View>
         )}
       />
     </View>
@@ -97,6 +128,7 @@ const styles = StyleSheet.create({
   input: { backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, fontSize: 12 },
   goBtn: { backgroundColor: "#ea580c", borderRadius: 8, paddingHorizontal: 12, justifyContent: "center" },
   card: { backgroundColor: "#fff", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" },
+  reorderBtn: { backgroundColor: "#f1f5f9", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: "#cbd5e1" },
   ordNo: { fontWeight: "800", fontSize: 15, color: "#0f172a" },
   token: { fontWeight: "900", fontSize: 15, color: "#ea580c" },
   meta: { fontSize: 12, color: "#64748b", marginTop: 4 },
