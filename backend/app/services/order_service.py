@@ -734,6 +734,12 @@ def checkout_order(
         .where(Order.id == order.id)
     )
     out = serialize_order(db, loaded, raw_guest_token=raw_guest_token)
+    emit_order_event_sync(
+        str(order.canteen_id),
+        str(order.id),
+        "order.created",
+        {"order_number": order.order_number, "status": order.status, "payment_status": order.payment_status},
+    )
     return out
 
 

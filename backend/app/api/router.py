@@ -18,6 +18,7 @@ from app.api.printing.routes import router as printing_router
 from app.api.promotions.routes import router as promotions_router
 from app.api.qr.routes import router as qr_router
 from app.api.queue.routes import router as queue_router
+from app.api.realtime.routes import router as realtime_router
 from app.api.reports.routes import router as reports_router
 from app.api.staff.routes import router as staff_router
 from app.api.support.routes import router as support_router
@@ -47,4 +48,5 @@ api_router.include_router(notifications_router)
 api_router.include_router(support_router)
 api_router.include_router(reports_router)
 api_router.include_router(kiosk_router)
+api_router.include_router(realtime_router)
 api_router.include_router(ws_router)

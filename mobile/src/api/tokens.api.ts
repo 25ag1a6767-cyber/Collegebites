@@ -30,6 +30,8 @@ export const tokensApi = {
     verification_method: "qr_scan" | "manual_token" | "order_number";
   }) => (await mobileApi.post("/pickup/handover", payload)).data,
 
-  getBoard: async (canteenId: string) =>
-    (await mobileApi.get(`/pickup/board/${encodeURIComponent(canteenId)}`)).data,
+  getBoard: async (canteenId?: string) => {
+    const path = !canteenId || canteenId === "all" ? "/pickup/board" : `/pickup/board/${encodeURIComponent(canteenId)}`;
+    return (await mobileApi.get(path)).data;
+  },
 };

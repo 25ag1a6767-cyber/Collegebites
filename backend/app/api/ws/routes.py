@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from typing import Optional
 from uuid import UUID
 
@@ -99,9 +101,64 @@ def _authorize_order_ws(websocket: WebSocket, order_id: str) -> bool:
         gen.close()
 
 
-async def _serve_room(room: str, websocket: WebSocket) -> None:
-    """Register websocket in a room, answer ping keepalives, and clean up on disconnect."""
+async def _watch_room_db_changes(
+    websocket: WebSocket,
+    watch_kind: str,
+    target_id: Optional[UUID],
+) -> None:
+    """Poll DB watermarks at 1s intervals so cross-instance updates reach open WebSockets."""
+    from app.services import realtime_service
+
+    last_watermark: Optional[str] = None
+    provider = websocket.app.dependency_overrides.get(get_db, get_db)
+    while True:
+        await asyncio.sleep(1.0)
+        gen = provider()
+        try:
+            db = next(gen)
+            if watch_kind == "board":
+                watermark = realtime_service.compute_board_watermark(db, target_id)
+                event_name = "board.updated"
+            elif watch_kind == "order" and target_id is not None:
+                watermark = realtime_service.compute_order_version(db, target_id) or ""
+                event_name = "order.updated"
+            elif watch_kind == "kitchen":
+                watermark = realtime_service.compute_staff_orders_version(db, canteen_id=target_id)
+                event_name = "kitchen.updated"
+            else:
+                continue
+
+            if last_watermark is None:
+                last_watermark = watermark
+            elif watermark and watermark != last_watermark:
+                last_watermark = watermark
+                await websocket.send_json(
+                    {
+                        "event": event_name,
+                        "version": watermark,
+                        "canteen_id": str(target_id) if target_id else None,
+                        "order_id": str(target_id) if watch_kind == "order" and target_id else None,
+                    }
+                )
+        except Exception:
+            break
+        finally:
+            with contextlib.suppress(Exception):
+                gen.close()
+
+
+async def _serve_room(
+    room: str,
+    websocket: WebSocket,
+    *,
+    watch_kind: Optional[str] = None,
+    target_id: Optional[UUID] = None,
+) -> None:
+    """Register websocket in a room, answer ping keepalives, and watch cross-instance DB updates."""
     await ws_manager.connect(room, websocket)
+    watcher_task: Optional[asyncio.Task[None]] = None
+    if watch_kind:
+        watcher_task = asyncio.create_task(_watch_room_db_changes(websocket, watch_kind, target_id))
     try:
         while True:
             msg = await websocket.receive_text()
@@ -109,6 +166,11 @@ async def _serve_room(room: str, websocket: WebSocket) -> None:
                 await websocket.send_json({"event": "pong"})
     except WebSocketDisconnect:
         ws_manager.disconnect(room, websocket)
+    finally:
+        if watcher_task is not None:
+            watcher_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watcher_task
 
 
 @router.websocket("/ws/orders/{order_id}")
@@ -116,7 +178,7 @@ async def ws_order(websocket: WebSocket, order_id: str):
     if not _authorize_order_ws(websocket, order_id):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    await _serve_room(f"order:{order_id}", websocket)
+    await _serve_room(f"order:{order_id}", websocket, watch_kind="order", target_id=UUID(order_id))
 
 
 @router.websocket("/ws/kitchen/{canteen_id}")
@@ -133,12 +195,18 @@ async def ws_kitchen(websocket: WebSocket, canteen_id: str):
     if not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN) and principal.assigned_canteen_id != cid:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    await _serve_room(f"kitchen:{canteen_id}", websocket)
+    await _serve_room(f"kitchen:{canteen_id}", websocket, watch_kind="kitchen", target_id=cid)
 
 
 @router.websocket("/ws/board/{canteen_id}")
 async def ws_board(websocket: WebSocket, canteen_id: str):
-    await _serve_room(f"board:{canteen_id}", websocket)
+    if canteen_id == "all":
+        await _serve_room("board:all", websocket, watch_kind="board", target_id=None)
+        return
+    target: Optional[UUID] = None
+    with contextlib.suppress(ValueError):
+        target = UUID(canteen_id)
+    await _serve_room(f"board:{canteen_id}", websocket, watch_kind="board", target_id=target)
 
 
 @router.websocket("/ws/notifications/{user_id}")

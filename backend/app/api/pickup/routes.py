@@ -1,6 +1,7 @@
+from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -53,6 +54,14 @@ def confirm_handover(
         raise HTTPException(status_code=404, detail="Order not found")
     enforce_canteen_scope(principal, ord_row.canteen_id)
     return pickup_service.confirm_handover(db, payload, principal.user.id)
+
+
+@router.get("/board", response_model=DigitalBoardResponse)
+def get_digital_board_all_or_filtered(
+    canteen_id: Optional[UUID] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return pickup_service.get_digital_token_board(db, canteen_id)
 
 
 @router.get("/board/{canteen_id}", response_model=DigitalBoardResponse)

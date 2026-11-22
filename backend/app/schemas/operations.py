@@ -67,15 +67,25 @@ class TokenBoardItem(BaseModel):
     counter_name: str
     order_status: str
     ready_at: Optional[datetime] = None
+    order_id: Optional[UUID] = None
+    order_number: Optional[str] = None
+    canteen_id: Optional[UUID] = None
+    canteen_name: Optional[str] = None
+    sequence_number: Optional[int] = None
+    item_summary: Optional[str] = None
+    item_count: int = 0
+    delayed_minutes: int = 0
+    created_at: Optional[datetime] = None
 
 
 class DigitalBoardResponse(BaseModel):
-    canteen_id: UUID
+    canteen_id: Optional[UUID] = None
     canteen_name: str
     now_preparing: list[TokenBoardItem]
     ready_for_pickup: list[TokenBoardItem]
     recently_completed: list[TokenBoardItem]
     updated_at: datetime
+    version: Optional[str] = None
 
 
 class POSWalkInOrderRequest(BaseModel):

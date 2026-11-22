@@ -167,4 +167,11 @@ def revoke_or_reissue_order_qr(
         details={"reason": payload.reason},
     )
     db.commit()
+    from app.websockets import emit_order_event_sync
+    emit_order_event_sync(
+        str(order.canteen_id),
+        str(order.id),
+        "order.qr_updated",
+        {"order_number": order.order_number, "reissued": payload.reissue},
+    )
     return {"order_number": order.order_number, "reissued": payload.reissue, "qr_payload": qr_row.qr_payload_encoded}

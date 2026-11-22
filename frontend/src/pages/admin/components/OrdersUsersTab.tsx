@@ -1,12 +1,17 @@
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { ClipboardList, Search, ShieldCheck } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, ClipboardList, Flame, PackageCheck, Play, Search, ShieldCheck } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
+import { useRealtimeSync } from "../../../hooks/useRealtimeSync";
+import { useAppStore } from "../../../store/useAppStore";
 import { Badge, Button, Card, ConfirmModal, Input, Select, useToast } from "../../../components/ui/Primitives";
+import { RealtimeStatusBadge } from "../../../components/ui/RealtimeStatusBadge";
 
 export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCanteenId }) => {
   const { pushToast } = useToast();
+  const qc = useQueryClient();
+  const { user } = useAppStore();
   const [statusFilter, setStatusFilter] = useState("");
   const [orderSearch, setOrderSearch] = useState("");
   const [userKindFilter, setUserKindFilter] = useState("");
@@ -14,6 +19,37 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
   const [roleEdits, setRoleEdits] = useState<Record<string, string>>({});
   const [cancelOrderTarget, setCancelOrderTarget] = useState<any | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+
+  const isCollegeAdmin = Boolean(user?.roles?.some((r) => r === "super_admin" || r === "college_admin"));
+  const effectiveStreamCanteen =
+    !isCollegeAdmin && user?.assigned_canteen_id
+      ? user.assigned_canteen_id
+      : scopeCanteenOnly && activeCanteenId
+      ? activeCanteenId
+      : "";
+  const streamParams = new URLSearchParams();
+  if (effectiveStreamCanteen) streamParams.set("canteen_id", effectiveStreamCanteen);
+  if (statusFilter) streamParams.set("status", statusFilter);
+  if (orderSearch.trim()) streamParams.set("q", orderSearch.trim());
+  const streamSuffix = streamParams.toString() ? `?${streamParams.toString()}` : "";
+
+  const { status: syncStatus, lastSyncedAt, triggerSync } = useRealtimeSync<{ orders?: any[] }>({
+    enabled: true,
+    ssePath: `/realtime/staff/orders/stream${streamSuffix}`,
+    wsPath: effectiveStreamCanteen ? `/ws/kitchen/${effectiveStreamCanteen}` : "/ws/board/all",
+    queryKeys: [["admin-all-orders"], ["admin-report"], ["admin-queue"]],
+    onSnapshot: (snap) => {
+      if (snap?.orders) {
+        qc.setQueryData(
+          ["admin-all-orders", activeCanteenId, statusFilter, orderSearch, scopeCanteenOnly],
+          snap.orders
+        );
+      }
+      qc.invalidateQueries({ queryKey: ["admin-report"] });
+      qc.invalidateQueries({ queryKey: ["admin-queue"] });
+    },
+  });
 
   const { data: orders = [], refetch: refetchOrders } = useQuery<any[]>({
     queryKey: ["admin-all-orders", activeCanteenId, statusFilter, orderSearch, scopeCanteenOnly],
@@ -25,7 +61,35 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
       params.set("limit", "100");
       return (await api.get(`/admin/orders?${params.toString()}`)).data;
     },
+    refetchInterval: syncStatus === "live" ? 30000 : 5000,
+    refetchIntervalInBackground: true,
   });
+
+  const runOrderStage = async (
+    order: any,
+    stage: "accept" | "start-preparing" | "mark-ready" | "handover"
+  ) => {
+    setActionBusyId(order.id);
+    try {
+      if (stage === "handover") {
+        await api.post("/pickup/handover", {
+          order_id: order.id,
+          counter_id: order.counter_id || null,
+          verification_method: "manual_token",
+        });
+        pushToast(`Order ${order.order_number} handed over & completed`, "success");
+      } else {
+        await api.post(`/kitchen/orders/${order.id}/${stage}`);
+        pushToast(`Order ${order.order_number} updated`, "success");
+      }
+      refetchOrders();
+      triggerSync();
+    } catch (err) {
+      pushToast(getApiError(err, "Order update failed"), "error");
+    } finally {
+      setActionBusyId(null);
+    }
+  };
 
   const { data: users = [], refetch: refetchUsers } = useQuery<any[]>({
     queryKey: ["admin-all-users", userKindFilter],
@@ -39,9 +103,12 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
     <div className="space-y-6">
       <Card className="p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="font-bold text-slate-900 flex items-center gap-2">
-            <ClipboardList className="h-4 w-4 text-[#76010d]" /> All Campus Orders ({orders.length})
-          </h2>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h2 className="font-bold text-slate-900 flex items-center gap-2">
+              <ClipboardList className="h-4 w-4 text-[#76010d]" /> All Campus Orders ({orders.length})
+            </h2>
+            <RealtimeStatusBadge status={syncStatus} lastSyncedAt={lastSyncedAt} />
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 cursor-pointer">
               <input
@@ -87,7 +154,47 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
                   {o.canteen_name} • {o.guest_name || "Registered Customer"} • ₹{o.total_amount} ({o.payment_method})
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {o.status === "PLACED" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={actionBusyId === o.id}
+                    onClick={() => runOrderStage(o, "accept")}
+                  >
+                    <Check className="h-3.5 w-3.5" /> Accept
+                  </Button>
+                )}
+                {o.status === "ACCEPTED" && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={actionBusyId === o.id}
+                    onClick={() => runOrderStage(o, "start-preparing")}
+                  >
+                    <Play className="h-3.5 w-3.5" /> Prepare
+                  </Button>
+                )}
+                {o.status === "PREPARING" && (
+                  <Button
+                    size="sm"
+                    variant="success"
+                    disabled={actionBusyId === o.id}
+                    onClick={() => runOrderStage(o, "mark-ready")}
+                  >
+                    <Flame className="h-3.5 w-3.5" /> Mark Ready
+                  </Button>
+                )}
+                {o.status === "READY" && (
+                  <Button
+                    size="sm"
+                    variant="success"
+                    disabled={actionBusyId === o.id}
+                    onClick={() => runOrderStage(o, "handover")}
+                  >
+                    <PackageCheck className="h-3.5 w-3.5" /> Complete Handover
+                  </Button>
+                )}
                 <Link to={`/orders/${o.order_number}`}>
                   <Button size="sm" variant="outline">
                     View Receipt

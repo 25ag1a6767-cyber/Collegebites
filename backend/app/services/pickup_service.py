@@ -321,56 +321,140 @@ def confirm_handover(db: Session, payload: HandoverConfirmRequest, staff_user_id
     return handover
 
 
-def get_digital_token_board(db: Session, canteen_id: UUID) -> DigitalBoardResponse:
-    """Publicly safe display board for TV/Monitor — never exposes private customer PII."""
-    canteen = db.get(Canteen, canteen_id)
-    if not canteen:
-        raise HTTPException(status_code=404, detail="Canteen not found")
+def _build_board_item_summaries(db: Session, order_ids: list[UUID]) -> dict[UUID, tuple[str, int]]:
+    if not order_ids:
+        return {}
+    item_rows = db.execute(
+        select(OrderItem.order_id, OrderItem.item_name, OrderItem.quantity)
+        .where(OrderItem.order_id.in_(order_ids))
+        .order_by(OrderItem.id.asc())
+    ).all()
+    grouped: dict[UUID, list[tuple[str, int]]] = {}
+    for oid, name, qty in item_rows:
+        grouped.setdefault(oid, []).append((name, int(qty or 1)))
+    result: dict[UUID, tuple[str, int]] = {}
+    for oid, parts in grouped.items():
+        total_qty = sum(q for _, q in parts)
+        head = [f"{q}x {n}" for n, q in parts[:3]]
+        if len(parts) > 3:
+            head.append(f"+{len(parts) - 3} more")
+        result[oid] = (", ".join(head), total_qty)
+    return result
+
+
+def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> DigitalBoardResponse:
+    """Publicly safe display board for TV/Monitor — preserves token sequence and never exposes PII."""
+    canteen_name = "All Campus Canteens"
+    if canteen_id is not None:
+        canteen = db.get(Canteen, canteen_id)
+        if not canteen:
+            raise HTTPException(status_code=404, detail="Canteen not found")
+        canteen_name = canteen.name
 
     today = today_college()
-    active_rows = db.execute(
-        select(PickupToken.token_code, Counter.name, Order.status, Order.ready_at, Order.completed_at)
+    active_stmt = (
+        select(
+            PickupToken.token_code,
+            PickupToken.sequence_number,
+            Counter.name,
+            Canteen.id,
+            Canteen.name,
+            Order.id,
+            Order.order_number,
+            Order.status,
+            Order.ready_at,
+            Order.completed_at,
+            Order.delayed_minutes,
+            Order.created_at,
+            Order.updated_at,
+        )
         .join(Order, Order.id == PickupToken.order_id)
         .join(Counter, Counter.id == PickupToken.counter_id)
+        .join(Canteen, Canteen.id == Order.canteen_id)
         .where(
-            Order.canteen_id == canteen_id,
             PickupToken.service_date == today,
             Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
         )
-        .order_by(Order.updated_at.asc())
-        .limit(80)
-    ).all()
-    completed_rows = db.execute(
-        select(PickupToken.token_code, Counter.name, Order.status, Order.ready_at, Order.completed_at)
+        .order_by(PickupToken.sequence_number.asc(), Order.created_at.asc())
+        .limit(120)
+    )
+    completed_stmt = (
+        select(
+            PickupToken.token_code,
+            PickupToken.sequence_number,
+            Counter.name,
+            Canteen.id,
+            Canteen.name,
+            Order.id,
+            Order.order_number,
+            Order.status,
+            Order.ready_at,
+            Order.completed_at,
+            Order.delayed_minutes,
+            Order.created_at,
+            Order.updated_at,
+        )
         .join(Order, Order.id == PickupToken.order_id)
         .join(Counter, Counter.id == PickupToken.counter_id)
+        .join(Canteen, Canteen.id == Order.canteen_id)
         .where(
-            Order.canteen_id == canteen_id,
             PickupToken.service_date == today,
             Order.status == "COMPLETED",
         )
-        .order_by(Order.completed_at.desc())
-        .limit(10)
-    ).all()
+        .order_by(Order.completed_at.desc(), PickupToken.sequence_number.desc())
+        .limit(12)
+    )
+    if canteen_id is not None:
+        active_stmt = active_stmt.where(Order.canteen_id == canteen_id)
+        completed_stmt = completed_stmt.where(Order.canteen_id == canteen_id)
+
+    active_rows = db.execute(active_stmt).all()
+    completed_rows = db.execute(completed_stmt).all()
+
+    all_order_ids = [row[5] for row in active_rows] + [row[5] for row in completed_rows]
+    summaries = _build_board_item_summaries(db, all_order_ids)
+
+    def _to_item(row: tuple) -> TokenBoardItem:
+        tc, seq, cnt_name, cid, cname, oid, onum, st, ra, _ca, dmin, crt, _upd = row
+        summary, count = summaries.get(oid, ("", 0))
+        return TokenBoardItem(
+            token_code=tc,
+            counter_name=cnt_name,
+            order_status=st,
+            ready_at=ra,
+            order_id=oid,
+            order_number=onum,
+            canteen_id=cid,
+            canteen_name=cname,
+            sequence_number=seq,
+            item_summary=summary or None,
+            item_count=count,
+            delayed_minutes=int(dmin or 0),
+            created_at=crt,
+        )
 
     preparing: list[TokenBoardItem] = []
     ready: list[TokenBoardItem] = []
-    completed: list[TokenBoardItem] = [
-        TokenBoardItem(token_code=tc, counter_name=cn, order_status=st, ready_at=ra)
-        for tc, cn, st, ra, _ca in completed_rows
-    ]
-    for token_code, counter_name, status_val, ready_at, _completed_at in active_rows:
-        item = TokenBoardItem(token_code=token_code, counter_name=counter_name, order_status=status_val, ready_at=ready_at)
-        if status_val in ("PLACED", "ACCEPTED", "PREPARING"):
+    completed: list[TokenBoardItem] = [_to_item(r) for r in completed_rows]
+    for row in active_rows:
+        item = _to_item(row)
+        if item.order_status in ("PLACED", "ACCEPTED", "PREPARING"):
             preparing.append(item)
-        elif status_val == "READY":
+        elif item.order_status == "READY":
             ready.append(item)
 
+    fingerprint_parts = [f"{today.isoformat()}|{canteen_id or 'all'}"]
+    for row in active_rows + completed_rows:
+        upd = row[12].isoformat() if row[12] else ""
+        fingerprint_parts.append(f"{row[5]}:{row[7]}:{row[10]}:{upd}:{row[0]}")
+    version = sha256_hex("|".join(fingerprint_parts))[:16]
+
     return DigitalBoardResponse(
-        canteen_id=canteen.id,
-        canteen_name=canteen.name,
+        canteen_id=canteen_id,
+        canteen_name=canteen_name,
         now_preparing=preparing,
         ready_for_pickup=ready,
         recently_completed=completed,
         updated_at=datetime.now(timezone.utc),
+        version=version,
     )
