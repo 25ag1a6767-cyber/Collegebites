@@ -196,8 +196,14 @@ export const CheckoutPage: React.FC = () => {
               setPendingOrder(null);
               navigate(`/orders/${verified.order_number}`);
             },
-            onError: (err) => pushToast(getApiError(err, "Razorpay signature verification failed"), "error"),
-            onDismiss: () => navigate(`/orders/${ord.order_number}`),
+            onError: (err) => {
+              pushToast(getApiError(err, "Razorpay payment failed"), "error");
+              navigate(`/orders/${ord.order_number}`);
+            },
+            onDismiss: () => {
+              pushToast("Payment cancelled. You can retry payment on your order page.", "info");
+              navigate(`/orders/${ord.order_number}`);
+            },
           });
           if (opened) return;
         }
@@ -228,6 +234,7 @@ export const CheckoutPage: React.FC = () => {
           navigate(`/orders/${verified.order_number}`);
         },
         onError: (err) => pushToast(getApiError(err, "Payment verification failed"), "error"),
+        onDismiss: () => pushToast("Payment window closed before completion.", "info"),
       });
       if (opened) return;
     }
@@ -612,20 +619,19 @@ export const CheckoutPage: React.FC = () => {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {pendingOrder.razorpay_key_id ? (
+              {pendingOrder.razorpay_key_id && (
                 <Button variant="success" className="flex-1" disabled={busy} onClick={launchGatewayCheckout}>
                   Pay ₹{pendingOrder.total_amount} via UPI App / QR
                 </Button>
-              ) : (
-                <Button
-                  variant="primary"
-                  className="flex-1"
-                  disabled={busy}
-                  onClick={() => navigate(`/orders/${pendingOrder.order_number}`)}
-                >
-                  View Order Status
-                </Button>
               )}
+              <Button
+                variant={pendingOrder.razorpay_key_id ? "outline" : "primary"}
+                className={pendingOrder.razorpay_key_id ? undefined : "flex-1"}
+                disabled={busy}
+                onClick={() => navigate(`/orders/${pendingOrder.order_number}`)}
+              >
+                View Order Status
+              </Button>
               <Button variant="outline" disabled={busy} onClick={simulatePaymentFailure}>
                 Cancel / Fail
               </Button>

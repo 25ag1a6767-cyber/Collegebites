@@ -15,6 +15,10 @@ os.environ["DATABASE_URL"] = TEST_DB_URL
 os.environ["REDIS_URL"] = os.environ.get("TEST_REDIS_URL", "memory://")
 os.environ["OTP_TEST_ECHO"] = "true"
 os.environ["RAZORPAY_TEST_MODE"] = "true"
+# Keep unit/integration test suite deterministic offline regardless of local .env keys
+os.environ["RAZORPAY_KEY_ID"] = ""
+os.environ["RAZORPAY_KEY_SECRET"] = ""
+os.environ["STRIPE_SECRET_KEY"] = ""
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 
 from app.core.database import get_db  # noqa: E402

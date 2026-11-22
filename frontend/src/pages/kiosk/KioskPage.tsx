@@ -135,6 +135,7 @@ export const KioskPage: React.FC = () => {
             pushToast(`Token ${confirmed.pickup_token_code || ""} ready! Printing slip.`, "success");
           },
           onError: (err) => pushToast(getApiError(err, "Payment verification failed"), "error"),
+          onDismiss: () => pushToast("Kiosk payment cancelled. Tap Pay again to retry.", "info"),
         });
         if (opened) return;
       }

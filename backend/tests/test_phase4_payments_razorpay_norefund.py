@@ -209,3 +209,76 @@ def test_payment_failure_and_online_only_policy(client: TestClient):
     assert collected.status_code == 200
     assert collected.json()["payment_status"] == "CONFIRMED"
     assert collected.json()["pickup_token_code"] is not None
+
+
+def test_razorpay_sdk_validation_and_error_handling(client: TestClient, monkeypatch):
+    import pytest
+    import razorpay
+    from fastapi import HTTPException
+    from app.integrations.razorpay_client import RazorpayGateway
+
+    gw = RazorpayGateway()
+    # Minimum 100 paise check (< ₹1.00 rejected with 400)
+    with pytest.raises(HTTPException) as low_exc:
+        gw.create_order(amount_inr=Decimal("0.50"), receipt_ref="CB-LOW-1")
+    assert low_exc.value.status_code == 400
+
+    # Live SDK order.create + utility.verify_payment_signature + auth 401 + API 500
+    monkeypatch.setattr(gw, "key_id", "rzp_test_mock_key")
+    monkeypatch.setattr(gw, "key_secret", "secret_mock_key_123456")
+    monkeypatch.setattr(gw, "use_live_api", True)
+
+    created_payloads = []
+
+    class _FakeOrderResource:
+        def create(self, data):
+            created_payloads.append(data)
+            return {"id": "order_sdk_mock_01", "amount": data["amount"], "currency": "INR"}
+
+    class _FakeUtility:
+        def verify_payment_signature(self, params):
+            if params["razorpay_signature"] != "valid_hmac":
+                raise razorpay.errors.SignatureVerificationError("bad sig")
+
+    class _FakeClient:
+        order = _FakeOrderResource()
+        utility = _FakeUtility()
+
+    monkeypatch.setattr(gw, "_client", lambda: _FakeClient())
+    res = gw.create_order(amount_inr=Decimal("55.00"), receipt_ref="CB-SDK-01")
+    assert res["id"] == "order_sdk_mock_01"
+    assert created_payloads[0]["amount"] == 5500
+    assert gw.verify_payment_signature(
+        razorpay_order_id="order_sdk_mock_01",
+        razorpay_payment_id="pay_sdk_01",
+        razorpay_signature="valid_hmac",
+    ) is True
+    assert gw.verify_payment_signature(
+        razorpay_order_id="order_sdk_mock_01",
+        razorpay_payment_id="pay_sdk_01",
+        razorpay_signature="tampered",
+    ) is False
+
+    class _AuthFailOrder:
+        def create(self, data):
+            raise razorpay.errors.BadRequestError("Authentication failed")
+
+    class _AuthFailClient:
+        order = _AuthFailOrder()
+
+    monkeypatch.setattr(gw, "_client", lambda: _AuthFailClient())
+    with pytest.raises(HTTPException) as auth_exc:
+        gw.create_order(amount_inr=Decimal("55.00"), receipt_ref="CB-AUTH-FAIL")
+    assert auth_exc.value.status_code == 401
+
+    class _GatewayFailOrder:
+        def create(self, data):
+            raise razorpay.errors.GatewayError("Upstream timeout")
+
+    class _GatewayFailClient:
+        order = _GatewayFailOrder()
+
+    monkeypatch.setattr(gw, "_client", lambda: _GatewayFailClient())
+    with pytest.raises(HTTPException) as gw_exc:
+        gw.create_order(amount_inr=Decimal("55.00"), receipt_ref="CB-GW-FAIL")
+    assert gw_exc.value.status_code == 500

@@ -117,12 +117,15 @@ async function main() {
 
     await page.getByText("Stripe Checkout").waitFor();
     await page.getByText("Razorpay Online").waitFor();
+    await page.route("https://checkout.razorpay.com/**", (route) =>
+      route.fulfill({ status: 200, contentType: "application/javascript", body: "/* e2e checkout stub */" })
+    );
     await page.locator('input[type="checkbox"]').check();
     await page.getByRole("button", { name: /Pay ₹/i }).click();
 
     const rzpModal = page.locator("[data-order-id]").first();
     await rzpModal.waitFor({ timeout: 10000 });
-    const rzpOrderBadge = await rzpModal.getByText(/RZP: order_test_/).textContent({ timeout: 10000 });
+    const rzpOrderBadge = await rzpModal.getByText(/RZP: order_/).textContent({ timeout: 10000 });
     const rzpOrderId = rzpOrderBadge.replace("RZP:", "").trim();
     const rzpPayId = `pay_e2e_${Date.now()}`;
     const rzpBody = JSON.stringify({

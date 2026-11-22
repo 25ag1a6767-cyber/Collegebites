@@ -181,7 +181,11 @@ export const OrderTrackingPage: React.FC = () => {
             refetch();
             refetchReceipt();
           },
-          onError: (err) => pushToast(getApiError(err, "Razorpay signature verification failed"), "error"),
+          onError: (err) => {
+            pushToast(getApiError(err, "Razorpay payment failed"), "error");
+            refetch();
+          },
+          onDismiss: () => pushToast("Payment cancelled before completion.", "info"),
         });
         if (opened) return;
       }

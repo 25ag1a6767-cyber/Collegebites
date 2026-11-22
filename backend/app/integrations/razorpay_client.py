@@ -4,16 +4,15 @@ import secrets
 from decimal import Decimal
 from typing import Any, Optional
 
-import httpx
+import razorpay
+import requests
 from fastapi import HTTPException
 
 from app.core.config import settings
 
-RAZORPAY_API_BASE = "https://api.razorpay.com/v1"
-
 
 class RazorpayGateway:
-    """Razorpay integration supporting real live/sandbox REST orders and dev/test HMAC verification."""
+    """Razorpay Standard Checkout integration powered by the official `razorpay` Python SDK."""
 
     def __init__(self) -> None:
         self._configured = bool(settings.RAZORPAY_KEY_ID.strip() and settings.RAZORPAY_KEY_SECRET.strip())
@@ -24,23 +23,50 @@ class RazorpayGateway:
         # Call live/sandbox Razorpay REST Orders API whenever real credentials are configured
         self.use_live_api = self._configured
 
-    def create_order(self, *, amount_inr: Decimal, receipt_ref: str, notes: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def _client(self) -> razorpay.Client:
+        return razorpay.Client(auth=(self.key_id, self.key_secret))
+
+    def create_order(
+        self,
+        *,
+        amount_inr: Decimal,
+        receipt_ref: str,
+        notes: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         amount_paise = int((amount_inr * 100).quantize(Decimal("1")))
-        if self.use_live_api:
-            resp = httpx.post(
-                f"{RAZORPAY_API_BASE}/orders",
-                auth=(self.key_id, self.key_secret),
-                json={
-                    "amount": amount_paise,
-                    "currency": "INR",
-                    "receipt": receipt_ref[:40],
-                    "payment_capture": 1,
-                    "notes": notes or {},
-                },
-                timeout=15.0,
+        if amount_paise < 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Minimum payment amount for Razorpay is ₹1.00 (100 paise).",
             )
-            resp.raise_for_status()
-            return resp.json()
+        if self.use_live_api:
+            payload = {
+                "amount": amount_paise,
+                "currency": "INR",
+                "receipt": receipt_ref[:40],
+                "payment_capture": 1,
+                "notes": notes or {},
+            }
+            try:
+                return self._client().order.create(data=payload)
+            except razorpay.errors.BadRequestError as exc:
+                msg = str(exc) or "Razorpay request error"
+                if "auth" in msg.lower():
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Razorpay authentication failed. Verify RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.",
+                    ) from exc
+                raise HTTPException(status_code=500, detail=f"Razorpay API error: {msg}") from exc
+            except (
+                razorpay.errors.GatewayError,
+                razorpay.errors.ServerError,
+                requests.exceptions.RequestException,
+            ) as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Razorpay gateway error while creating order: {exc}",
+                ) from exc
+
         if settings.is_production:
             raise HTTPException(
                 status_code=503,
@@ -55,16 +81,34 @@ class RazorpayGateway:
             "status": "created",
         }
 
-    def verify_payment_signature(self, *, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str) -> bool:
-        body = f"{razorpay_order_id}|{razorpay_payment_id}".encode("utf-8")
-        expected = hmac.new(self.key_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, razorpay_signature.strip())
+    def verify_payment_signature(
+        self,
+        *,
+        razorpay_order_id: str,
+        razorpay_payment_id: str,
+        razorpay_signature: str,
+    ) -> bool:
+        if not (razorpay_order_id and razorpay_payment_id and razorpay_signature):
+            return False
+        try:
+            self._client().utility.verify_payment_signature(
+                {
+                    "razorpay_order_id": razorpay_order_id.strip(),
+                    "razorpay_payment_id": razorpay_payment_id.strip(),
+                    "razorpay_signature": razorpay_signature.strip(),
+                }
+            )
+            return True
+        except razorpay.errors.SignatureVerificationError:
+            return False
 
     def compute_test_payment_signature(self, *, razorpay_order_id: str, razorpay_payment_id: str) -> str:
         body = f"{razorpay_order_id}|{razorpay_payment_id}".encode("utf-8")
         return hmac.new(self.key_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
 
     def verify_webhook_signature(self, *, raw_body: bytes, x_razorpay_signature: str) -> bool:
+        if not raw_body or not x_razorpay_signature:
+            return False
         expected = hmac.new(self.webhook_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, x_razorpay_signature.strip())
 
