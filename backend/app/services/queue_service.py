@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.redis_client import get_redis
+from app.core.redis_client import safe_redis
 from app.models.auth import StaffProfile
 from app.models.college import Canteen, Counter, Kitchen
 from app.models.menu import FoodItem
@@ -86,16 +86,17 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         )
     ) or 1
 
-    # Store live metrics snapshot in Redis for fast reads
-    r = get_redis()
-    r.hset(
-        f"cb:queue:{canteen_id}",
-        mapping={
-            "active": str(active_count),
-            "crowd": crowd,
-            "eta": str(base_eta),
-            "orders_per_min": str(orders_per_min),
-        },
+    # Store live metrics snapshot in Redis for fast reads (non-blocking if Redis unavailable)
+    safe_redis(
+        lambda r: r.hset(
+            f"cb:queue:{canteen_id}",
+            mapping={
+                "active": str(active_count),
+                "crowd": crowd,
+                "eta": str(base_eta),
+                "orders_per_min": str(orders_per_min),
+            },
+        )
     )
 
     return {
@@ -207,5 +208,5 @@ def upsert_pickup_slot(
         db.add(slot)
     db.commit()
     db.refresh(slot)
-    get_redis().set(f"cb:slot:{slot.id}:reserved", slot.reserved_count, ex=86400)
+    safe_redis(lambda r: r.set(f"cb:slot:{slot.id}:reserved", slot.reserved_count, ex=86400))
     return slot

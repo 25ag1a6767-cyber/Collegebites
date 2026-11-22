@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.core.redis_client import get_redis
+from app.core.redis_client import safe_redis
 from app.core.security import sha256_hex
 from app.integrations.razorpay_client import razorpay_gateway
 from app.integrations.stripe_client import stripe_gateway
@@ -57,6 +57,8 @@ def _authorize_payment_actor(
         return
     if provider_order_id and expected_provider_order_id and provider_order_id == expected_provider_order_id:
         return
+    if not user_id and not guest_access_token and not provider_order_id:
+        raise HTTPException(status_code=401, detail="Authentication or guest access token required")
     raise HTTPException(status_code=403, detail="Not authorized to update payment state for this order")
 
 
@@ -341,7 +343,7 @@ def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: 
         slot = db.scalar(select(PickupSlot).where(PickupSlot.id == resv.pickup_slot_id).with_for_update())
         if slot and slot.reserved_count > 0:
             slot.reserved_count -= 1
-            get_redis().decr(f"cb:slot:{slot.id}:reserved")
+            safe_redis(lambda r: r.decr(f"cb:slot:{slot.id}:reserved"))
 
     db.add(
         PaymentTransaction(

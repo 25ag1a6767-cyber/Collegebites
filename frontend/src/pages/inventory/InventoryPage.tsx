@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Search,
   ShieldAlert,
+  Trash2,
   Truck,
   Upload,
   UtensilsCrossed,
@@ -205,6 +206,8 @@ export const InventoryPage: React.FC = () => {
   // Archive Confirmation Modal (Section 3.5)
   const [archiveTarget, setArchiveTarget] = useState<any | null>(null);
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const [deleteFoodTarget, setDeleteFoodTarget] = useState<any | null>(null);
+  const [deleteFoodBusy, setDeleteFoodBusy] = useState(false);
 
   // 1-Click Restock Modal (Section 3.7)
   const [restockTarget, setRestockTarget] = useState<any | null>(null);
@@ -1439,6 +1442,15 @@ export const InventoryPage: React.FC = () => {
                             >
                               {m.is_available ? "Pause" : "Enable"}
                             </Button>
+                            <Button
+                              size="sm"
+                              variant="danger"
+                              onClick={() => setDeleteFoodTarget(m)}
+                              title="Delete Dish"
+                              aria-label={`Delete ${m.name}`}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
                           </div>
                         </td>
                       </tr>
@@ -1872,6 +1884,30 @@ export const InventoryPage: React.FC = () => {
             pushToast(getApiError(err), "error");
           } finally {
             setArchiveBusy(false);
+          }
+        }}
+      />
+
+      <ConfirmModal
+        open={Boolean(deleteFoodTarget)}
+        title={`Delete "${deleteFoodTarget?.name || ""}"?`}
+        message="Menu dishes with no past orders are deleted permanently. Dishes referenced in past customer orders are archived and removed from the live menu cleanly."
+        confirmLabel="Delete Dish"
+        confirmVariant="danger"
+        busy={deleteFoodBusy}
+        onCancel={() => setDeleteFoodTarget(null)}
+        onConfirm={async () => {
+          if (!deleteFoodTarget) return;
+          setDeleteFoodBusy(true);
+          try {
+            const res = await api.delete(`/menus/items/${deleteFoodTarget.id}`);
+            setDeleteFoodTarget(null);
+            pushToast(res.data?.message || "Dish removed from menu", "info");
+            refreshAll();
+          } catch (err) {
+            pushToast(getApiError(err), "error");
+          } finally {
+            setDeleteFoodBusy(false);
           }
         }}
       />

@@ -386,11 +386,12 @@ def request_otp(db: Session, data: OTPRequest) -> OTPRequestResponse:
             )
         db.commit()
         masked = _mask_otp_destination(target)
+        email_sent = status_detail in ("sent", "sent_smtp")
         return OTPRequestResponse(
-            message=f"Verification code sent to email {masked}" if status_detail == "sent" else "Verification code generated (dev log)",
+            message=f"Verification code sent to email {masked}" if email_sent else "Verification code generated (dev log)",
             expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
-            dev_otp=code if (allow_dev_echo and status_detail != "sent") else None,
-            delivery_channel="email" if status_detail == "sent" else "dev_echo",
+            dev_otp=code if (allow_dev_echo and not email_sent) else None,
+            delivery_channel="email" if email_sent else "dev_echo",
             masked_destination=masked,
         )
 

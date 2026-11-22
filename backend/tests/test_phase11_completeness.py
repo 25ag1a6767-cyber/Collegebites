@@ -123,8 +123,15 @@ def test_expo_push_kitchen_ingredient_unavailable_and_favourites_list(client):
     assert rep.status_code == 200
     assert rep.json()["current_quantity"] == "0.000"
 
-    # Saved favourites full item list
+    # Saved favourites full item list & push token registration
     student_hdrs = login_as(client, "student@collegebites.edu", "Student@12345")["headers"]
+    pt = client.post(
+        "/api/v1/notifications/push-tokens",
+        json={"token": "ExponentPushToken[mobile123]", "platform": "android"},
+        headers=student_hdrs,
+    )
+    assert pt.status_code == 200
+    assert pt.json()["expo_push_token"] == "ExponentPushToken[mobile123]"
     menu_items = client.get(f"/api/v1/menus/canteens/{main['id']}/items").json()
     assert client.post(f"/api/v1/customers/favourites/{menu_items[0]['id']}", headers=student_hdrs).status_code == 200
     fav_list = client.get("/api/v1/customers/favourites", headers=student_hdrs)

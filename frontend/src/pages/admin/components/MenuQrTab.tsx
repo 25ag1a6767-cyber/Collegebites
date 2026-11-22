@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock, Download, Eye, Plus, QrCode, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
 import type { FoodItem } from "../../../types";
-import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../../components/ui/Primitives";
+import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../../components/ui/Primitives";
 
 function toCleanSlug(raw: string, existingSlugs: string[], fallbackPrefix = "item"): string {
   const base0 = raw
@@ -100,6 +100,8 @@ export const MenuTab: React.FC<{
   const [schedEnd, setSchedEnd] = useState("11:00");
   const [assignSched, setAssignSched] = useState<any | null>(null);
   const [assignIds, setAssignIds] = useState<string[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<FoodItem | null>(null);
+  const [deletingDish, setDeletingDish] = useState(false);
 
   const refreshEditingItem = async (itemId: string) => {
     syncAllMenus();
@@ -398,6 +400,14 @@ export const MenuTab: React.FC<{
                 }}
               >
                 {it.is_active ? "Deactivate" : "Activate"}
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => setDeleteTarget(it)}
+                aria-label={`Delete ${it.name}`}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
               </Button>
             </div>
           </div>
@@ -860,6 +870,30 @@ export const MenuTab: React.FC<{
           </div>
         )}
       </Modal>
+
+      <ConfirmModal
+        open={Boolean(deleteTarget)}
+        title={`Delete "${deleteTarget?.name || ""}"?`}
+        message="Items with no past orders will be permanently deleted. Items referenced in historical orders will be archived and removed from the customer menu so past receipts stay intact."
+        confirmLabel="Delete Dish"
+        confirmVariant="danger"
+        busy={deletingDish}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          if (!deleteTarget) return;
+          setDeletingDish(true);
+          try {
+            const res = await api.delete(`/menus/items/${deleteTarget.id}`);
+            setDeleteTarget(null);
+            syncAllMenus();
+            pushToast(res.data?.message || "Dish removed from menu", "info");
+          } catch (err) {
+            pushToast(getApiError(err), "error");
+          } finally {
+            setDeletingDish(false);
+          }
+        }}
+      />
     </div>
   );
 };

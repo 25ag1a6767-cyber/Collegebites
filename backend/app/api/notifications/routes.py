@@ -32,6 +32,12 @@ class PreferencesUpdateIn(BaseModel):
     expo_push_token: Optional[str] = None
 
 
+class PushTokenRegisterIn(BaseModel):
+    token: str = Field(min_length=5, max_length=300)
+    platform: Optional[str] = Field(default="android", max_length=32)
+    device_name: Optional[str] = Field(default=None, max_length=120)
+
+
 class AnnouncementCreateIn(BaseModel):
     canteen_id: Optional[UUID] = None
     title: str = Field(min_length=2, max_length=200)
@@ -84,6 +90,25 @@ def update_preferences(
     db: Session = Depends(get_db),
 ):
     return notification_service.update_preferences(db, principal.user.id, payload.model_dump(exclude_unset=True))
+
+
+@router.post("/push-tokens")
+def register_push_token(
+    payload: PushTokenRegisterIn,
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    pref = notification_service.update_preferences(
+        db,
+        principal.user.id,
+        {"expo_push_token": payload.token.strip(), "push_enabled": True},
+    )
+    return {
+        "status": "registered",
+        "platform": payload.platform,
+        "push_enabled": pref.push_enabled,
+        "expo_push_token": pref.expo_push_token,
+    }
 
 
 @router.get("/announcements")

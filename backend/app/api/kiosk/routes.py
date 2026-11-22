@@ -110,6 +110,16 @@ def update_kiosk_device(
     return dev
 
 
+@router.post("/devices/{device_id}/heartbeat")
+def kiosk_heartbeat(device_id: UUID, db: Session = Depends(get_db)):
+    dev = db.get(KioskDevice, device_id)
+    if not dev or not dev.is_enabled:
+        raise HTTPException(status_code=404, detail="Enabled kiosk device not found")
+    dev.last_heartbeat_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"status": "ok", "device_id": str(dev.id), "last_heartbeat_at": dev.last_heartbeat_at.isoformat()}
+
+
 @router.post("/orders", response_model=OrderOut, status_code=status.HTTP_201_CREATED)
 def create_kiosk_order(payload: KioskOrderIn, request: Request, db: Session = Depends(get_db)):
     college = college_service.get_or_create_college_settings(db)

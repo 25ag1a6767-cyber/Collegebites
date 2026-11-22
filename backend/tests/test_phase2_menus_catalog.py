@@ -27,6 +27,7 @@ def test_menu_browsing_filters_and_sorting(client: TestClient):
 
 def test_menu_crud_csv_import_export_and_favourites(client: TestClient):
     admin = login_as(client, "admin@collegebites.edu", "Admin@12345")
+    manager = login_as(client, "manager@collegebites.edu", "Staff@12345")
     student = login_as(client, "student@collegebites.edu", "Student@12345")
 
     main = next(c for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
@@ -99,7 +100,7 @@ def test_menu_crud_csv_import_export_and_favourites(client: TestClient):
         headers=manager["headers"],
         json={
             "canteen_id": cid,
-            "category_id": categories[0]["id"],
+            "category_id": cat_id,
             "name": "Overflow Price Item",
             "slug": "overflow-price-item",
             "base_price": "99999999999999.00",
@@ -135,3 +136,9 @@ def test_menu_crud_csv_import_export_and_favourites(client: TestClient):
     assert deact.status_code == 200
     assert all(m["id"] != item_id for m in client.get(f"/api/v1/menus/canteens/{cid}/items").json())
     assert any(m["id"] == item_id for m in client.get(f"/api/v1/menus/canteens/{cid}/items?include_inactive=true").json())
+
+    # Delete un-ordered dish permanently from DB
+    del_res = client.delete(f"/api/v1/menus/items/{item_id}", headers=manager["headers"])
+    assert del_res.status_code == 200
+    assert del_res.json()["status"] == "deleted"
+    assert client.get(f"/api/v1/menus/items/{item_id}").status_code == 404

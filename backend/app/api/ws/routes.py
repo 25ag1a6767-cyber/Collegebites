@@ -99,18 +99,24 @@ def _authorize_order_ws(websocket: WebSocket, order_id: str) -> bool:
         gen.close()
 
 
+async def _serve_room(room: str, websocket: WebSocket) -> None:
+    """Register websocket in a room, answer ping keepalives, and clean up on disconnect."""
+    await ws_manager.connect(room, websocket)
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            if msg.strip().lower() == "ping":
+                await websocket.send_json({"event": "pong"})
+    except WebSocketDisconnect:
+        ws_manager.disconnect(room, websocket)
+
+
 @router.websocket("/ws/orders/{order_id}")
 async def ws_order(websocket: WebSocket, order_id: str):
     if not _authorize_order_ws(websocket, order_id):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    room = f"order:{order_id}"
-    await ws_manager.connect(room, websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        ws_manager.disconnect(room, websocket)
+    await _serve_room(f"order:{order_id}", websocket)
 
 
 @router.websocket("/ws/kitchen/{canteen_id}")
@@ -127,24 +133,12 @@ async def ws_kitchen(websocket: WebSocket, canteen_id: str):
     if not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN) and principal.assigned_canteen_id != cid:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    room = f"kitchen:{canteen_id}"
-    await ws_manager.connect(room, websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        ws_manager.disconnect(room, websocket)
+    await _serve_room(f"kitchen:{canteen_id}", websocket)
 
 
 @router.websocket("/ws/board/{canteen_id}")
 async def ws_board(websocket: WebSocket, canteen_id: str):
-    room = f"board:{canteen_id}"
-    await ws_manager.connect(room, websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        ws_manager.disconnect(room, websocket)
+    await _serve_room(f"board:{canteen_id}", websocket)
 
 
 @router.websocket("/ws/notifications/{user_id}")
@@ -160,10 +154,4 @@ async def ws_notifications(websocket: WebSocket, user_id: str):
     ):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    room = f"user:{user_id}"
-    await ws_manager.connect(room, websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        ws_manager.disconnect(room, websocket)
+    await _serve_room(f"user:{user_id}", websocket)

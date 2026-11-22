@@ -39,6 +39,10 @@ def test_kiosk_disabled_by_default_and_works_when_enabled(client: TestClient):
     assert recs.status_code == 200
     assert len(recs.json()) >= 1
 
+    hb = client.post(f"/api/v1/kiosk/devices/{dev_id}/heartbeat")
+    assert hb.status_code == 200
+    assert hb.json()["status"] == "ok"
+
 
 def test_security_sqli_headers_and_concurrent_handover_and_tokens(client: TestClient):
     student = login_as(client, "student@collegebites.edu", "Student@12345")

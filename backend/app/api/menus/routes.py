@@ -183,6 +183,21 @@ def update_item(
     return menu_service.update_food_item(db, item_id, payload, principal.user.id)
 
 
+@router.delete("/items/{item_id}")
+def delete_item(
+    item_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
+    db: Session = Depends(get_db),
+):
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+    enforce_canteen_scope(principal, item.canteen_id)
+    return menu_service.delete_food_item(db, item_id, principal.user.id)
+
+
 @router.post("/items/{item_id}/upload-image", response_model=FoodItemOut)
 async def upload_item_image(
     item_id: UUID,

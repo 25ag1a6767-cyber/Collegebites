@@ -20,7 +20,8 @@ CollegeBites runs as one shared system across:
 ### Payment Gateways (Strict Online-Only Policy)
 Live online checkout requires configured gateway credentials (`503 Service Unavailable` returned cleanly if unconfigured in production):
 - **Razorpay**: `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_TEST_MODE=false` (or test keys `rzp_test_*` when testing in Razorpay Sandbox — note real REST API calls still run whenever credentials are set).
-- **Stripe**: `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_TEST_MODE=false`.
+- **Stripe**: `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` (served to Web Elements & Mobile PaymentSheet via `/api/v1/payments/stripe/config`), `STRIPE_WEBHOOK_SECRET`, `STRIPE_TEST_MODE=false`.
+- **Redis**: Set `REDIS_URL` (or Vercel `KV_URL`/`UPSTASH_REDIS_URL`) for multi-instance cache/Celery coordination; non-authoritative slot/queue cache writes degrade cleanly to PostgreSQL `FOR UPDATE` if Redis is unavailable, and development falls back to `memory://` FakeRedis when local Redis is offline.
 - Webhook URLs to register in merchant dashboards:
   - `POST https://<domain>/api/v1/payments/razorpay/webhook`
   - `POST https://<domain>/api/v1/payments/stripe/webhook`
@@ -30,7 +31,7 @@ Live online checkout requires configured gateway credentials (`503 Service Unava
 - **SMS / WhatsApp OTP**: Set `SMS_PROVIDER=twilio` (with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`) or `SMS_PROVIDER=webhook` (`SMS_WEBHOOK_URL`). If no SMS provider is configured in production, SMS OTP requests return HTTP `503` instead of silently faking delivery.
 
 ### Mobile Build Configuration (`mobile/`)
-- Set `EXPO_PUBLIC_API_BASE_URL=https://collegebites-alpha.vercel.app/api/v1` before building EAS / native binaries (`npx eas build --platform all`).
+- Set `EXPO_PUBLIC_API_URL=https://collegebites-alpha.vercel.app/api/v1` (or `mobile/app.json` `expo.extra.apiUrl`) before building EAS / native binaries (`npx eas build --platform all`). Note that `@stripe/stripe-react-native` native PaymentSheet requires a custom Expo development client or EAS build (Android APK/AAB or iOS IPA) rather than stock Expo Go.
 
 ## 3. Deployment Steps (Vercel + Neon Postgres)
 

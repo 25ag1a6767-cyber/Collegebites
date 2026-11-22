@@ -6,11 +6,12 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.time_utils import now_college
 from app.models.college import Canteen, CollegeSettings
+from app.models.order import CartItem, OrderItem
 from app.models.menu import (
     Allergen,
     FoodAddon,
@@ -359,8 +360,9 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
         cat = db.get(FoodCategory, payload.category_id)
         if not cat or cat.canteen_id != item.canteen_id:
             raise HTTPException(status_code=400, detail="Invalid category for this canteen")
-    if payload.slug is not None and payload.slug != item.slug:
-        dup = db.scalar(select(FoodItem).where(FoodItem.canteen_id == item.canteen_id, FoodItem.slug == payload.slug))
+    slug_val = getattr(payload, "slug", None)
+    if slug_val is not None and slug_val != item.slug:
+        dup = db.scalar(select(FoodItem).where(FoodItem.canteen_id == item.canteen_id, FoodItem.slug == slug_val))
         if dup and dup.id != item.id:
             raise HTTPException(status_code=409, detail="Food item slug already exists in this canteen")
 
@@ -412,6 +414,55 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
     )
     db.commit()
     return get_food_item(db, item.id)
+
+
+def delete_food_item(db: Session, item_id: UUID, actor_user_id: UUID) -> dict:
+    """Delete an un-ordered food item permanently, or archive it when past order records exist."""
+    item = db.get(FoodItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Food item not found")
+
+    order_ref_count = int(
+        db.scalar(select(func.count(OrderItem.id)).where(OrderItem.food_item_id == item.id)) or 0
+    )
+    if order_ref_count > 0:
+        item.is_active = False
+        item.is_available = False
+        db.execute(delete(CartItem).where(CartItem.food_item_id == item.id))
+        record_audit_log(
+            db,
+            action="food_item.archived",
+            entity_type="food_item",
+            entity_id=str(item.id),
+            actor_user_id=actor_user_id,
+            details={"name": item.name, "order_ref_count": order_ref_count},
+        )
+        db.commit()
+        return {
+            "status": "archived",
+            "id": str(item_id),
+            "name": item.name,
+            "message": f"'{item.name}' has {order_ref_count} historical order line(s) and was deactivated from the menu.",
+        }
+
+    item_name = item.name
+    db.execute(delete(CartItem).where(CartItem.food_item_id == item.id))
+    db.delete(item)
+    record_audit_log(
+        db,
+        action="food_item.deleted",
+        entity_type="food_item",
+        entity_id=str(item_id),
+        actor_user_id=actor_user_id,
+        details={"name": item_name},
+    )
+    db.commit()
+    return {
+        "status": "deleted",
+        "id": str(item_id),
+        "name": item_name,
+        "message": f"'{item_name}' permanently deleted from the menu.",
+    }
 
 
 def set_food_item_primary_image(db: Session, item_id: UUID, image_url: str, actor_user_id: UUID) -> FoodItemOut:
@@ -482,7 +533,6 @@ def add_addon_to_food_item(db: Session, item_id: UUID, payload: FoodItemAddonCre
             price=payload.price,
             is_veg=payload.is_veg,
             is_available=payload.is_available,
-            max_quantity=payload.max_quantity,
         )
         db.add(addon)
         db.flush()
@@ -490,8 +540,10 @@ def add_addon_to_food_item(db: Session, item_id: UUID, payload: FoodItemAddonCre
     existing_link = db.scalar(
         select(FoodItemAddon).where(FoodItemAddon.food_item_id == item.id, FoodItemAddon.addon_id == addon.id)
     )
-    if not existing_link:
-        db.add(FoodItemAddon(food_item_id=item.id, addon_id=addon.id))
+    if existing_link:
+        existing_link.max_quantity = payload.max_quantity
+    else:
+        db.add(FoodItemAddon(food_item_id=item.id, addon_id=addon.id, max_quantity=payload.max_quantity))
 
     record_audit_log(
         db,

@@ -4,7 +4,7 @@
 
 - **Shared FastAPI Backend & PostgreSQL (`backend/`)**: Authoritative business logic, server pricing, loyalty, Razorpay + Stripe signature & webhook verification, HMAC QR generation/verification, ReportLab PDFs, WebSockets, and audit logging.
 - **Customer Web & Operations Portals (`frontend/`)**: Vite + React + TypeScript PWA (`manifest.webmanifest`, `sw.js`, bottom mobile app tab bar, `/scan` camera scanner, Kitchen Display, Cashier POS, Pickup Scanner, Digital Token Board, Inventory, Admin Console).
-- **Customer & QR Mobile App (`mobile/`)**: Expo SDK 52 + React Native + Expo Router + TanStack Query + Zustand + React Hook Form + Zod + Expo SecureStore + Expo Camera + Expo Notifications.
+- **Customer & QR Mobile App (`mobile/`)**: Expo SDK 52 + React Native + Expo Router + TanStack Query + Zustand + React Hook Form + Zod + Expo SecureStore + Expo Camera + Expo Notifications + `@stripe/stripe-react-native` PaymentSheet.
 - **Shared Contracts (`shared/api-contracts/collegebites.contracts.ts`)**: Shared DTO types and canonical `/api/v1/*` path definitions.
 
 ## 2. Mobile API Module Mapping (`mobile/src/api/`)
@@ -17,7 +17,7 @@
 | `menu.api.ts` | `GET /menus/canteens/{id}/categories`, `/menus/canteens/{id}/items`, `GET /support/items/{id}/reviews`, `POST /support/reviews` | Menu catalog, search/filter/sort, customization variants/addons, reviews |
 | `cart.api.ts` | `GET /carts`, `POST /carts/items`, `PATCH /carts/items/{id}` | Server-validated cart pricing and customizations |
 | `orders.api.ts` | `GET /orders/slots/{canteen_id}`, `POST /orders/checkout`, `GET /orders/my`, `GET /orders/{id}`, `POST /orders/guest/lookup`, `POST /orders/{id}/cancel` | Idempotent checkout, loyalty redemption, slot reservation, guest OTP order recovery |
-| `payments.api.ts` | `POST /payments/razorpay/{verify,fail}`, `POST /payments/stripe/{verify,fail}`, `POST /payments/retry/{order_id}` | Gateway verification & failure handling (No-Refund compliant) |
+| `payments.api.ts` | `GET /payments/stripe/config`, `POST /payments/razorpay/{verify,fail}`, `POST /payments/stripe/{verify,fail}`, `POST /payments/retry/{order_id}` | Stripe PaymentSheet config & native/web gateway verification/failure handling (No-Refund compliant) |
 | `tokens.api.ts` | `GET /qr/locations/resolve/{code}`, `GET /tokens/receipts/{order_no}`, `/tokens/receipts/{order_no}/pdf`, `POST /pickup/{verify,handover}`, `GET /pickup/board/{id}` | Table/counter QR resolve, token & QR receipt, PDF/Share, live token board |
 | `notifications.api.ts` | `GET /notifications/my`, `POST /notifications/{id}/read`, `POST /notifications/mark-all-read`, `GET/PUT /notifications/preferences`, `POST /notifications/push-tokens` | Notification inbox, channel preferences, Expo Push token sync |
 | `profile.api.ts` | `GET/PATCH /customers/profile`, `GET/POST/DELETE /customers/favourites`, `DELETE /customers/me`, `GET /promotions/loyalty/me`, `POST /promotions/loyalty/apply-referral`, `GET/POST /support/tickets*` | Profile/dietary edits, favourites, loyalty/referrals, self-deactivation, support tickets |

@@ -5,6 +5,7 @@ import { MonitorOff, RotateCcw, ShoppingBag } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import type { Canteen, FoodItem, Order, ReceiptSnapshot } from "../../types";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
+import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
 import { Button, Card, useToast } from "../../components/ui/Primitives";
 import { openRazorpayModal } from "../../utils/razorpay";
 
@@ -20,6 +21,7 @@ export const KioskPage: React.FC = () => {
   const [payMethod, setPayMethod] = useState<"razorpay" | "stripe">("razorpay");
   const [cartLines, setCartLines] = useState<{ item: FoodItem; quantity: number }[]>([]);
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
+  const [stripeModalOpen, setStripeModalOpen] = useState(false);
   const [receipt, setReceipt] = useState<ReceiptSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [idleSeconds, setIdleSeconds] = useState(90);
@@ -120,11 +122,8 @@ export const KioskPage: React.FC = () => {
     setBusy(true);
     try {
       if (pendingOrder.payment_method === "stripe") {
-        if (pendingOrder.stripe_checkout_url) {
-          window.location.href = pendingOrder.stripe_checkout_url;
-          return;
-        }
-        throw new Error("Stripe gateway session URL is unavailable in this environment.");
+        setStripeModalOpen(true);
+        return;
       }
       if (pendingOrder.razorpay_order_id && pendingOrder.razorpay_key_id) {
         const opened = await openRazorpayModal({
@@ -276,6 +275,27 @@ export const KioskPage: React.FC = () => {
           </Card>
         </div>
       )}
+
+      <StripePaymentModal
+        order={stripeModalOpen ? pendingOrder : null}
+        onClose={() => setStripeModalOpen(false)}
+        onSuccess={async (verified) => {
+          setStripeModalOpen(false);
+          await fetchReceiptForOrder(verified);
+          setPendingOrder(null);
+          pushToast(`Token ${verified.pickup_token_code || ""} ready! Printing slip.`, "success");
+        }}
+        onProcessing={() => {
+          setStripeModalOpen(false);
+          pushToast("Payment is processing at Stripe. Please wait a moment.", "info");
+        }}
+        onFailed={() => {
+          setStripeModalOpen(false);
+          setPendingOrder(null);
+          pushToast("Stripe payment cancelled or failed.", "info");
+        }}
+        onNavigateStatus={() => setStripeModalOpen(false)}
+      />
     </div>
   );
 };

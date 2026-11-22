@@ -158,6 +158,7 @@ async function main() {
     await stripePage.goto(`${FRONTEND_URL}/login`, { waitUntil: "networkidle" });
     await stripePage.getByRole("button", { name: /Student \(Customer\)/i }).click();
     await stripePage.waitForURL(`${FRONTEND_URL}/`, { timeout: 10000 }).catch(() => {});
+    await stripePage.goto(`${FRONTEND_URL}/?canteen=main-canteen`, { waitUntil: "networkidle" });
     await stripePage.getByPlaceholder("Search dishes, ingredients...").fill("Cold Coffee");
     await stripePage.waitForTimeout(500);
     await stripePage.getByRole("button", { name: /Customize & Add/i }).first().click();
@@ -231,7 +232,7 @@ async function main() {
     await pickPage.getByRole("button", { name: "Verify Order" }).click();
     await pickPage.getByText("VALID_ORDER").first().waitFor({ timeout: 10000 });
     await pickPage.getByRole("button", { name: /Confirm Food Handover/i }).click();
-    await pickPage.getByText("COMPLETED").first().waitFor({ timeout: 10000 });
+    await pickPage.getByText("Food handed over and order marked COMPLETED.").waitFor({ timeout: 10000 });
 
     // Second verify shows ALREADY_COLLECTED
     await pickPage.getByRole("button", { name: "Verify Order" }).click();
@@ -247,7 +248,8 @@ async function main() {
     await posPage.getByPlaceholder("Quick search dishes...").waitFor({ timeout: 10000 });
     await posPage.locator("button").filter({ hasText: "₹" }).first().click();
     await posPage.getByRole("button", { name: /Accept Payment & Print Token/i }).click();
-    await posPage.getByText("Official Digital Token Slip & Payment Receipt").waitFor({ timeout: 10000 });
+    await posPage.getByText(/Order Receipt • Token/i).waitFor({ timeout: 10000 });
+    await posPage.getByText("PICKUP TOKEN").waitFor({ timeout: 10000 });
 
     // 5. Admin Console All Tabs + Breakdowns Smoke Check
     const adminCtx = await browser.newContext();
@@ -281,14 +283,19 @@ async function main() {
         await adminPage.getByText("Scan to Order Food").first().waitFor({ timeout: 10000 });
       }
       if (tabName === "Menus & CSV") {
+        await adminPage.locator("select").nth(1).selectOption({ label: "Main Canteen" });
+        await adminPage.waitForTimeout(400);
         const dishTitle = `E2E Paneer Roll ${Date.now().toString().slice(-4)}`;
         await adminPage.getByPlaceholder("New Dish Name").fill(dishTitle);
         await adminPage.getByPlaceholder("Price (₹)").fill("85.00");
         await adminPage.getByRole("button", { name: "Add Item" }).click();
         await adminPage.getByText(dishTitle).first().waitFor({ timeout: 10000 });
-        await stripePage.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+        await stripePage.goto(`${FRONTEND_URL}/?canteen=main-canteen`, { waitUntil: "networkidle" });
         await stripePage.getByPlaceholder("Search dishes, ingredients...").fill(dishTitle);
         await stripePage.getByText(dishTitle).first().waitFor({ timeout: 10000 });
+        await adminPage.getByRole("button", { name: `Delete ${dishTitle}` }).click();
+        await adminPage.getByRole("button", { name: "Delete Dish" }).click();
+        await adminPage.getByText(dishTitle).waitFor({ state: "detached", timeout: 10000 }).catch(() => {});
       }
       await adminPage.waitForTimeout(250);
     }

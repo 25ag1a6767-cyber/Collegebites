@@ -131,12 +131,15 @@ def test_kitchen_lifecycle_qr_verification_cases_handover_and_digital_board(clie
     )
     assert ho2.status_code == 409
 
-    # 9. Close cashier shift and verify expected cash calculation
+    # 9. Close cashier shift and verify online-only expected cash + UPI POS sales summary
     shift_close = client.post(
         "/api/v1/pos/shifts/close",
         headers=cashier["headers"],
-        json={"closing_cash_amount": str(Decimal("500.00") + Decimal(order["total_amount"]))},
+        json={"closing_cash_amount": "500.00"},
     )
     assert shift_close.status_code == 200
     assert shift_close.json()["status"] == "closed"
-    assert Decimal(shift_close.json()["expected_cash_amount"]) == Decimal("500.00") + Decimal(order["total_amount"])
+    assert Decimal(shift_close.json()["expected_cash_amount"]) == Decimal("500.00")
+    summary = shift_close.json()["shift_sales_summary"]
+    assert Decimal(summary["total_collected"]) == Decimal(order["total_amount"])
+    assert Decimal(summary["by_method"]["upi_pos"]["amount"]) == Decimal(order["total_amount"])

@@ -9,7 +9,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
-from app.core.redis_client import get_redis
+from app.core.redis_client import safe_redis
 from app.core.security import generate_guest_access_token, mask_mobile, sha256_hex
 from app.core.time_utils import now_college, today_college
 from app.integrations.razorpay_client import razorpay_gateway
@@ -135,7 +135,7 @@ def release_expired_slot_reservations(db: Session) -> int:
         slot = db.scalar(select(PickupSlot).where(PickupSlot.id == resv.pickup_slot_id).with_for_update())
         if slot and slot.reserved_count > 0:
             slot.reserved_count -= 1
-            get_redis().decr(f"cb:slot:{slot.id}:reserved")
+            safe_redis(lambda r: r.decr(f"cb:slot:{slot.id}:reserved"))
         order.payment_status = "FAILED"
         transition_order_status(db, order, "PAYMENT_FAILED", reason="Checkout payment window expired")
         pay = db.scalar(select(Payment).where(Payment.order_id == order.id, Payment.status == "PENDING"))
@@ -450,13 +450,16 @@ def checkout_order(
             raise HTTPException(status_code=400, detail="Invalid or inactive pickup slot")
         if pickup_slot.reserved_count >= pickup_slot.capacity:
             raise HTTPException(status_code=409, detail="Selected pickup slot is full")
-        redis_client = get_redis()
         rkey = f"cb:slot:{pickup_slot.id}:reserved"
-        if not redis_client.exists(rkey):
-            redis_client.set(rkey, pickup_slot.reserved_count, ex=86400)
-        new_count = redis_client.incr(rkey)
-        if new_count > pickup_slot.capacity:
-            redis_client.decr(rkey)
+
+        def _reserve_slot_cache(redis_client):
+            if not redis_client.exists(rkey):
+                redis_client.set(rkey, pickup_slot.reserved_count, ex=86400)
+            return redis_client.incr(rkey)
+
+        new_count = safe_redis(_reserve_slot_cache)
+        if new_count is not None and new_count > pickup_slot.capacity:
+            safe_redis(lambda r: r.decr(rkey))
             raise HTTPException(status_code=409, detail="Selected pickup slot capacity reached")
         pickup_slot.reserved_count += 1
 
@@ -721,7 +724,7 @@ def checkout_order(
         db.commit()
     except Exception:
         if redis_incremented and redis_slot_key:
-            get_redis().decr(redis_slot_key)
+            safe_redis(lambda r: r.decr(redis_slot_key))
         raise
 
     db.expire_all()
@@ -829,7 +832,7 @@ def cancel_or_reject_order(
         slot = db.scalar(select(PickupSlot).where(PickupSlot.id == resv.pickup_slot_id).with_for_update())
         if slot and slot.reserved_count > 0:
             slot.reserved_count -= 1
-            get_redis().decr(f"cb:slot:{slot.id}:reserved")
+            safe_redis(lambda r: r.decr(f"cb:slot:{slot.id}:reserved"))
 
     # Payment is retained with ZERO automated refunds per policy
     db.add(
