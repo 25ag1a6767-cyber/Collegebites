@@ -1,14 +1,15 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Linking, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import QRCode from "react-native-qrcode-svg";
-import { API_BASE_URL, buildMobileWsUrl, getMobileApiError } from "../../src/api/client";
+import { API_BASE_URL, getMobileApiError } from "../../src/api/client";
 import { ordersApi } from "../../src/api/orders.api";
 import { paymentsApi } from "../../src/api/payments.api";
 import { tokensApi } from "../../src/api/tokens.api";
 import { StripePayButton } from "../../src/components/StripePayButton";
 import { BrandLogo } from "../../src/components/BrandLogo";
+import { useMobileRealtimeWs } from "../../src/hooks/useMobileRealtimeWs";
 import { useMobileStore } from "../../src/store/useMobileStore";
 
 const STEPS = [
@@ -25,7 +26,6 @@ const STEPS = [
 export default function OrderDetailScreen() {
   const { orderNumber } = useLocalSearchParams<{ orderNumber: string }>();
   const router = useRouter();
-  const qc = useQueryClient();
   const { accessToken, guestOrderTokens, cachedOrders, saveCachedOrder } = useMobileStore();
   const gToken = orderNumber ? guestOrderTokens[orderNumber] : undefined;
   const suffix = gToken ? `?guest_token=${encodeURIComponent(gToken)}` : "";
@@ -45,7 +45,7 @@ export default function OrderDetailScreen() {
       if (orderNumber) saveCachedOrder(orderNumber, data);
       return data;
     },
-    refetchInterval: 4000,
+    refetchInterval: 12000,
   });
 
   const order = liveOrder || (orderNumber ? cachedOrders[orderNumber] : null);
@@ -57,22 +57,13 @@ export default function OrderDetailScreen() {
     queryFn: () => tokensApi.getReceipt(String(orderNumber), gToken),
   });
 
-  // Real-time WebSocket updates
-  useEffect(() => {
-    if (!order?.id) return;
-    if (!accessToken && !gToken) return;
-    let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(buildMobileWsUrl(`/ws/orders/${order.id}`, { token: accessToken, guestToken: gToken }));
-      ws.onmessage = () => {
-        qc.invalidateQueries({ queryKey: ["m-order", orderNumber] });
-        qc.invalidateQueries({ queryKey: ["m-receipt", orderNumber] });
-      };
-    } catch {
-      // polling fallback handles it
-    }
-    return () => ws?.close();
-  }, [order?.id, orderNumber, accessToken, gToken, qc]);
+  useMobileRealtimeWs({
+    enabled: Boolean(order?.id && (accessToken || gToken)),
+    wsPath: order?.id ? `/ws/orders/${order.id}` : null,
+    token: accessToken,
+    guestToken: gToken,
+    queryKeys: [["m-order", orderNumber], ["m-receipt", orderNumber]],
+  });
 
   if (!order && orderIsError) {
     return (

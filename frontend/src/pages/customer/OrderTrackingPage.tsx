@@ -2,12 +2,14 @@ import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, HelpCircle, PackageCheck, RefreshCw, Utensils, XCircle } from "lucide-react";
-import { api, buildWsUrl, getApiError } from "../../api/client";
+import { api, getApiError } from "../../api/client";
+import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Order, ReceiptSnapshot } from "../../types";
 import { BrandLoadingState, BrandLogo } from "../../components/branding/BrandLogo";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
+import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
 import { openRazorpayModal } from "../../utils/razorpay";
 
@@ -34,6 +36,7 @@ export const OrderTrackingPage: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [stripeModalOrder, setStripeModalOrder] = useState<Order | null>(null);
   const handledStripeRef = useRef<string | null>(null);
+  const realtimeLiveRef = useRef(false);
   const effectiveToken = guestToken || manualGuestToken || undefined;
   const querySuffix = effectiveToken ? `?guest_token=${encodeURIComponent(effectiveToken)}` : "";
 
@@ -41,8 +44,26 @@ export const OrderTrackingPage: React.FC = () => {
     queryKey: ["order", orderNumber, effectiveToken],
     enabled: Boolean(orderNumber),
     queryFn: async () => (await api.get(`/orders/${orderNumber}${querySuffix}`)).data,
-    refetchInterval: 5000,
+    refetchInterval: () => (realtimeLiveRef.current ? 30000 : 5000),
+    refetchIntervalInBackground: true,
   });
+
+  const { status: orderSyncStatus, lastSyncedAt: orderLastSyncedAt } = useRealtimeSync<{ order?: Order }>({
+    enabled: Boolean(order?.id && (accessToken || effectiveToken)),
+    ssePath: order?.id ? `/realtime/orders/${order.id}/stream${querySuffix}` : null,
+    wsPath: order?.id ? `/ws/orders/${order.id}` : null,
+    wsGuestToken: effectiveToken,
+    queryKeys: [["order", orderNumber, effectiveToken], ["receipt", orderNumber, effectiveToken]],
+    onSnapshot: (snap) => {
+      if (snap?.order) {
+        qc.setQueryData(["order", orderNumber, effectiveToken], snap.order);
+        if (snap.order.payment_status === "CONFIRMED") {
+          qc.invalidateQueries({ queryKey: ["receipt", orderNumber, effectiveToken] });
+        }
+      }
+    },
+  });
+  realtimeLiveRef.current = orderSyncStatus === "live";
 
   const { data: receipt, refetch: refetchReceipt } = useQuery<ReceiptSnapshot>({
     queryKey: ["receipt", orderNumber, effectiveToken],
@@ -124,25 +145,7 @@ export const OrderTrackingPage: React.FC = () => {
     }
   }, [searchParams, order, querySuffix, refetch, refetchReceipt, pushToast]);
 
-  // WebSocket real-time updates
-  useEffect(() => {
-    if (!order?.id) return;
-    if (!accessToken && !effectiveToken) return;
-    const wsUrl = buildWsUrl(`/ws/orders/${order.id}`, { token: accessToken, guestToken: effectiveToken });
-    let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(wsUrl);
-      ws.onmessage = () => {
-        qc.invalidateQueries({ queryKey: ["order", orderNumber] });
-        qc.invalidateQueries({ queryKey: ["receipt", orderNumber] });
-      };
-    } catch {
-      // polling fallback handles it cleanly
-    }
-    return () => {
-      ws?.close();
-    };
-  }, [order?.id, orderNumber, accessToken, effectiveToken, qc]);
+  // Real-time stream + WS handled by useRealtimeSync above
 
   const handleConfirmCancelOrder = async () => {
     if (!order) return;
@@ -248,6 +251,7 @@ export const OrderTrackingPage: React.FC = () => {
                 <Badge tone={isTerminalFail ? "red" : order.status === "READY" ? "green" : "blue"}>
                   Status: {order.status}
                 </Badge>
+                <RealtimeStatusBadge status={orderSyncStatus} lastSyncedAt={orderLastSyncedAt} />
                 {order.delayed_minutes > 0 && (
                   <Badge tone="amber">
                     Delayed +{order.delayed_minutes}m ({order.delay_reason})

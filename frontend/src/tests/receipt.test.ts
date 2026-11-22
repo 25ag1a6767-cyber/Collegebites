@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { api, buildWsUrl, getApiError } from "../api/client";
 import { COLLEGEBITES_APP_ICON_SRC, COLLEGEBITES_LOGO_SRC } from "../components/branding/BrandLogo";
 import { crowdBadgeTone } from "../components/ui/Primitives";
+import { parseSseChunks, shouldAcceptRealtimeVersion } from "../hooks/useRealtimeSync";
 import { buildRazorpayOptions, openRazorpayModal } from "../utils/razorpay";
 
 describe("CollegeBites Web Utilities", () => {
@@ -155,5 +156,24 @@ describe("CollegeBites Web Utilities", () => {
       (globalThis as any).window = prevWin;
       (api as any).post = prevPost;
     }
+  });
+
+  it("parses chunked SSE streams and deduplicates identical real-time versions", () => {
+    const chunk1 = "retry: 1500\n\nid: ver-1\nevent: board.snapshot\ndata: {\"version\":\"ver-1\",\"now_preparing\":";
+    const p1 = parseSseChunks(chunk1);
+    expect(p1.messages).toHaveLength(0);
+    expect(p1.rest).toContain("now_preparing");
+
+    const chunk2 = p1.rest + "[{\"token_code\":\"A101\"}]}\n\n: keepalive\n\n";
+    const p2 = parseSseChunks(chunk2);
+    expect(p2.messages).toHaveLength(1);
+    expect(p2.messages[0].id).toBe("ver-1");
+    expect(p2.messages[0].event).toBe("board.snapshot");
+    expect(p2.messages[0].data.now_preparing[0].token_code).toBe("A101");
+
+    expect(shouldAcceptRealtimeVersion(null, "ver-1")).toBe(true);
+    expect(shouldAcceptRealtimeVersion("ver-1", "ver-1")).toBe(false);
+    expect(shouldAcceptRealtimeVersion("ver-1", "ver-2")).toBe(true);
+    expect(shouldAcceptRealtimeVersion("ver-2", null)).toBe(true);
   });
 });

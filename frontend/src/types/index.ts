@@ -199,6 +199,7 @@ export interface Order {
   canteen_name?: string | null;
   counter_id: string;
   counter_name?: string | null;
+  kitchen_id?: string | null;
   is_guest: boolean;
   guest_name?: string | null;
   guest_phone_masked?: string | null;
@@ -261,6 +262,32 @@ export interface Order {
     reason?: string | null;
     created_at: string;
   }[];
+}
+
+export interface TokenBoardItem {
+  token_code: string;
+  counter_name: string;
+  order_status: string;
+  ready_at?: string | null;
+  order_id?: string | null;
+  order_number?: string | null;
+  canteen_id?: string | null;
+  canteen_name?: string | null;
+  sequence_number?: number | null;
+  item_summary?: string | null;
+  item_count?: number;
+  delayed_minutes?: number;
+  created_at?: string | null;
+}
+
+export interface DigitalBoardResponse {
+  canteen_id?: string | null;
+  canteen_name: string;
+  now_preparing: TokenBoardItem[];
+  ready_for_pickup: TokenBoardItem[];
+  recently_completed: TokenBoardItem[];
+  updated_at: string;
+  version?: string | null;
 }
 
 export interface ReceiptSnapshot {
