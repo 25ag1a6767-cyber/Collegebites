@@ -124,7 +124,7 @@ describe("CollegeBites Web Utilities", () => {
           is_guest: true,
           guest_access_token: "CBG.tok",
           razorpay_order_id: "order_real_abc",
-          razorpay_key_id: "rzp_test_U3DFJ3eDbjdjRn",
+          razorpay_key_id: "rzp_test_example_key",
           created_at: "2026-11-22T12:00:00Z",
           items: [],
           status_history: [],
