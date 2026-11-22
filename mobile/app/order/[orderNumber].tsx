@@ -275,7 +275,7 @@ export default function OrderDetailScreen() {
               }}
               style={styles.payBtn}
             >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Razorpay Checkout</Text>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Razorpay UPI Checkout</Text>
             </Pressable>
           ) : (
             <Text style={{ color: "#64748b", fontSize: 12 }}>

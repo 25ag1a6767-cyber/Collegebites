@@ -28,23 +28,18 @@ export function loadRazorpayCheckoutScript(): Promise<boolean> {
   });
 }
 
-export async function openRazorpayModal(opts: {
+export interface RazorpayModalOptions {
   order: Order;
   prefill?: { name?: string; email?: string; contact?: string };
   description?: string;
   onVerified: (verified: Order) => void;
   onError: (err: unknown) => void;
   onDismiss?: () => void;
-}): Promise<boolean> {
+}
+
+export function buildRazorpayOptions(opts: RazorpayModalOptions): Record<string, any> {
   const { order } = opts;
-  if (!order.razorpay_order_id || !order.razorpay_key_id) {
-    return false;
-  }
-  const loaded = await loadRazorpayCheckoutScript();
-  if (!loaded || !window.Razorpay) {
-    return false;
-  }
-  const rzp = new window.Razorpay({
+  return {
     key: order.razorpay_key_id,
     amount: Math.round(Number(order.total_amount) * 100),
     currency: "INR",
@@ -52,6 +47,23 @@ export async function openRazorpayModal(opts: {
     description: opts.description || `Order ${order.order_number}`,
     order_id: order.razorpay_order_id,
     prefill: opts.prefill,
+    // Force Razorpay Standard Checkout into direct UPI-only mode (UPI Intent on mobile + locked QR on desktop)
+    config: {
+      display: {
+        blocks: {
+          upi: {
+            name: "Pay directly with UPI App or QR",
+            instruments: [{ method: "upi" }],
+          },
+        },
+        sequence: ["block.upi"],
+        preferences: {
+          show_default_blocks: false,
+        },
+      },
+    },
+    retry: { enabled: true },
+    theme: { color: "#ea580c" },
     handler: async (response: {
       razorpay_order_id: string;
       razorpay_payment_id: string;
@@ -73,7 +85,19 @@ export async function openRazorpayModal(opts: {
     modal: {
       ondismiss: () => opts.onDismiss?.(),
     },
-  });
+  };
+}
+
+export async function openRazorpayModal(opts: RazorpayModalOptions): Promise<boolean> {
+  const { order } = opts;
+  if (!order.razorpay_order_id || !order.razorpay_key_id) {
+    return false;
+  }
+  const loaded = await loadRazorpayCheckoutScript();
+  if (!loaded || !window.Razorpay) {
+    return false;
+  }
+  const rzp = new window.Razorpay(buildRazorpayOptions(opts));
   rzp.open();
   return true;
 }

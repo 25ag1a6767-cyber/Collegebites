@@ -306,7 +306,7 @@ export default function CheckoutScreen() {
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
           {[
             ...(activeCanteen?.allow_online_payment !== false && college?.razorpay_enabled !== false
-              ? [{ id: "razorpay", label: "Razorpay" }]
+              ? [{ id: "razorpay", label: "Razorpay UPI" }]
               : []),
             ...(activeCanteen?.allow_online_payment !== false && college?.stripe_enabled !== false
               ? [{ id: "stripe", label: "Stripe Card" }]

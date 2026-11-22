@@ -317,7 +317,7 @@ export const OrderTrackingPage: React.FC = () => {
                     </Button>
                   )}
                 <Button size="sm" variant="primary" disabled={busy} onClick={() => void handleRetryOnlinePayment("razorpay")}>
-                  <RefreshCw className="h-3.5 w-3.5" /> Pay via Razorpay
+                  <RefreshCw className="h-3.5 w-3.5" /> Pay via Razorpay UPI
                 </Button>
                 <Button size="sm" variant="secondary" disabled={busy} onClick={() => void handleRetryOnlinePayment("stripe")}>
                   <RefreshCw className="h-3.5 w-3.5" /> Pay via Stripe

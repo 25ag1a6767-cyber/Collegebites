@@ -441,7 +441,7 @@ export const CheckoutPage: React.FC = () => {
                       >
                         <CreditCard className="h-4 w-4 mb-1 text-orange-600" />
                         Razorpay Online
-                        <div className="font-normal text-slate-500">UPI, Cards, Netbanking, Wallets</div>
+                        <div className="font-normal text-slate-500">Direct UPI Apps (GPay, PhonePe, Paytm) & UPI QR</div>
                       </button>
                     )}
                     {(college?.stripe_enabled ?? true) && (
@@ -590,7 +590,7 @@ export const CheckoutPage: React.FC = () => {
       <Modal
         open={Boolean(pendingOrder && pendingOrder.payment_method !== "stripe")}
         onClose={() => {}}
-        title="Razorpay Checkout"
+        title="Razorpay Direct UPI Checkout"
       >
         {pendingOrder && pendingOrder.payment_method !== "stripe" && (
           <div className="space-y-4" data-order-id={pendingOrder.id} data-order-number={pendingOrder.order_number}>
@@ -614,7 +614,7 @@ export const CheckoutPage: React.FC = () => {
             <div className="flex flex-wrap gap-2">
               {pendingOrder.razorpay_key_id ? (
                 <Button variant="success" className="flex-1" disabled={busy} onClick={launchGatewayCheckout}>
-                  Launch Razorpay Checkout
+                  Pay ₹{pendingOrder.total_amount} via UPI App / QR
                 </Button>
               ) : (
                 <Button

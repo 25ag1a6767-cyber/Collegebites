@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildWsUrl, getApiError } from "../api/client";
 import { crowdBadgeTone } from "../components/ui/Primitives";
+import { buildRazorpayOptions } from "../utils/razorpay";
 
 describe("CollegeBites Web Utilities", () => {
   it("maps crowd levels to semantic badge tones", () => {
@@ -34,5 +35,42 @@ describe("CollegeBites Web Utilities", () => {
     } finally {
       (globalThis as any).window = prevWin;
     }
+  });
+
+  it("configures Razorpay checkout strictly in locked-amount UPI-only mode", () => {
+    const options = buildRazorpayOptions({
+      order: {
+        id: "ord-1",
+        order_number: "CB-20261122-000001",
+        canteen_id: "can-1",
+        counter_id: "cnt-1",
+        order_type: "pickup",
+        order_channel: "web",
+        status: "PAYMENT_PENDING",
+        payment_status: "PENDING",
+        payment_method: "razorpay",
+        subtotal_amount: "80.00",
+        tax_amount: "4.00",
+        discount_amount: "0.00",
+        total_amount: "84.00",
+        estimated_prep_minutes: 10,
+        delayed_minutes: 0,
+        is_guest: false,
+        razorpay_order_id: "order_test_123",
+        razorpay_key_id: "rzp_test_key",
+        created_at: "2026-11-22T12:00:00Z",
+        items: [],
+        status_history: [],
+      },
+      onVerified: () => {},
+      onError: () => {},
+    });
+
+    expect(options.amount).toBe(8400);
+    expect(options.currency).toBe("INR");
+    expect(options.order_id).toBe("order_test_123");
+    expect(options.config.display.sequence).toEqual(["block.upi"]);
+    expect(options.config.display.blocks.upi.instruments).toEqual([{ method: "upi" }]);
+    expect(options.config.display.preferences.show_default_blocks).toBe(false);
   });
 });
