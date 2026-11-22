@@ -16,6 +16,12 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
   const [endTime, setEndTime] = useState("13:00");
   const [slotCap, setSlotCap] = useState("40");
 
+  const { data: pickupSlots = [], refetch: refetchSlots } = useQuery<any[]>({
+    queryKey: ["admin-pickup-slots", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/orders/slots/${activeCanteenId}`)).data,
+  });
+
   useEffect(() => {
     if (queueDash?.max_concurrent_orders) {
       setMaxConcurrent(String(queueDash.max_concurrent_orders));
@@ -29,7 +35,7 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
           <div>
             <h2 className="font-bold text-slate-900">Live Queue & Crowd Control</h2>
             <div className="text-xs text-slate-500">
-              Active: {queueDash?.active_order_count} • Crowd: {queueDash?.crowd_level} • Wait: {queueDash?.estimated_wait_minutes} min • Kitchen Workload: {queueDash?.kitchen_workload_percent}%
+              Active: {queueDash?.active_order_count} • Crowd: {queueDash?.crowd_level} • Wait: {queueDash?.estimated_wait_minutes} min • Kitchen Workload: {queueDash?.kitchen_workload_percent}% • Staff On Duty: {queueDash?.on_duty_staff_count ?? 1}
             </div>
           </div>
           <Button
@@ -98,6 +104,7 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
                 capacity: Number(slotCap),
                 is_active: true,
               });
+              refetchSlots();
               pushToast("Pickup slot configured", "success");
             } catch (err) {
               pushToast(getApiError(err), "error");
@@ -106,6 +113,43 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
         >
           Save Pickup Slot
         </Button>
+
+        {pickupSlots.length > 0 && (
+          <div className="border-t border-slate-100 pt-3 space-y-1.5">
+            <div className="text-[11px] font-bold uppercase text-slate-500">Configured Upcoming Slots ({pickupSlots.length})</div>
+            <div className="space-y-1.5 max-h-40 overflow-y-auto">
+              {pickupSlots.map((s) => (
+                <div key={s.id} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-1.5 text-xs">
+                  <span>
+                    <strong>{s.slot_date}</strong> • {String(s.start_time).slice(0, 5)}–{String(s.end_time).slice(0, 5)}{" "}
+                    <span className="text-slate-500">({s.reserved_count}/{s.capacity} reserved)</span>
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={async () => {
+                      try {
+                        await api.post(`/queue/canteens/${activeCanteenId}/slots`, {
+                          slot_date: s.slot_date,
+                          start_time: s.start_time,
+                          end_time: s.end_time,
+                          capacity: s.capacity,
+                          is_active: false,
+                        });
+                        refetchSlots();
+                        pushToast("Pickup slot disabled", "info");
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Disable
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </Card>
     </div>
   );

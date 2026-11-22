@@ -124,6 +124,8 @@ export interface FoodItem {
   category_id: string;
   category_name?: string | null;
   kitchen_id?: string | null;
+  station_id?: string | null;
+  station_name?: string | null;
   counter_id?: string | null;
   name: string;
   slug: string;

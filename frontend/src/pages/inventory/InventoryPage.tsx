@@ -18,10 +18,12 @@ import {
   Upload,
 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
+import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
+import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 
 type SectionTab = "all" | "items" | "menu" | "stock" | "pricing" | "suppliers" | "recipes" | "audit";
 
@@ -54,11 +56,27 @@ export const InventoryPage: React.FC = () => {
   const [stockFilter, setStockFilter] = useState("all");
   const [showArchived, setShowArchived] = useState(false);
 
+  const { status: invSyncStatus, lastSyncedAt: invLastSyncedAt } = useRealtimeSync({
+    enabled: Boolean(activeId),
+    ssePath: activeId ? `/realtime/staff/orders/stream?canteen_id=${activeId}` : undefined,
+    wsPath: activeId ? `/ws/kitchen/${activeId}` : undefined,
+    queryKeys: [
+      ["inv-dashboard"],
+      ["inv-items"],
+      ["inv-alerts"],
+      ["inv-movements"],
+      ["inv-audit-logs"],
+      ["inv-wastage"],
+      ["inv-adjustments"],
+      ["inv-menu"],
+    ],
+  });
+
   const { data: dashboard, refetch: refetchDashboard, isError: dashError } = useQuery<any>({
     queryKey: ["inv-dashboard", activeId],
     enabled: Boolean(activeId),
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/dashboard`)).data,
-    refetchInterval: 15000,
+    refetchInterval: invSyncStatus === "live" ? 30000 : 10000,
   });
 
   const { data: items = [], refetch: refetchItems } = useQuery<any[]>({
@@ -121,6 +139,18 @@ export const InventoryPage: React.FC = () => {
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/audit-logs?limit=50`)).data,
   });
 
+  const { data: wastageRecords = [], refetch: refetchWastage } = useQuery<any[]>({
+    queryKey: ["inv-wastage", activeId],
+    enabled: Boolean(activeId),
+    queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/wastage?limit=40`)).data,
+  });
+
+  const { data: adjustmentRecords = [], refetch: refetchAdjustments } = useQuery<any[]>({
+    queryKey: ["inv-adjustments", activeId],
+    enabled: Boolean(activeId),
+    queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/adjustments?limit=40`)).data,
+  });
+
   const refreshAll = () => {
     refetchDashboard();
     refetchItems();
@@ -129,6 +159,8 @@ export const InventoryPage: React.FC = () => {
     refetchMovements();
     refetchPrices();
     refetchAudit();
+    refetchWastage();
+    refetchAdjustments();
     refetchMenu();
     refetchFoodCategories();
     qc.invalidateQueries({ queryKey: ["menu-items"] });
@@ -248,11 +280,33 @@ export const InventoryPage: React.FC = () => {
   const [poCost, setPoCost] = useState("0.20");
   const [poExpiry, setPoExpiry] = useState("");
 
-  // Recipe Builder State
+  // Recipe Builder State (multi-ingredient)
   const [recipeFoodId, setRecipeFoodId] = useState("");
-  const [recipeIngId, setRecipeIngId] = useState("");
-  const [recipeQty, setRecipeQty] = useState("50");
   const [recipeYield, setRecipeYield] = useState("1");
+  const [recipeRows, setRecipeRows] = useState<Array<{ ingredient_id: string; quantity_required: string }>>([
+    { ingredient_id: "", quantity_required: "50" },
+  ]);
+
+  const activeRecipeFoodId = recipeFoodId || menuItems[0]?.id || "";
+  useEffect(() => {
+    if (!activeRecipeFoodId) return;
+    let cancelled = false;
+    api
+      .get(`/inventory/recipes/${activeRecipeFoodId}`)
+      .then((res) => {
+        if (cancelled) return;
+        setRecipeYield(String(res.data?.yield_portions || 1));
+        const rows = (res.data?.ingredients || []).map((ri: any) => ({
+          ingredient_id: ri.ingredient_id,
+          quantity_required: String(ri.quantity_required),
+        }));
+        setRecipeRows(rows.length > 0 ? rows : [{ ingredient_id: "", quantity_required: "50" }]);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRecipeFoodId]);
 
   const categories = useMemo(() => {
     const s = new Set<string>(["Dry Goods", "Dairy", "Vegetables", "Spices", "Beverages", "Packaging", "General"]);
@@ -317,9 +371,12 @@ export const InventoryPage: React.FC = () => {
         <div className="flex items-center gap-3">
           <BrandLogo size="md" variant="dark" />
           <div>
-            <h1 className="text-xl font-extrabold">Inventory Manager Portal</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-extrabold">Inventory Manager Portal</h1>
+              <RealtimeStatusBadge status={invSyncStatus} lastSyncedAt={invLastSyncedAt} darkSurface />
+            </div>
             <p className="text-xs text-[#fdedce]/80">
-              Real-time stock control, damaged/expired loss tracking, supplier POs, approval-gated selling prices & audit logs
+              Real-time stock control, damaged/expired loss tracking, supplier POs, approval-gated selling prices &amp; audit logs
             </p>
           </div>
         </div>
@@ -1206,22 +1263,41 @@ export const InventoryPage: React.FC = () => {
                       <Badge tone="green">
                         <CheckCircle2 className="h-3 w-3" /> Received
                       </Badge>
+                    ) : po.status === "cancelled" ? (
+                      <Badge tone="red">Cancelled</Badge>
                     ) : (
-                      <Button
-                        size="sm"
-                        variant="success"
-                        onClick={async () => {
-                          try {
-                            await api.post(`/inventory/purchase-orders/${po.id}/receive`);
-                            pushToast(`Received ${po.po_number} — Stock & Batches Updated!`, "success");
-                            refreshAll();
-                          } catch (err) {
-                            pushToast(getApiError(err), "error");
-                          }
-                        }}
-                      >
-                        Receive Stock
-                      </Button>
+                      <div className="flex items-center gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="success"
+                          onClick={async () => {
+                            try {
+                              await api.post(`/inventory/purchase-orders/${po.id}/receive`);
+                              pushToast(`Received ${po.po_number} — Stock & Batches Updated!`, "success");
+                              refreshAll();
+                            } catch (err) {
+                              pushToast(getApiError(err), "error");
+                            }
+                          }}
+                        >
+                          Receive Stock
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            try {
+                              await api.post(`/inventory/purchase-orders/${po.id}/cancel?reason=Cancelled%20from%20Inventory%20Portal`);
+                              pushToast(`Cancelled ${po.po_number}`, "info");
+                              refetchPos();
+                            } catch (err) {
+                              pushToast(getApiError(err), "error");
+                            }
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
                     )}
                   </div>
                 ))
@@ -1244,47 +1320,110 @@ export const InventoryPage: React.FC = () => {
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </Select>
-            <div className="grid grid-cols-3 gap-2">
-              <Select value={recipeIngId || activeItems[0]?.ingredient_id || ""} onChange={(e) => setRecipeIngId(e.target.value)}>
-                {activeItems.map((it) => (
-                  <option key={it.ingredient_id} value={it.ingredient_id}>
-                    {it.name} ({it.unit})
-                  </option>
-                ))}
-              </Select>
-              <Input type="number" min="0.01" step="0.01" value={recipeQty} onChange={(e) => setRecipeQty(e.target.value)} placeholder="Qty req" />
-              <Input type="number" min={1} value={recipeYield} onChange={(e) => setRecipeYield(e.target.value)} placeholder="Yield" />
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-slate-600">Recipe Ingredients &amp; Yield Portions</div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-500">Yield:</span>
+                <Input
+                  type="number"
+                  min={1}
+                  value={recipeYield}
+                  onChange={(e) => setRecipeYield(e.target.value)}
+                  className="w-20"
+                  placeholder="Yield"
+                />
+              </div>
             </div>
-            <Button
-              size="sm"
-              disabled={menuItems.length === 0 || activeItems.length === 0}
-              onClick={async () => {
-                try {
-                  await api.put(`/inventory/recipes/${recipeFoodId || menuItems[0]?.id}`, {
-                    yield_portions: Number(recipeYield) || 1,
-                    ingredients: [
-                      {
-                        ingredient_id: recipeIngId || activeItems[0]?.ingredient_id,
-                        quantity_required: recipeQty,
-                      },
-                    ],
-                  });
-                  pushToast("Dish recipe updated", "success");
-                  refreshAll();
-                } catch (err) {
-                  pushToast(getApiError(err), "error");
+            <div className="space-y-2">
+              {recipeRows.map((row, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                  <div className="col-span-7">
+                    <Select
+                      value={row.ingredient_id || activeItems[0]?.ingredient_id || ""}
+                      onChange={(e) =>
+                        setRecipeRows((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, ingredient_id: e.target.value } : r))
+                        )
+                      }
+                    >
+                      {activeItems.map((it) => (
+                        <option key={it.ingredient_id} value={it.ingredient_id}>
+                          {it.name} ({it.unit})
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                  <div className="col-span-3">
+                    <Input
+                      type="number"
+                      min="0.001"
+                      step="0.01"
+                      value={row.quantity_required}
+                      onChange={(e) =>
+                        setRecipeRows((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, quantity_required: e.target.value } : r))
+                        )
+                      }
+                      placeholder="Qty"
+                    />
+                  </div>
+                  <div className="col-span-2 flex justify-end">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={recipeRows.length <= 1}
+                      onClick={() => setRecipeRows((prev) => prev.filter((_, i) => i !== idx))}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={activeItems.length === 0}
+                onClick={() =>
+                  setRecipeRows((prev) => [
+                    ...prev,
+                    { ingredient_id: activeItems[0]?.ingredient_id || "", quantity_required: "10" },
+                  ])
                 }
-              }}
-            >
-              Save Dish Recipe
-            </Button>
+              >
+                <Plus className="h-3.5 w-3.5" /> Add Ingredient
+              </Button>
+              <Button
+                size="sm"
+                disabled={menuItems.length === 0 || activeItems.length === 0}
+                onClick={async () => {
+                  try {
+                    const cleanRows = recipeRows.map((r) => ({
+                      ingredient_id: r.ingredient_id || activeItems[0]?.ingredient_id,
+                      quantity_required: r.quantity_required,
+                    }));
+                    await api.put(`/inventory/recipes/${activeRecipeFoodId}`, {
+                      yield_portions: Number(recipeYield) || 1,
+                      ingredients: cleanRows,
+                    });
+                    pushToast("Multi-ingredient recipe updated", "success");
+                    refreshAll();
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                Save Dish Recipe
+              </Button>
+            </div>
           </Card>
         )}
 
         {showBlock("audit") && (
           <Card className="p-5 space-y-3">
             <div className="flex items-center justify-between">
-              <h2 className="font-bold text-slate-900">Inventory Audit Trail ({auditLogs.length})</h2>
+              <h2 className="font-bold text-slate-900">Inventory Audit, Wastage &amp; Adjustments</h2>
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" onClick={() => downloadInventoryReport("csv")}>
                   <Download className="h-3.5 w-3.5" /> Export CSV
@@ -1294,26 +1433,57 @@ export const InventoryPage: React.FC = () => {
                 </Button>
               </div>
             </div>
-            <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
-              {auditLogs.length === 0 ? (
-                <div className="text-slate-500">No inventory edit or price audit records yet.</div>
-              ) : (
-                auditLogs.map((a) => (
-                  <div key={a.id} className="rounded-lg border border-slate-100 px-3 py-2">
-                    <div className="flex justify-between font-semibold text-slate-900">
-                      <span>
-                        {a.ingredient_name || "Menu/Canteen"} • <span className="uppercase">{a.action}</span>
-                      </span>
-                      <span className="text-[10px] text-slate-400">{a.created_at?.slice(0, 16)}</span>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
+                <div className="text-[11px] font-bold uppercase text-slate-500">Audit Log ({auditLogs.length})</div>
+                {auditLogs.length === 0 ? (
+                  <div className="text-slate-500">No inventory edit or price audit records yet.</div>
+                ) : (
+                  auditLogs.map((a) => (
+                    <div key={a.id} className="rounded-lg border border-slate-100 px-3 py-2">
+                      <div className="flex justify-between font-semibold text-slate-900">
+                        <span>
+                          {a.ingredient_name || "Menu/Canteen"} • <span className="uppercase">{a.action}</span>
+                        </span>
+                        <span className="text-[10px] text-slate-400">{a.created_at?.slice(0, 16)}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-600">
+                        {a.field_name}: {a.old_value ?? "—"} → <span className="font-bold">{a.new_value ?? "—"}</span>
+                        {a.reason ? ` (${a.reason})` : ""}
+                      </div>
+                      <div className="text-[10px] text-slate-400">By: {a.changed_by_name || "Staff"}</div>
                     </div>
-                    <div className="text-[11px] text-slate-600">
-                      {a.field_name}: {a.old_value ?? "—"} → <span className="font-bold">{a.new_value ?? "—"}</span>
-                      {a.reason ? ` (${a.reason})` : ""}
+                  ))
+                )}
+              </div>
+              <div className="space-y-2 max-h-60 overflow-y-auto text-xs">
+                <div className="text-[11px] font-bold uppercase text-slate-500">
+                  Wastage ({wastageRecords.length}) &amp; Adjustments ({adjustmentRecords.length})
+                </div>
+                {wastageRecords.map((w) => (
+                  <div key={w.id} className="rounded-lg border border-red-100 bg-red-50/40 px-3 py-1.5">
+                    <div className="flex justify-between font-semibold text-red-900">
+                      <span>{w.ingredient_name} • {w.loss_type.toUpperCase()}</span>
+                      <span>-₹{w.estimated_loss} ({w.quantity} {w.unit})</span>
                     </div>
-                    <div className="text-[10px] text-slate-400">By: {a.changed_by_name || "Staff"}</div>
+                    <div className="text-[11px] text-red-700">{w.reason}</div>
                   </div>
-                ))
-              )}
+                ))}
+                {adjustmentRecords.map((adj) => (
+                  <div key={adj.id} className="rounded-lg border border-slate-100 px-3 py-1.5">
+                    <div className="flex justify-between font-semibold text-slate-900">
+                      <span>{adj.ingredient_name}</span>
+                      <span className={Number(adj.quantity_delta) < 0 ? "text-amber-700" : "text-emerald-700"}>
+                        {Number(adj.quantity_delta) > 0 ? `+${adj.quantity_delta}` : adj.quantity_delta} {adj.unit}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-600">{adj.reason}</div>
+                  </div>
+                ))}
+                {wastageRecords.length === 0 && adjustmentRecords.length === 0 && (
+                  <div className="text-slate-500">No wastage or manual adjustments recorded yet.</div>
+                )}
+              </div>
             </div>
           </Card>
         )}

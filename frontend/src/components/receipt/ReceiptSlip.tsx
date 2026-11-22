@@ -11,6 +11,7 @@ interface ReceiptSlipProps {
   receipt: ReceiptSnapshot;
   guestToken?: string | null;
   allowStaffReprint?: boolean;
+  autoPrintOnMount?: boolean;
   onPrinted?: () => void;
 }
 
@@ -18,6 +19,7 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
   receipt,
   guestToken,
   allowStaffReprint = false,
+  autoPrintOnMount = false,
   onPrinted,
 }) => {
   const { pushToast } = useToast();
@@ -26,6 +28,17 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
   const [printerStatus, setPrinterStatus] = useState<string>("Browser Print Ready");
   const [lastFailedJobId, setLastFailedJobId] = useState<string | null>(null);
   const [printing, setPrinting] = useState(false);
+
+  const autoTriggeredRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (autoPrintOnMount && receipt.order_number && autoTriggeredRef.current !== receipt.order_number) {
+      autoTriggeredRef.current = receipt.order_number;
+      const t = setTimeout(() => {
+        window.print();
+      }, 220);
+      return () => clearTimeout(t);
+    }
+  }, [autoPrintOnMount, receipt.order_number]);
 
   const tokenQuery = guestToken ? `?guest_token=${encodeURIComponent(guestToken)}` : "";
 

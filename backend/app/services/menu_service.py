@@ -10,7 +10,7 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.time_utils import now_college
-from app.models.college import Canteen, CollegeSettings
+from app.models.college import Canteen, CollegeSettings, Kitchen, KitchenStation
 from app.models.order import CartItem, OrderItem
 from app.models.menu import (
     Allergen,
@@ -125,12 +125,16 @@ def serialize_food_item(
     else:
         sched_ok = compute_schedule_availability_map(db, [item.id]).get(item.id, True)
 
+    station = db.get(KitchenStation, item.station_id) if item.station_id else None
+
     return FoodItemOut(
         id=item.id,
         canteen_id=item.canteen_id,
         category_id=item.category_id,
         category_name=category.name if category else None,
         kitchen_id=item.kitchen_id,
+        station_id=item.station_id,
+        station_name=station.name if station else None,
         counter_id=item.counter_id,
         name=item.name,
         slug=item.slug,
@@ -302,12 +306,25 @@ def get_food_item(db: Session, item_id: UUID) -> FoodItemOut:
     return serialize_food_item(db, item)
 
 
+def _validate_station_for_canteen(db: Session, canteen_id: UUID, station_id: Optional[UUID]) -> None:
+    if not station_id:
+        return
+    station = db.scalar(
+        select(KitchenStation)
+        .join(Kitchen, Kitchen.id == KitchenStation.kitchen_id)
+        .where(KitchenStation.id == station_id, Kitchen.canteen_id == canteen_id)
+    )
+    if not station:
+        raise HTTPException(status_code=400, detail="Invalid kitchen station for this canteen")
+
+
 def create_food_item(db: Session, payload: FoodItemCreate, actor_user_id: UUID) -> FoodItemOut:
     if not db.get(Canteen, payload.canteen_id):
         raise HTTPException(status_code=404, detail="Canteen not found")
     cat = db.get(FoodCategory, payload.category_id)
     if not cat or cat.canteen_id != payload.canteen_id:
         raise HTTPException(status_code=400, detail="Invalid category for this canteen")
+    _validate_station_for_canteen(db, payload.canteen_id, payload.station_id)
     dup = db.scalar(select(FoodItem).where(FoodItem.canteen_id == payload.canteen_id, FoodItem.slug == payload.slug))
     if dup:
         raise HTTPException(status_code=409, detail="Food item slug already exists in this canteen")
@@ -360,6 +377,8 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
         cat = db.get(FoodCategory, payload.category_id)
         if not cat or cat.canteen_id != item.canteen_id:
             raise HTTPException(status_code=400, detail="Invalid category for this canteen")
+    if payload.station_id is not None:
+        _validate_station_for_canteen(db, item.canteen_id, payload.station_id)
     slug_val = getattr(payload, "slug", None)
     if slug_val is not None and slug_val != item.slug:
         dup = db.scalar(select(FoodItem).where(FoodItem.canteen_id == item.canteen_id, FoodItem.slug == slug_val))

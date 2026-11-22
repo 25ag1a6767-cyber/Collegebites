@@ -113,6 +113,7 @@ class FoodItemCreate(BaseModel):
     canteen_id: UUID
     category_id: UUID
     kitchen_id: Optional[UUID] = None
+    station_id: Optional[UUID] = None
     counter_id: Optional[UUID] = None
     name: str = Field(min_length=2, max_length=160)
     slug: str = Field(min_length=2, max_length=160, pattern="^[a-z0-9-]+$")
@@ -141,6 +142,7 @@ class FoodItemCreate(BaseModel):
 class FoodItemUpdate(BaseModel):
     category_id: Optional[UUID] = None
     kitchen_id: Optional[UUID] = None
+    station_id: Optional[UUID] = None
     counter_id: Optional[UUID] = None
     name: Optional[str] = Field(default=None, min_length=2, max_length=160)
     description: Optional[str] = None
@@ -171,8 +173,10 @@ class FoodItemOut(ORMModel):
     canteen_id: UUID
     category_id: UUID
     category_name: Optional[str] = None
-    kitchen_id: Optional[UUID]
-    counter_id: Optional[UUID]
+    kitchen_id: Optional[UUID] = None
+    station_id: Optional[UUID] = None
+    station_name: Optional[str] = None
+    counter_id: Optional[UUID] = None
     name: str
     slug: str
     description: Optional[str]

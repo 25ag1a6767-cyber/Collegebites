@@ -1,12 +1,14 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { CreditCard, Printer, QrCode, Search, ShoppingBag, Trash2 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
+import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, FoodItem, Order, ReceiptSnapshot } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
+import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 
 interface PosLine {
   food: FoodItem;
@@ -18,7 +20,7 @@ interface PosLine {
 
 export const CashierPOSPage: React.FC = () => {
   const { pushToast } = useToast();
-  const { user, selectedCanteenId } = useAppStore();
+  const { user, selectedCanteenId, printerWidth, autoPrintPos, setPrinterPrefs } = useAppStore();
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
@@ -28,11 +30,24 @@ export const CashierPOSPage: React.FC = () => {
   const [canteenId, setCanteenId] = useState<string>(user?.assigned_canteen_id || selectedCanteenId || "");
   const activeCanteenId = canteenId || canteens[0]?.id || "";
   const activeCanteen = canteens.find((c) => c.id === activeCanteenId);
+  const [counterId, setCounterId] = useState<string>("");
+  const activeCounterId = counterId || activeCanteen?.counters?.find((c) => c.is_active)?.id || "";
+
+  useEffect(() => {
+    setCounterId("");
+  }, [activeCanteenId]);
+
+  const { status: posSyncStatus, lastSyncedAt: posLastSyncedAt } = useRealtimeSync({
+    enabled: Boolean(activeCanteenId),
+    ssePath: activeCanteenId ? `/realtime/staff/orders/stream?canteen_id=${activeCanteenId}` : undefined,
+    wsPath: activeCanteenId ? `/ws/kitchen/${activeCanteenId}` : undefined,
+    queryKeys: [["pos-menu"], ["pos-pending-counter"], ["pos-active-orders"], ["pos-shift"]],
+  });
 
   const { data: items = [] } = useQuery<FoodItem[]>({
     queryKey: ["pos-menu", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    refetchInterval: 8000,
+    refetchInterval: posSyncStatus === "live" ? 30000 : 8000,
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items?available_only=true`)).data,
   });
 
@@ -47,14 +62,14 @@ export const CashierPOSPage: React.FC = () => {
     queryKey: ["pos-pending-counter", activeCanteenId],
     enabled: Boolean(activeCanteenId),
     queryFn: async () => (await api.get(`/pos/orders/pending-counter?canteen_id=${activeCanteenId}`)).data,
-    refetchInterval: 5000,
+    refetchInterval: posSyncStatus === "live" ? 30000 : 6000,
   });
 
   const { data: activeOrders = [], refetch: refetchActiveOrders } = useQuery<Order[]>({
     queryKey: ["pos-active-orders", activeCanteenId],
     enabled: Boolean(activeCanteenId),
     queryFn: async () => (await api.get(`/pos/orders/active?canteen_id=${activeCanteenId}`)).data,
-    refetchInterval: 4000,
+    refetchInterval: posSyncStatus === "live" ? 30000 : 5000,
   });
 
   const [searchMenu, setSearchMenu] = useState("");
@@ -68,6 +83,7 @@ export const CashierPOSPage: React.FC = () => {
   const [orderSearchQ, setOrderSearchQ] = useState("");
   const [foundOrders, setFoundOrders] = useState<Order[]>([]);
   const [activeReceipt, setActiveReceipt] = useState<ReceiptSnapshot | null>(null);
+  const [shouldAutoPrintReceipt, setShouldAutoPrintReceipt] = useState(false);
 
   // Shift forms
   const [openingCash, setOpeningCash] = useState("500.00");
@@ -100,6 +116,7 @@ export const CashierPOSPage: React.FC = () => {
     try {
       const res = await api.post<Order>("/pos/orders", {
         canteen_id: activeCanteenId,
+        counter_id: activeCounterId || null,
         customer_name: customerName || "Walk-in Customer",
         customer_phone: customerPhone || null,
         payment_method: payMethod,
@@ -112,6 +129,7 @@ export const CashierPOSPage: React.FC = () => {
       pushToast(`Token ${res.data.pickup_token_code} created!`, "success");
       setPosLines([]);
       const recRes = await api.get<ReceiptSnapshot>(`/tokens/receipts/${res.data.order_number}`);
+      setShouldAutoPrintReceipt(autoPrintPos);
       setActiveReceipt(recRes.data);
       refetchShift();
       refetchActiveOrders();
@@ -159,7 +177,10 @@ export const CashierPOSPage: React.FC = () => {
         <div className="flex items-center gap-3">
           <BrandLogo size="md" variant="dark" />
           <div>
-            <h1 className="text-xl font-extrabold">Cashier Point of Sale (POS)</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-extrabold">Cashier Point of Sale (POS)</h1>
+              <RealtimeStatusBadge status={posSyncStatus} lastSyncedAt={posLastSyncedAt} darkSurface />
+            </div>
             <p className="text-xs text-[#fdedce]/80">
               Digital UPI/Card walk-in billing, instant tokens &amp; thermal receipt reprinting (online-only policy)
             </p>
@@ -169,7 +190,7 @@ export const CashierPOSPage: React.FC = () => {
           <Select
             value={activeCanteenId}
             onChange={(e) => setCanteenId(e.target.value)}
-            className="w-52 bg-slate-800 border-slate-700 text-white"
+            className="w-48 bg-slate-800 border-slate-700 text-white"
           >
             {canteens.map((c) => (
               <option key={c.id} value={c.id}>
@@ -177,6 +198,29 @@ export const CashierPOSPage: React.FC = () => {
               </option>
             ))}
           </Select>
+          {activeCanteen?.counters && activeCanteen.counters.length > 0 && (
+            <Select
+              value={activeCounterId}
+              onChange={(e) => setCounterId(e.target.value)}
+              className="w-40 bg-slate-800 border-slate-700 text-white"
+            >
+              {activeCanteen.counters
+                .filter((c) => c.is_active)
+                .map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+            </Select>
+          )}
+          <label className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 border border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-white cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoPrintPos}
+              onChange={(e) => setPrinterPrefs(printerWidth, e.target.checked)}
+            />
+            Auto-Print
+          </label>
           {(["pos", "orders", "shift"] as const).map((t) => (
             <Button key={t} size="sm" variant={tab === t ? "primary" : "outline"} onClick={() => setTab(t)}>
               {t === "pos"
@@ -376,20 +420,37 @@ export const CashierPOSPage: React.FC = () => {
                         {o.guest_name || "Customer"} • ₹{o.total_amount} • {o.items.map((it) => `${it.quantity}× ${it.item_name}`).join(", ")}
                       </div>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={async () => {
-                        try {
-                          const rec = await api.get<ReceiptSnapshot>(`/tokens/receipts/${o.order_number}`);
-                          setActiveReceipt(rec.data);
-                        } catch (err) {
-                          pushToast(getApiError(err), "error");
-                        }
-                      }}
-                    >
-                      <Printer className="h-3.5 w-3.5" /> View / Reprint Slip
-                    </Button>
+                      <div className="flex gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            try {
+                              setShouldAutoPrintReceipt(false);
+                              const rec = await api.get<ReceiptSnapshot>(`/tokens/receipts/${o.order_number}`);
+                              setActiveReceipt(rec.data);
+                            } catch (err) {
+                              pushToast(getApiError(err), "error");
+                            }
+                          }}
+                        >
+                          <Printer className="h-3.5 w-3.5" /> View / Reprint Slip
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={async () => {
+                            try {
+                              const esc = await api.get(`/printing/kitchen-ticket/${o.order_number}/escpos?width=80mm`);
+                              pushToast(`KOT ready (${esc.data.item_count} items, ${esc.data.byte_length} bytes)`, "success");
+                            } catch (err) {
+                              pushToast(getApiError(err), "error");
+                            }
+                          }}
+                        >
+                          KOT
+                        </Button>
+                      </div>
                   </div>
                 ))}
               </div>
@@ -429,20 +490,37 @@ export const CashierPOSPage: React.FC = () => {
                     </Button>
                   )}
                   {o.payment_status === "CONFIRMED" && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={async () => {
-                        try {
-                          const rec = await api.get<ReceiptSnapshot>(`/tokens/receipts/${o.order_number}`);
-                          setActiveReceipt(rec.data);
-                        } catch (err) {
-                          pushToast(getApiError(err), "error");
-                        }
-                      }}
-                    >
-                      <Printer className="h-3.5 w-3.5" /> View / Reprint Slip
-                    </Button>
+                      <div className="flex gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            try {
+                              setShouldAutoPrintReceipt(false);
+                              const rec = await api.get<ReceiptSnapshot>(`/tokens/receipts/${o.order_number}`);
+                              setActiveReceipt(rec.data);
+                            } catch (err) {
+                              pushToast(getApiError(err), "error");
+                            }
+                          }}
+                        >
+                          <Printer className="h-3.5 w-3.5" /> View / Reprint Slip
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={async () => {
+                            try {
+                              const esc = await api.get(`/printing/kitchen-ticket/${o.order_number}/escpos?width=80mm`);
+                              pushToast(`KOT ready (${esc.data.item_count} items, ${esc.data.byte_length} bytes)`, "success");
+                            } catch (err) {
+                              pushToast(getApiError(err), "error");
+                            }
+                          }}
+                        >
+                          KOT
+                        </Button>
+                      </div>
                   )}
                 </div>
               </div>
@@ -464,6 +542,7 @@ export const CashierPOSPage: React.FC = () => {
                   try {
                     await api.post("/pos/shifts/open", {
                       canteen_id: activeCanteenId,
+                      counter_id: activeCounterId || null,
                       opening_cash_amount: openingCash,
                     });
                     pushToast("POS shift opened", "success");
@@ -522,7 +601,10 @@ export const CashierPOSPage: React.FC = () => {
 
       <Modal
         open={Boolean(activeReceipt)}
-        onClose={() => setActiveReceipt(null)}
+        onClose={() => {
+          setActiveReceipt(null);
+          setShouldAutoPrintReceipt(false);
+        }}
         title={`Order Receipt • Token ${activeReceipt?.pickup_token}`}
         maxWidth="max-w-2xl"
       >
@@ -530,6 +612,7 @@ export const CashierPOSPage: React.FC = () => {
           <ReceiptSlip
             receipt={activeReceipt}
             allowStaffReprint
+            autoPrintOnMount={shouldAutoPrintReceipt}
             onPrinted={async () => {
               try {
                 const refreshed = await api.get<ReceiptSnapshot>(`/tokens/receipts/${activeReceipt.order_number}`);

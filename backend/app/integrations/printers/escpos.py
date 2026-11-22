@@ -145,3 +145,50 @@ def send_escpos_network_tcp(host: str, port: int, data: bytes, timeout_seconds: 
     """Send ESC/POS bytes to a TCP/IP thermal printer on port 9100."""
     with socket.create_connection((host, port), timeout=timeout_seconds) as sock:
         sock.sendall(data)
+
+
+def build_escpos_kot_bytes(kot: dict[str, Any], paper_width: str = "80mm") -> bytes:
+    """Generate compact ESC/POS Kitchen Order Ticket (KOT) bytes for prep stations."""
+    cols = 32 if paper_width == "58mm" else 48
+    sep = ("=" * cols + "\n").encode("ascii")
+
+    buf = bytearray()
+    buf += ESC + b"@"
+    buf += ESC + b"a\x01"
+    buf += ESC + b"E\x01"
+    buf += _line("KITCHEN ORDER TICKET (KOT)", cols)
+    if kot.get("is_priority"):
+        buf += _line("*** RUSH / PRIORITY ORDER ***", cols)
+    buf += GS + b"!\x11"
+    buf += _line(f"TOKEN: {kot['pickup_token']}", cols)
+    buf += GS + b"!\x00"
+    buf += ESC + b"E\x00"
+    buf += sep
+
+    buf += ESC + b"a\x00"
+    buf += _line(f"ORDER: {kot['order_number']}", cols)
+    buf += _line(f"CANTEEN: {kot.get('canteen_name', '')}", cols)
+    if kot.get("counter_name"):
+        buf += _line(f"COUNTER: {kot['counter_name']}  TYPE: {kot.get('order_type', 'pickup').upper()}", cols)
+    if kot.get("station_filter_name"):
+        buf += _line(f"STATION: {kot['station_filter_name']}", cols)
+    buf += _line(f"TIME: {kot.get('order_time', '')}", cols)
+    buf += sep
+
+    buf += ESC + b"E\x01"
+    buf += _line("PREP ITEMS", cols)
+    buf += ESC + b"E\x00"
+    for item in kot.get("items", []):
+        st_lbl = f" [{item['station_name']}]" if item.get("station_name") else ""
+        var_lbl = f" ({item['variant_name']})" if item.get("variant_name") else ""
+        buf += _line(f"{item['quantity']}x {item['item_name']}{var_lbl}{st_lbl}", cols)
+        for cust in item.get("customizations", []):
+            buf += _line(f"   - {cust['option_name']}: {cust['option_value']}", cols)
+        if item.get("special_instructions"):
+            buf += _line(f"   NOTE: {item['special_instructions']}", cols)
+    if kot.get("notes"):
+        buf += sep
+        buf += _line(f"ORDER NOTE: {kot['notes']}", cols)
+    buf += b"\n\n\n"
+    buf += GS + b"V\x00"
+    return bytes(buf)

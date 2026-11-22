@@ -143,6 +143,11 @@ def release_expired_slot_reservations(db: Session) -> int:
             pay.status = "FAILED"
             pay.failure_reason = "Checkout window expired"
         rollback_unpaid_incentives(db, order)
+        try:
+            from app.services.inventory_service import release_inventory_reservation_for_order
+            release_inventory_reservation_for_order(db, order)
+        except ImportError:
+            pass
         released += 1
     if released:
         db.commit()
@@ -449,6 +454,8 @@ def checkout_order(
         )
         if not pickup_slot or pickup_slot.canteen_id != canteen.id or not pickup_slot.is_active:
             raise HTTPException(status_code=400, detail="Invalid or inactive pickup slot")
+        if pickup_slot.slot_date < today_college():
+            raise HTTPException(status_code=400, detail="Selected pickup slot date is in the past")
         if pickup_slot.reserved_count >= pickup_slot.capacity:
             raise HTTPException(status_code=409, detail="Selected pickup slot is full")
         rkey = f"cb:slot:{pickup_slot.id}:reserved"
@@ -536,18 +543,11 @@ def checkout_order(
             prepared_items.append((food, variant, spec.quantity, unit_price, addon_per_unit, line_sub, spec.special_instructions, cust_dicts))
 
         if needed_ingredients:
-            inv_rows = {
-                inv.ingredient_id: inv.current_quantity
-                for inv in db.scalars(
-                    select(InventoryItem).where(
-                        InventoryItem.canteen_id == canteen.id,
-                        InventoryItem.ingredient_id.in_(list(needed_ingredients.keys())),
-                    )
-                ).all()
-            }
-            for ing_id, req_qty in needed_ingredients.items():
-                if ing_id in inv_rows and inv_rows[ing_id] < req_qty:
-                    raise HTTPException(status_code=400, detail="Insufficient ingredient stock for requested quantity")
+            try:
+                from app.services.inventory_service import reserve_inventory_for_order
+                reserve_inventory_for_order(db, canteen.id, needed_ingredients)
+            except ImportError:
+                pass
 
         discount = Decimal("0.00")
 
@@ -576,7 +576,8 @@ def checkout_order(
             redis_slot_key = f"cb:slot:{pickup_slot.id}:reserved"
             redis_incremented = True
 
-        est_prep = max(eta, max_item_prep)
+        complexity_bonus = min(12, max(0, len(line_specs) - 1) * 2)
+        est_prep = max(eta, max_item_prep + complexity_bonus)
         raw_guest_token = None
         guest_token_hash = None
         if is_guest:
@@ -727,6 +728,7 @@ def checkout_order(
         )
         db.commit()
     except Exception:
+        db.rollback()
         if redis_incremented and redis_slot_key:
             safe_redis(lambda r: r.decr(redis_slot_key))
         raise
@@ -819,8 +821,15 @@ def cancel_or_reject_order(
             if not guest_access_token or order.guest_access_token_hash != sha256_hex(guest_access_token):
                 raise HTTPException(status_code=403, detail="Valid guest access token required")
 
+    was_unpaid_pending = order.status in ("CREATED", "PAYMENT_PENDING") and order.payment_status != "CONFIRMED"
     target_status = "REJECTED" if cancellation_type == "rejected" else "CANCELLED"
     transition_order_status(db, order, target_status, actor_user_id=actor_user_id, reason=reason)
+    if was_unpaid_pending:
+        try:
+            from app.services.inventory_service import release_inventory_reservation_for_order
+            release_inventory_reservation_for_order(db, order)
+        except ImportError:
+            pass
 
     now = datetime.now(timezone.utc)
     # Revoke active token/QR if already generated so cancelled order cannot be collected

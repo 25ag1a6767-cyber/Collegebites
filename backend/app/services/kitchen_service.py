@@ -4,13 +4,15 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.models.auth import User
+from app.models.college import Kitchen, KitchenStation
 from app.models.engagement import Notification
 from app.models.inventory import InventoryItem, StockBatch, StockMovement
 from app.models.menu import FoodItem, Ingredient
-from app.models.order import Order, OrderItem, OrderStatusHistory
+from app.models.order import Order, OrderAssignment, OrderItem, OrderStatusHistory
 from app.schemas.operations import DelayReportRequest, ItemUnavailableRequest
 from app.schemas.order import OrderOut
 from app.services.audit_service import record_audit_log
@@ -461,4 +463,133 @@ def restore_ingredient_availability(db: Session, inventory_item_id: UUID, staff_
         "current_quantity": str(inv.current_quantity),
         "is_available": inv.is_available,
         "blocked_food_items": blocked,
+    }
+
+
+def list_canteen_stations_with_workload(db: Session, canteen_id: UUID) -> list[dict]:
+    rows = db.execute(
+        select(KitchenStation, Kitchen.name)
+        .join(Kitchen, Kitchen.id == KitchenStation.kitchen_id)
+        .where(Kitchen.canteen_id == canteen_id, KitchenStation.is_active.is_(True))
+        .order_by(Kitchen.name, KitchenStation.name)
+    ).all()
+    if not rows:
+        return []
+    station_ids = [st.id for st, _ in rows]
+    workload_rows = db.execute(
+        select(OrderItem.station_id, func.count(OrderItem.id), func.coalesce(func.sum(OrderItem.quantity), 0))
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(
+            OrderItem.station_id.in_(station_ids),
+            Order.canteen_id == canteen_id,
+            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING")),
+            OrderItem.prep_status != "READY",
+        )
+        .group_by(OrderItem.station_id)
+    ).all()
+    wl_map = {sid: (int(line_cnt), int(qty_sum)) for sid, line_cnt, qty_sum in workload_rows}
+    return [
+        {
+            "id": str(st.id),
+            "kitchen_id": str(st.kitchen_id),
+            "kitchen_name": k_name,
+            "name": st.name,
+            "station_type": st.station_type,
+            "is_active": st.is_active,
+            "pending_lines": wl_map.get(st.id, (0, 0))[0],
+            "pending_units": wl_map.get(st.id, (0, 0))[1],
+        }
+        for st, k_name in rows
+    ]
+
+
+def assign_order_to_station_or_staff(
+    db: Session,
+    order_id: UUID,
+    *,
+    kitchen_id: Optional[UUID] = None,
+    station_id: Optional[UUID] = None,
+    staff_user_id: Optional[UUID] = None,
+    role_scope: str = "kitchen",
+    actor_user_id: UUID,
+) -> dict:
+    order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if kitchen_id:
+        kit = db.get(Kitchen, kitchen_id)
+        if not kit or kit.canteen_id != order.canteen_id:
+            raise HTTPException(status_code=400, detail="Invalid kitchen for order canteen")
+        order.kitchen_id = kitchen_id
+    if station_id:
+        st = db.scalar(
+            select(KitchenStation)
+            .join(Kitchen, Kitchen.id == KitchenStation.kitchen_id)
+            .where(KitchenStation.id == station_id, Kitchen.canteen_id == order.canteen_id)
+        )
+        if not st:
+            raise HTTPException(status_code=400, detail="Invalid kitchen station for order canteen")
+        if not kitchen_id:
+            order.kitchen_id = st.kitchen_id
+    if staff_user_id:
+        usr = db.get(User, staff_user_id)
+        if not usr or not usr.is_active:
+            raise HTTPException(status_code=404, detail="Assigned staff user not found")
+
+    assignment = db.scalar(
+        select(OrderAssignment).where(
+            OrderAssignment.order_id == order.id,
+            OrderAssignment.role_scope == role_scope,
+        )
+    )
+    if assignment:
+        if kitchen_id is not None or station_id is not None:
+            assignment.kitchen_id = kitchen_id or order.kitchen_id
+        if station_id is not None:
+            assignment.station_id = station_id
+        if staff_user_id is not None:
+            assignment.staff_user_id = staff_user_id
+    else:
+        assignment = OrderAssignment(
+            order_id=order.id,
+            kitchen_id=kitchen_id or order.kitchen_id,
+            station_id=station_id,
+            staff_user_id=staff_user_id,
+            role_scope=role_scope,
+        )
+        db.add(assignment)
+
+    record_audit_log(
+        db,
+        action="kitchen.order_assigned",
+        entity_type="order",
+        entity_id=order.order_number,
+        actor_user_id=actor_user_id,
+        details={
+            "kitchen_id": str(assignment.kitchen_id) if assignment.kitchen_id else None,
+            "station_id": str(assignment.station_id) if assignment.station_id else None,
+            "staff_user_id": str(assignment.staff_user_id) if assignment.staff_user_id else None,
+            "role_scope": role_scope,
+        },
+    )
+    db.commit()
+    db.refresh(assignment)
+    emit_order_event_sync(
+        str(order.canteen_id),
+        str(order.id),
+        "order.assigned",
+        {
+            "order_number": order.order_number,
+            "station_id": str(assignment.station_id) if assignment.station_id else None,
+            "kitchen_id": str(assignment.kitchen_id) if assignment.kitchen_id else None,
+        },
+    )
+    return {
+        "id": str(assignment.id),
+        "order_id": str(assignment.order_id),
+        "kitchen_id": str(assignment.kitchen_id) if assignment.kitchen_id else None,
+        "station_id": str(assignment.station_id) if assignment.station_id else None,
+        "staff_user_id": str(assignment.staff_user_id) if assignment.staff_user_id else None,
+        "role_scope": assignment.role_scope,
     }

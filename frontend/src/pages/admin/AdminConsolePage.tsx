@@ -39,6 +39,9 @@ export const AdminConsolePage: React.FC = () => {
   const [scopeReportToCanteen, setScopeReportToCanteen] = useState(!isCollegeAdmin);
   const [reportStartDate, setReportStartDate] = useState("");
   const [reportEndDate, setReportEndDate] = useState("");
+  const [chartPeriod, setChartPeriod] = useState<"daily" | "weekly" | "monthly">("daily");
+  const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
+  const [ticketThreadMap, setTicketThreadMap] = useState<Record<string, any[]>>({});
 
   const reportParams = new URLSearchParams();
   if (scopeReportToCanteen && activeCanteenId) reportParams.set("canteen_id", activeCanteenId);
@@ -238,12 +241,48 @@ export const AdminConsolePage: React.FC = () => {
             </div>
           </div>
 
+          {report.today_summary && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <Card className="p-4 border-[#76010d]/20 bg-[#76010d]/[0.03]">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Orders Today</div>
+                <div className="text-2xl font-black text-slate-900">{report.today_summary.total_orders_today}</div>
+                <div className="text-xs text-slate-500 mt-0.5">{report.today_summary.date}</div>
+              </Card>
+              <Card className="p-4 border-emerald-200 bg-emerald-50/40">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-emerald-700">Completed Today</div>
+                <div className="text-2xl font-black text-emerald-900">{report.today_summary.completed_orders_today}</div>
+                <div className="text-xs text-emerald-700 mt-0.5">
+                  Completion rate: {report.operations.completion_rate_percent ?? 0}%
+                </div>
+              </Card>
+              <Card className="p-4 border-amber-200 bg-amber-50/50">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-amber-800">Active Pending Queue</div>
+                <div className="text-2xl font-black text-amber-900">{report.today_summary.active_pending_orders}</div>
+                <div className="text-xs text-amber-700 mt-0.5">
+                  Today incl. unpaid: {report.today_summary.pending_orders_today}
+                </div>
+              </Card>
+              <Card className="p-4">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Sales Today</div>
+                <div className="text-2xl font-black text-[#76010d]">₹{report.today_summary.revenue_today}</div>
+                <div className="text-xs text-slate-500 mt-0.5">Confirmed revenue</div>
+              </Card>
+              <Card className="p-4">
+                <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Payment Success</div>
+                <div className="text-2xl font-black text-slate-900">{report.payment_stats?.success_rate_percent ?? 0}%</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  {report.payment_stats?.confirmed_count ?? 0} ok / {report.payment_stats?.failed_count ?? 0} failed
+                </div>
+              </Card>
+            </div>
+          )}
+
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Card className="p-4">
-              <div className="text-xs text-slate-500">Confirmed Orders</div>
+              <div className="text-xs text-slate-500">Confirmed Orders (Range)</div>
               <div className="text-2xl font-black text-slate-900">{report.sales.total_orders}</div>
               <div className="text-xs text-emerald-700 mt-1">
-                Completed: {report.operations.completed_orders} • Cancelled: {report.operations.cancelled_orders}
+                Completed: {report.operations.completed_orders} • Pending: {report.operations.pending_orders ?? 0} • Cancelled: {report.operations.cancelled_orders}
               </div>
             </Card>
             <Card className="p-4">
@@ -271,12 +310,36 @@ export const AdminConsolePage: React.FC = () => {
 
           <div className="grid gap-5 lg:grid-cols-2">
             <Card className="p-5">
-              <h3 className="font-bold text-slate-900 mb-3 text-sm">Daily Revenue Trend (₹)</h3>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <h3 className="font-bold text-slate-900 text-sm">
+                  {chartPeriod === "daily" ? "Daily" : chartPeriod === "weekly" ? "Weekly" : "Monthly"} Revenue Trend (₹)
+                </h3>
+                <div className="flex gap-1">
+                  {(["daily", "weekly", "monthly"] as const).map((period) => (
+                    <Button
+                      key={period}
+                      size="sm"
+                      variant={chartPeriod === period ? "secondary" : "outline"}
+                      onClick={() => setChartPeriod(period)}
+                    >
+                      {period === "daily" ? "Daily" : period === "weekly" ? "Weekly" : "Monthly"}
+                    </Button>
+                  ))}
+                </div>
+              </div>
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={report.sales.daily_series}>
+                  <BarChart
+                    data={
+                      chartPeriod === "weekly"
+                        ? report.sales.weekly_series || []
+                        : chartPeriod === "monthly"
+                        ? report.sales.monthly_series || []
+                        : report.sales.daily_series || []
+                    }
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                    <XAxis dataKey={chartPeriod === "weekly" ? "week" : chartPeriod === "monthly" ? "month" : "date"} tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip />
                     <Bar dataKey="revenue" fill="#76010d" radius={[6, 6, 0, 0]} />
@@ -362,7 +425,9 @@ export const AdminConsolePage: React.FC = () => {
                   (report.operations.peak_hours || []).slice(0, 6).map((h: any) => (
                     <div key={h.hour} className="flex justify-between">
                       <span className="font-mono text-slate-700">{h.hour}</span>
-                      <span className="font-bold">{h.orders} orders</span>
+                      <span className="font-bold">
+                        {h.orders} orders{h.revenue !== undefined ? ` • ₹${Number(h.revenue).toFixed(0)}` : ""}
+                      </span>
                     </div>
                   ))
                 )}
@@ -370,31 +435,60 @@ export const AdminConsolePage: React.FC = () => {
             </Card>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Card className="p-4 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div>
-                <div className="font-bold text-slate-900">Inventory &amp; Wastage Summary</div>
-                <div className="text-slate-500 mt-0.5">
-                  Tracked: {report.inventory?.tracked_ingredients ?? 0} • Low stock: {report.inventory?.low_stock_count ?? 0} • Expiring (7d): {report.inventory?.expiring_within_7_days ?? 0}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card className="p-4 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <div className="font-bold text-slate-900">Inventory Shortage Alerts &amp; Wastage</div>
+                <div className="text-sm font-black text-red-600">₹{report.inventory?.total_wastage_loss ?? "0.00"} loss</div>
+              </div>
+              <div className="text-slate-500">
+                Tracked (Active): {report.inventory?.tracked_ingredients ?? 0} • Low stock: {report.inventory?.low_stock_count ?? 0} • Expiring (7d): {report.inventory?.expiring_within_7_days ?? 0}
+              </div>
+              {(report.inventory?.low_stock_items || []).length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {(report.inventory.low_stock_items || []).slice(0, 8).map((item: any) => (
+                    <Badge key={item.inventory_item_id} tone="red">
+                      {item.ingredient_name}: {item.current_quantity}/{item.reorder_level} {item.unit}
+                    </Badge>
+                  ))}
                 </div>
-              </div>
-              <div className="text-right">
-                <div className="text-slate-500">Wastage Loss</div>
-                <div className="text-sm font-black text-red-600">₹{report.inventory?.total_wastage_loss ?? "0.00"}</div>
-              </div>
+              )}
             </Card>
 
-            <Card className="p-4 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div>
+            <Card className="p-4 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
                 <div className="font-bold text-slate-900">Staff &amp; Operations Activity</div>
-                <div className="text-slate-500 mt-0.5">
-                  Check-ins: {report.staff_performance?.present_checkins ?? 0} • Leaves: {report.staff_performance?.leave_records ?? 0} • Tasks done: {report.staff_performance?.tasks_completed ?? 0}/{report.staff_performance?.tasks_total ?? 0}
+                <div className="text-sm font-black text-slate-900">{report.staff_performance?.cashier_walkin_orders ?? 0} Walk-in POS</div>
+              </div>
+              <div className="text-slate-500">
+                Check-ins: {report.staff_performance?.present_checkins ?? 0} • Leaves: {report.staff_performance?.leave_records ?? 0} • Tasks done: {report.staff_performance?.tasks_completed ?? 0}/{report.staff_performance?.tasks_total ?? 0}
+              </div>
+              {(report.staff_performance?.staff_breakdown || []).length > 0 && (
+                <div className="overflow-x-auto pt-1">
+                  <table className="w-full text-left text-[11px]">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500">
+                        <th className="py-1 pr-2">Staff</th>
+                        <th className="py-1 pr-2">Check-ins</th>
+                        <th className="py-1 pr-2">Tasks</th>
+                        <th className="py-1 pr-2">POS</th>
+                        <th className="py-1">Updates</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(report.staff_performance.staff_breakdown || []).slice(0, 10).map((sb: any) => (
+                        <tr key={sb.user_id}>
+                          <td className="py-1 pr-2 font-semibold text-slate-800">{sb.full_name}</td>
+                          <td className="py-1 pr-2">{sb.checkins}</td>
+                          <td className="py-1 pr-2">{sb.tasks_completed}/{sb.tasks_total}</td>
+                          <td className="py-1 pr-2">{sb.cashier_orders}</td>
+                          <td className="py-1 font-semibold">{sb.status_updates}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              </div>
-              <div className="text-right">
-                <div className="text-slate-500">Walk-in POS</div>
-                <div className="text-sm font-black text-slate-900">{report.staff_performance?.cashier_walkin_orders ?? 0} orders</div>
-              </div>
+              )}
             </Card>
           </div>
         </div>
@@ -485,7 +579,26 @@ export const AdminConsolePage: React.FC = () => {
                   )}
                 </div>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={async () => {
+                    if (expandedTicketId === t.id) {
+                      setExpandedTicketId(null);
+                      return;
+                    }
+                    try {
+                      const msgs = (await api.get(`/support/tickets/${t.id}/messages`)).data;
+                      setTicketThreadMap((p) => ({ ...p, [t.id]: msgs }));
+                      setExpandedTicketId(t.id);
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    }
+                  }}
+                >
+                  {expandedTicketId === t.id ? "Hide Thread" : "View Thread"}
+                </Button>
                 <Input
                   value={replyByTicket[t.id] || ""}
                   onChange={(e) => setReplyByTicket((p) => ({ ...p, [t.id]: e.target.value }))}
@@ -500,6 +613,9 @@ export const AdminConsolePage: React.FC = () => {
                     try {
                       await api.post(`/support/tickets/${t.id}/messages`, { message: msg });
                       setReplyByTicket((p) => ({ ...p, [t.id]: "" }));
+                      const msgs = (await api.get(`/support/tickets/${t.id}/messages`)).data;
+                      setTicketThreadMap((p) => ({ ...p, [t.id]: msgs }));
+                      setExpandedTicketId(t.id);
                       pushToast("Reply sent", "success");
                       refetchTickets();
                     } catch (err) {
@@ -510,6 +626,21 @@ export const AdminConsolePage: React.FC = () => {
                   Send Reply
                 </Button>
               </div>
+              {expandedTicketId === t.id && (
+                <div className="rounded-lg bg-slate-50 border border-slate-200 p-3 space-y-1.5">
+                  {(ticketThreadMap[t.id] || []).length === 0 ? (
+                    <div className="text-slate-400">No messages in thread yet.</div>
+                  ) : (
+                    (ticketThreadMap[t.id] || []).map((m: any) => (
+                      <div key={m.id} className="text-xs">
+                        <span className="font-bold uppercase text-slate-700">{m.sender_role}:</span>{" "}
+                        <span className="text-slate-700">{m.message}</span>{" "}
+                        <span className="text-[10px] text-slate-400">{m.created_at?.slice(11, 16)}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </Card>

@@ -329,11 +329,17 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
 def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: str) -> Order:
     if payment.status == "CONFIRMED":
         raise HTTPException(status_code=409, detail="Cannot mark an already confirmed payment as failed")
+    was_pending = order.status in ("CREATED", "PAYMENT_PENDING")
     payment.status = "FAILED"
     payment.failure_reason = reason
     order.payment_status = "FAILED"
-    if order.status in ("CREATED", "PAYMENT_PENDING"):
+    if was_pending:
         transition_order_status(db, order, "PAYMENT_FAILED", reason=reason)
+        try:
+            from app.services.inventory_service import release_inventory_reservation_for_order
+            release_inventory_reservation_for_order(db, order)
+        except ImportError:
+            pass
     rollback_unpaid_incentives(db, order)
 
     # Release reserved slot

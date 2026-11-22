@@ -343,6 +343,42 @@ def receive_po(
     return inventory_service.receive_purchase_order(db, po_id, principal.user.id, received_items=rec_items)
 
 
+@router.post("/purchase-orders/{po_id}/cancel")
+def cancel_po(
+    po_id: UUID,
+    reason: Optional[str] = Query(default=None, max_length=255),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    enforce_canteen_scope(principal, po.canteen_id)
+    return inventory_service.cancel_purchase_order(db, po_id, principal.user.id, reason=reason)
+
+
+@router.get("/canteens/{canteen_id}/wastage")
+def list_wastage(
+    canteen_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return inventory_service.list_wastage_records(db, canteen_id, limit=limit)
+
+
+@router.get("/canteens/{canteen_id}/adjustments")
+def list_adjustments(
+    canteen_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return inventory_service.list_stock_adjustments(db, canteen_id, limit=limit)
+
+
 @router.post("/adjustments")
 def adjust_stock(
     payload: StockAdjustIn,

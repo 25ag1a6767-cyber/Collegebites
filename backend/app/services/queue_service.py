@@ -7,10 +7,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.redis_client import safe_redis
+from app.core.time_utils import today_college
 from app.models.auth import StaffProfile
 from app.models.college import Canteen, Counter, Kitchen
 from app.models.menu import FoodItem
 from app.models.order import Order, PickupSlot
+from app.models.staff import StaffAttendance
 from app.services.audit_service import record_audit_log
 from app.services.college_service import ACTIVE_CROWD_STATUSES, compute_canteen_live_status
 
@@ -80,11 +82,25 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
             "utilization_percent": round(min(100.0, (int(cnt_active) / max(1, cnt.max_queue_capacity)) * 100.0), 1),
         })
 
-    on_duty_staff = db.scalar(
-        select(func.count(StaffProfile.id)).where(
-            StaffProfile.assigned_canteen_id == canteen_id, StaffProfile.is_on_duty.is_(True)
-        )
-    ) or 1
+    local_today = today_college()
+    on_duty_ids = set(
+        db.scalars(
+            select(StaffProfile.user_id).where(
+                StaffProfile.assigned_canteen_id == canteen_id, StaffProfile.is_on_duty.is_(True)
+            )
+        ).all()
+    )
+    checked_in_ids = set(
+        db.scalars(
+            select(StaffAttendance.staff_user_id).where(
+                StaffAttendance.canteen_id == canteen_id,
+                StaffAttendance.attendance_date == local_today,
+                StaffAttendance.status == "present",
+                StaffAttendance.check_out_at.is_(None),
+            )
+        ).all()
+    )
+    on_duty_staff = len(on_duty_ids | checked_in_ids)
 
     # Store live metrics snapshot in Redis for fast reads (non-blocking if Redis unavailable)
     safe_redis(
@@ -125,22 +141,33 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
 
 def estimate_prep_time(db: Session, canteen_id: UUID, item_ids: list[UUID]) -> dict:
     dash = get_live_queue_dashboard(db, canteen_id)
-    max_item_prep = 5
+    canteen = db.get(Canteen, canteen_id)
+    max_item_prep = canteen.default_prep_time_minutes if canteen else 5
     complexity_bonus = 0
     if item_ids:
         items = db.scalars(select(FoodItem).where(FoodItem.id.in_(item_ids))).all()
         if items:
             max_item_prep = max(i.prep_time_minutes for i in items)
-            complexity_bonus = max(0, len(items) - 1) * 2
+            complexity_bonus = min(15, max(0, len(items) - 1) * 2)
     staff_factor = max(1, dash["on_duty_staff_count"])
     queue_penalty = int(dash["active_order_count"] / staff_factor) * 2
-    estimated = max(dash["estimated_wait_minutes"], max_item_prep + complexity_bonus + queue_penalty)
+    peak_buffer = (
+        canteen.peak_hour_buffer_minutes
+        if (canteen and dash["crowd_level"] in ("HIGH", "VERY_HIGH"))
+        else 0
+    )
+    hist_blend = round(dash["average_prep_time_minutes"]) if dash["active_order_count"] > 0 else max_item_prep
+    estimated = max(
+        dash["estimated_wait_minutes"],
+        max(max_item_prep, hist_blend) + complexity_bonus + queue_penalty + peak_buffer,
+    )
     return {
         "canteen_id": str(canteen_id),
         "crowd_level": dash["crowd_level"],
         "estimated_minutes": int(estimated),
         "active_order_count": dash["active_order_count"],
         "on_duty_staff_count": dash["on_duty_staff_count"],
+        "peak_buffer_minutes": int(peak_buffer),
     }
 
 
@@ -185,6 +212,10 @@ def upsert_pickup_slot(
     capacity: int,
     is_active: bool = True,
 ) -> PickupSlot:
+    if end_time <= start_time:
+        raise HTTPException(status_code=400, detail="Pickup slot end_time must be after start_time")
+    if is_active and slot_date < today_college():
+        raise HTTPException(status_code=400, detail="Cannot create or activate a pickup slot in the past")
     slot = db.scalar(
         select(PickupSlot).where(
             PickupSlot.canteen_id == canteen_id,

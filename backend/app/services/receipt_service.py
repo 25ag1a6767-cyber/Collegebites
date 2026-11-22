@@ -19,9 +19,13 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.security import mask_mobile, sha256_hex
 from app.core.time_utils import get_college_tz
-from app.integrations.printers.escpos import build_escpos_receipt_bytes, send_escpos_network_tcp
+from app.integrations.printers.escpos import (
+    build_escpos_kot_bytes,
+    build_escpos_receipt_bytes,
+    send_escpos_network_tcp,
+)
 from app.models.auth import User
-from app.models.college import Canteen, Counter
+from app.models.college import Canteen, Counter, KitchenStation
 from app.models.order import Order, OrderItem
 from app.models.payment import (
     OrderQRCode,
@@ -378,10 +382,16 @@ def get_escpos_payload(
     paper_width: str = "80mm",
     user_id: Optional[UUID] = None,
     is_staff: bool = False,
+    staff_canteen_id: Optional[UUID] = None,
     guest_access_token: Optional[str] = None,
 ) -> dict[str, Any]:
     order, receipt = _resolve_order_and_receipt(
-        db, order_id_or_number, user_id=user_id, is_staff=is_staff, guest_access_token=guest_access_token
+        db,
+        order_id_or_number,
+        user_id=user_id,
+        is_staff=is_staff,
+        staff_canteen_id=staff_canteen_id,
+        guest_access_token=guest_access_token,
     )
     raw_bytes = build_escpos_receipt_bytes(
         receipt.receipt_snapshot,
@@ -393,6 +403,77 @@ def get_escpos_payload(
         "order_number": order.order_number,
         "pickup_token": receipt.pickup_token_code,
         "paper_width": paper_width,
+        "escpos_base64": base64.b64encode(raw_bytes).decode("ascii"),
+        "byte_length": len(raw_bytes),
+    }
+
+
+def get_kitchen_ticket_escpos_payload(
+    db: Session,
+    order_id_or_number: str,
+    *,
+    paper_width: str = "80mm",
+    station_id: Optional[UUID] = None,
+    staff_canteen_id: Optional[UUID] = None,
+) -> dict[str, Any]:
+    stmt = select(Order).options(selectinload(Order.items).selectinload(OrderItem.customizations))
+    try:
+        oid = UUID(order_id_or_number)
+        order = db.scalar(stmt.where(Order.id == oid))
+    except ValueError:
+        order = db.scalar(stmt.where(Order.order_number == order_id_or_number))
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if staff_canteen_id and order.canteen_id != staff_canteen_id:
+        raise HTTPException(status_code=403, detail="Staff user is not authorized for this canteen")
+    if order.payment_status != "CONFIRMED":
+        raise HTTPException(status_code=409, detail="Kitchen ticket available only after payment confirmation")
+
+    canteen = db.get(Canteen, order.canteen_id)
+    counter = db.get(Counter, order.counter_id)
+    tok = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
+    station_ids = {oi.station_id for oi in order.items if oi.station_id}
+    if station_id:
+        station_ids.add(station_id)
+    station_names = (
+        {st.id: st.name for st in db.scalars(select(KitchenStation).where(KitchenStation.id.in_(station_ids))).all()}
+        if station_ids
+        else {}
+    )
+    items = [oi for oi in order.items if not station_id or oi.station_id == station_id]
+    local_ts = order.created_at.astimezone(get_college_tz())
+    kot_payload = {
+        "order_number": order.order_number,
+        "pickup_token": tok.token_code if tok else order.order_number[-4:],
+        "canteen_name": canteen.name if canteen else "CollegeBites",
+        "counter_name": counter.name if counter else None,
+        "order_type": order.order_type,
+        "is_priority": bool(order.is_priority),
+        "station_filter_name": station_names.get(station_id) if station_id else None,
+        "order_time": local_ts.strftime("%d-%b %I:%M %p"),
+        "notes": order.notes,
+        "items": [
+            {
+                "item_name": oi.item_name,
+                "variant_name": oi.variant_name,
+                "quantity": oi.quantity,
+                "station_name": station_names.get(oi.station_id) if oi.station_id else None,
+                "special_instructions": oi.special_instructions,
+                "customizations": [
+                    {"option_name": c.option_name, "option_value": c.option_value}
+                    for c in oi.customizations
+                ],
+            }
+            for oi in items
+        ],
+    }
+    raw_bytes = build_escpos_kot_bytes(kot_payload, paper_width=paper_width)
+    return {
+        "order_number": order.order_number,
+        "pickup_token": kot_payload["pickup_token"],
+        "paper_width": paper_width,
+        "station_id": str(station_id) if station_id else None,
+        "item_count": len(items),
         "escpos_base64": base64.b64encode(raw_bytes).decode("ascii"),
         "byte_length": len(raw_bytes),
     }

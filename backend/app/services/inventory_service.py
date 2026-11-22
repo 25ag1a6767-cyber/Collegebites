@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from sqlalchemy import desc, func, or_, select
+from sqlalchemy import event as sa_event
 from sqlalchemy.orm import Session
 
 from app.core.time_utils import today_college
@@ -30,6 +31,21 @@ from app.models.inventory import (
 from app.models.menu import FoodItem, Ingredient, Recipe, RecipeIngredient
 from app.models.order import Order, OrderItem
 from app.services.audit_service import record_audit_log
+from app.websockets import emit_order_event_sync
+
+
+@sa_event.listens_for(Session, "after_commit")
+def _flush_inventory_ws_events(session: Session) -> None:
+    pending = session.info.pop("_pending_inv_ws", None)
+    if not pending:
+        return
+    for canteen_id, event_type, payload in pending:
+        emit_order_event_sync(canteen_id, "inventory", event_type, payload)
+
+
+def _queue_inv_ws_event(db: Session, canteen_id: UUID, event_type: str, payload: dict) -> None:
+    queue = db.info.setdefault("_pending_inv_ws", [])
+    queue.append((str(canteen_id), event_type, payload))
 
 
 ACTIVE_ORDER_STATUSES = (
@@ -127,14 +143,113 @@ def _consume_batches(
     return consumed
 
 
+def _expired_batch_totals_map(db: Session, inv_ids: list[UUID]) -> dict[UUID, Decimal]:
+    if not inv_ids:
+        return {}
+    today = today_college()
+    rows = db.execute(
+        select(StockBatch.inventory_item_id, func.coalesce(func.sum(StockBatch.remaining_quantity), 0))
+        .where(
+            StockBatch.inventory_item_id.in_(inv_ids),
+            StockBatch.remaining_quantity > 0,
+            StockBatch.expiry_date.is_not(None),
+            StockBatch.expiry_date < today,
+        )
+        .group_by(StockBatch.inventory_item_id)
+    ).all()
+    return {iid: Decimal(str(tot)) for iid, tot in rows}
+
+
+def get_unexpired_stock_quantity(
+    db: Session,
+    inv: InventoryItem,
+    *,
+    exclude_reserved: bool = False,
+    expired_map: Optional[dict[UUID, Decimal]] = None,
+) -> Decimal:
+    if inv.is_archived or not inv.is_available:
+        return Decimal("0.000")
+    exp_qty = (
+        expired_map.get(inv.id, Decimal("0.000"))
+        if expired_map is not None
+        else _expired_batch_totals_map(db, [inv.id]).get(inv.id, Decimal("0.000"))
+    )
+    usable = max(Decimal("0.000"), inv.current_quantity - exp_qty)
+    if exclude_reserved:
+        usable = max(Decimal("0.000"), usable - max(Decimal("0.000"), inv.reserved_quantity))
+    return usable
+
+
+def _compute_order_needed_ingredients(db: Session, order_id: UUID) -> dict[UUID, Decimal]:
+    needed_map: dict[UUID, Decimal] = {}
+    order_items = db.scalars(select(OrderItem).where(OrderItem.order_id == order_id)).all()
+    for oi in order_items:
+        if not oi.food_item_id:
+            continue
+        recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == oi.food_item_id))
+        if not recipe:
+            continue
+        req_rows = db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all()
+        for req in req_rows:
+            needed = ((req.quantity_required * Decimal(oi.quantity)) / Decimal(max(1, recipe.yield_portions))).quantize(
+                Decimal("0.001")
+            )
+            needed_map[req.ingredient_id] = needed_map.get(req.ingredient_id, Decimal("0.000")) + needed
+    return needed_map
+
+
+def _trigger_low_stock_alert_if_needed(
+    db: Session,
+    inv: InventoryItem,
+    ingredient_name: str,
+    *,
+    canteen_id: UUID,
+) -> None:
+    if inv.is_archived or inv.current_quantity > inv.reorder_level:
+        return
+    blocked_names = [
+        fi.name
+        for fi in db.scalars(
+            select(FoodItem)
+            .join(Recipe, Recipe.food_item_id == FoodItem.id)
+            .join(RecipeIngredient, RecipeIngredient.recipe_id == Recipe.id)
+            .where(
+                FoodItem.canteen_id == canteen_id,
+                RecipeIngredient.ingredient_id == inv.ingredient_id,
+                FoodItem.insufficient_ingredients.is_(True),
+            )
+        ).all()
+    ]
+    try:
+        from app.services.notification_service import notify_inventory_stock_alert
+
+        notify_inventory_stock_alert(
+            db,
+            canteen_id=canteen_id,
+            inventory_item_id=inv.id,
+            ingredient_name=ingredient_name,
+            current_qty=str(inv.current_quantity),
+            reorder_level=str(inv.reorder_level),
+            unit=inv.unit,
+            blocked_foods=blocked_names,
+        )
+    except ImportError:
+        pass
+
+
 def refresh_food_item_ingredient_sufficiency(db: Session, canteen_id: UUID) -> list[str]:
-    """Recompute FoodItem.insufficient_ingredients for all items with recipes in a canteen."""
+    """Recompute FoodItem.insufficient_ingredients using unexpired, unreserved ingredient stock."""
+    invs = db.scalars(select(InventoryItem).where(InventoryItem.canteen_id == canteen_id)).all()
+    expired_map = _expired_batch_totals_map(db, [inv.id for inv in invs])
     inv_map = {
-        inv.ingredient_id: (Decimal("0.000") if (inv.is_archived or not inv.is_available) else inv.current_quantity)
-        for inv in db.scalars(select(InventoryItem).where(InventoryItem.canteen_id == canteen_id)).all()
+        inv.ingredient_id: get_unexpired_stock_quantity(
+            db, inv, exclude_reserved=True, expired_map=expired_map
+        )
+        for inv in invs
     }
     items = db.scalars(select(FoodItem).where(FoodItem.canteen_id == canteen_id)).all()
     blocked_names: list[str] = []
+    changed_foods: list[dict] = []
     for food in items:
         recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == food.id))
         if not recipe:
@@ -149,14 +264,92 @@ def refresh_food_item_ingredient_sufficiency(db: Session, canteen_id: UUID) -> l
             if avail < per_portion:
                 short = True
                 break
+        if food.insufficient_ingredients != short:
+            changed_foods.append(
+                {
+                    "food_item_id": str(food.id),
+                    "name": food.name,
+                    "insufficient_ingredients": short,
+                }
+            )
         food.insufficient_ingredients = short
         if short:
             blocked_names.append(food.name)
+    _queue_inv_ws_event(
+        db,
+        canteen_id,
+        "inventory.updated",
+        {"canteen_id": str(canteen_id), "blocked_items": blocked_names},
+    )
+    if changed_foods:
+        _queue_inv_ws_event(
+            db,
+            canteen_id,
+            "menu.availability_changed",
+            {"canteen_id": str(canteen_id), "changed": changed_foods},
+        )
     return blocked_names
 
 
+def reserve_inventory_for_order(
+    db: Session,
+    canteen_id: UUID,
+    needed_ingredients: dict[UUID, Decimal],
+) -> None:
+    """Atomically lock and reserve ingredient quantities during checkout to prevent concurrent overselling."""
+    if not needed_ingredients:
+        return
+    invs = db.scalars(
+        select(InventoryItem)
+        .where(
+            InventoryItem.canteen_id == canteen_id,
+            InventoryItem.ingredient_id.in_(list(needed_ingredients.keys())),
+        )
+        .order_by(InventoryItem.id.asc())
+        .with_for_update()
+    ).all()
+    if not invs:
+        return
+    expired_map = _expired_batch_totals_map(db, [inv.id for inv in invs])
+    for inv in invs:
+        req_qty = needed_ingredients.get(inv.ingredient_id, Decimal("0.000")).quantize(Decimal("0.001"))
+        if req_qty <= Decimal("0.000"):
+            continue
+        avail = get_unexpired_stock_quantity(db, inv, exclude_reserved=True, expired_map=expired_map)
+        if avail < req_qty:
+            raise HTTPException(
+                status_code=400,
+                detail="Insufficient non-expired ingredient stock for requested quantity",
+            )
+        inv.reserved_quantity = max(Decimal("0.000"), inv.reserved_quantity) + req_qty
+    db.flush()
+    refresh_food_item_ingredient_sufficiency(db, canteen_id)
+
+
+def release_inventory_reservation_for_order(db: Session, order: Order) -> None:
+    """Release previously reserved ingredient quantities when an unpaid order fails, expires, or is cancelled."""
+    needed = _compute_order_needed_ingredients(db, order.id)
+    if not needed:
+        return
+    invs = db.scalars(
+        select(InventoryItem)
+        .where(
+            InventoryItem.canteen_id == order.canteen_id,
+            InventoryItem.ingredient_id.in_(list(needed.keys())),
+        )
+        .order_by(InventoryItem.id.asc())
+        .with_for_update()
+    ).all()
+    for inv in invs:
+        rel_qty = needed.get(inv.ingredient_id, Decimal("0.000"))
+        if rel_qty > Decimal("0.000"):
+            inv.reserved_quantity = max(Decimal("0.000"), inv.reserved_quantity - rel_qty)
+    db.flush()
+    refresh_food_item_ingredient_sufficiency(db, order.canteen_id)
+
+
 def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optional[UUID] = None) -> None:
-    """Deduct ingredients for an order exactly once using FEFO batches and row locks."""
+    """Deduct ingredients for an order exactly once using FEFO batches, row locks, and reservation settlement."""
     if order.inventory_deducted:
         return
     already = db.scalar(
@@ -166,32 +359,34 @@ def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optiona
         order.inventory_deducted = True
         return
 
-    order_items = db.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all()
-    for oi in order_items:
-        if not oi.food_item_id:
-            continue
-        recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == oi.food_item_id))
-        if not recipe:
-            continue
-        req_rows = db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all()
-        for req in req_rows:
-            needed = (req.quantity_required * Decimal(oi.quantity)) / Decimal(max(1, recipe.yield_portions))
-            needed = needed.quantize(Decimal("0.001"))
-            inv = db.scalar(
-                select(InventoryItem)
-                .where(InventoryItem.canteen_id == order.canteen_id, InventoryItem.ingredient_id == req.ingredient_id)
-                .with_for_update()
+    needed_map = _compute_order_needed_ingredients(db, order.id)
+    low_stock_targets: list[tuple[InventoryItem, str]] = []
+    if needed_map:
+        invs = db.scalars(
+            select(InventoryItem)
+            .where(
+                InventoryItem.canteen_id == order.canteen_id,
+                InventoryItem.ingredient_id.in_(list(needed_map.keys())),
             )
-            if not inv:
+            .order_by(InventoryItem.id.asc())
+            .with_for_update()
+        ).all()
+        ing_names = {
+            ing.id: ing.name
+            for ing in db.scalars(select(Ingredient).where(Ingredient.id.in_(list(needed_map.keys())))).all()
+        }
+        for inv in invs:
+            needed = needed_map.get(inv.ingredient_id, Decimal("0.000"))
+            if needed <= Decimal("0.000"):
                 continue
             inv.current_quantity = max(Decimal("0.000"), inv.current_quantity - needed)
+            inv.reserved_quantity = max(Decimal("0.000"), inv.reserved_quantity - needed)
 
-            # Consume non-expired batches FEFO (earliest expiry first) with row locks
-            _consume_batches(db, inv.id, needed, exclude_expired=True)
-
+            consumed = _consume_batches(db, inv.id, needed, exclude_expired=True)
             db.add(
                 StockMovement(
                     inventory_item_id=inv.id,
+                    batch_id=consumed[0][0] if consumed else None,
                     movement_type="order_deduct",
                     quantity_delta=-needed,
                     balance_after=inv.current_quantity,
@@ -201,9 +396,13 @@ def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optiona
                     notes=f"Deducted for order {order.order_number}",
                 )
             )
+            if inv.current_quantity <= inv.reorder_level:
+                low_stock_targets.append((inv, ing_names.get(inv.ingredient_id, "Ingredient")))
 
     order.inventory_deducted = True
     refresh_food_item_ingredient_sufficiency(db, order.canteen_id)
+    for inv_low, ing_name in low_stock_targets:
+        _trigger_low_stock_alert_if_needed(db, inv_low, ing_name, canteen_id=order.canteen_id)
 
 
 def list_suppliers(db: Session) -> list[Supplier]:
@@ -662,6 +861,8 @@ def receive_purchase_order(
     po = db.scalar(select(PurchaseOrder).where(PurchaseOrder.id == po_id).with_for_update())
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
+    if po.status == "cancelled":
+        raise HTTPException(status_code=409, detail="Cancelled purchase order cannot be received")
     if po.status == "received":
         return {"id": str(po.id), "po_number": po.po_number, "status": "received"}
 
@@ -798,7 +999,10 @@ def adjust_or_waste_stock(
         used_batch_id = consumed[0][0] if consumed else batch_id
         inv.current_quantity -= qty
         loss_type = _classify_loss_type(op, reason)
-        loss = (qty * inv.unit_cost).quantize(Decimal("0.01"))
+        consumed_qty = sum((t[1] for t in consumed), Decimal("0.000"))
+        batch_loss = sum((t[1] * t[3] for t in consumed), Decimal("0.00"))
+        uncovered_qty = max(Decimal("0.000"), qty - consumed_qty)
+        loss = (batch_loss + (uncovered_qty * inv.unit_cost)).quantize(Decimal("0.01"))
         db.add(
             WastageRecord(
                 inventory_item_id=inv.id,
@@ -914,6 +1118,8 @@ def adjust_or_waste_stock(
         reason=f"[{op}] {reason}",
     )
     blocked = refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
+    ing_obj = db.get(Ingredient, inv.ingredient_id)
+    _trigger_low_stock_alert_if_needed(db, inv, ing_obj.name if ing_obj else "Ingredient", canteen_id=inv.canteen_id)
     db.commit()
     return {
         "inventory_item_id": str(inv.id),
@@ -935,22 +1141,9 @@ def transfer_stock(
 ) -> dict:
     if from_canteen_id == to_canteen_id:
         raise HTTPException(status_code=400, detail="Source and destination canteens must be different")
-    src = db.scalar(
-        select(InventoryItem)
-        .where(InventoryItem.canteen_id == from_canteen_id, InventoryItem.ingredient_id == ingredient_id)
-        .with_for_update()
-    )
-    if not src or src.current_quantity < quantity:
-        raise HTTPException(status_code=400, detail="Insufficient stock in source canteen")
-    has_batches = db.scalar(select(StockBatch.id).where(StockBatch.inventory_item_id == src.id).limit(1))
-    consumed_slices = _consume_batches(db, src.id, quantity, exclude_expired=True)
-    taken_total = sum((t[1] for t in consumed_slices), Decimal("0.000"))
-    if has_batches and taken_total < quantity:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="Insufficient non-expired batch stock in source canteen")
-    src.current_quantity -= quantity
-
     src_ing = db.get(Ingredient, ingredient_id)
+    if not src_ing:
+        raise HTTPException(status_code=404, detail="Ingredient not found")
     dst_ing = db.scalar(
         select(Ingredient).where(Ingredient.canteen_id == to_canteen_id, Ingredient.sku == src_ing.sku)
     )
@@ -965,11 +1158,29 @@ def transfer_stock(
         db.add(dst_ing)
         db.flush()
 
-    dst = db.scalar(
-        select(InventoryItem)
-        .where(InventoryItem.canteen_id == to_canteen_id, InventoryItem.ingredient_id == dst_ing.id)
-        .with_for_update()
-    )
+    # Lock inventory rows in canonical sorted order by (canteen_id, ingredient_id) to prevent deadlocks
+    lock_pairs = sorted([(from_canteen_id, ingredient_id), (to_canteen_id, dst_ing.id)], key=lambda x: str(x[0]))
+    locked_by_canteen: dict[UUID, Optional[InventoryItem]] = {}
+    for cid_lock, ing_lock in lock_pairs:
+        locked_by_canteen[cid_lock] = db.scalar(
+            select(InventoryItem)
+            .where(InventoryItem.canteen_id == cid_lock, InventoryItem.ingredient_id == ing_lock)
+            .with_for_update()
+        )
+
+    src = locked_by_canteen.get(from_canteen_id)
+    if not src or src.current_quantity < quantity:
+        raise HTTPException(status_code=400, detail="Insufficient stock in source canteen")
+    has_batches = db.scalar(select(StockBatch.id).where(StockBatch.inventory_item_id == src.id).limit(1))
+    if has_batches:
+        usable_non_expired = get_unexpired_stock_quantity(db, src, exclude_reserved=True)
+        if usable_non_expired < quantity:
+            raise HTTPException(status_code=400, detail="Insufficient non-expired batch stock in source canteen")
+    consumed_slices = _consume_batches(db, src.id, quantity, exclude_expired=True)
+    src_prev = src.current_quantity
+    src.current_quantity -= quantity
+
+    dst = locked_by_canteen.get(to_canteen_id)
     if not dst:
         dst = InventoryItem(
             canteen_id=to_canteen_id,
@@ -981,33 +1192,38 @@ def transfer_stock(
         )
         db.add(dst)
         db.flush()
+    dst_prev = dst.current_quantity
     dst.current_quantity += quantity
 
     now = datetime.now(timezone.utc)
+    dst_batch_id: Optional[UUID] = None
     if consumed_slices:
         for _bid, taken, exp, ucost in consumed_slices:
-            db.add(
-                StockBatch(
-                    inventory_item_id=dst.id,
-                    batch_number=f"TRF-{uuid4().hex[:6].upper()}",
-                    initial_quantity=taken,
-                    remaining_quantity=taken,
-                    unit_cost=ucost,
-                    received_at=now,
-                    expiry_date=exp,
-                )
-            )
-    else:
-        db.add(
-            StockBatch(
+            b_new = StockBatch(
                 inventory_item_id=dst.id,
                 batch_number=f"TRF-{uuid4().hex[:6].upper()}",
-                initial_quantity=quantity,
-                remaining_quantity=quantity,
-                unit_cost=src.unit_cost,
+                initial_quantity=taken,
+                remaining_quantity=taken,
+                unit_cost=ucost,
                 received_at=now,
+                expiry_date=exp,
             )
+            db.add(b_new)
+            db.flush()
+            if dst_batch_id is None:
+                dst_batch_id = b_new.id
+    else:
+        b_new = StockBatch(
+            inventory_item_id=dst.id,
+            batch_number=f"TRF-{uuid4().hex[:6].upper()}",
+            initial_quantity=quantity,
+            remaining_quantity=quantity,
+            unit_cost=src.unit_cost,
+            received_at=now,
         )
+        db.add(b_new)
+        db.flush()
+        dst_batch_id = b_new.id
 
     tr = StockTransfer(
         from_canteen_id=from_canteen_id,
@@ -1022,6 +1238,7 @@ def transfer_stock(
     db.add(
         StockMovement(
             inventory_item_id=src.id,
+            batch_id=consumed_slices[0][0] if consumed_slices else None,
             movement_type="transfer_out",
             quantity_delta=-quantity,
             balance_after=src.current_quantity,
@@ -1034,6 +1251,7 @@ def transfer_stock(
     db.add(
         StockMovement(
             inventory_item_id=dst.id,
+            batch_id=dst_batch_id,
             movement_type="transfer_in",
             quantity_delta=quantity,
             balance_after=dst.current_quantity,
@@ -1043,8 +1261,39 @@ def transfer_stock(
             notes=notes,
         )
     )
+    _log_inv_audit(
+        db,
+        canteen_id=from_canteen_id,
+        inventory_item_id=src.id,
+        action="stock_transferred_out",
+        field_name="current_quantity",
+        old_value=str(src_prev),
+        new_value=str(src.current_quantity),
+        actor_user_id=actor_user_id,
+        reason=notes,
+    )
+    _log_inv_audit(
+        db,
+        canteen_id=to_canteen_id,
+        inventory_item_id=dst.id,
+        action="stock_transferred_in",
+        field_name="current_quantity",
+        old_value=str(dst_prev),
+        new_value=str(dst.current_quantity),
+        actor_user_id=actor_user_id,
+        reason=notes,
+    )
     refresh_food_item_ingredient_sufficiency(db, from_canteen_id)
     refresh_food_item_ingredient_sufficiency(db, to_canteen_id)
+    _trigger_low_stock_alert_if_needed(db, src, src_ing.name, canteen_id=from_canteen_id)
+    record_audit_log(
+        db,
+        action="inventory.stock_transferred",
+        entity_type="stock_transfer",
+        entity_id=str(tr.id),
+        actor_user_id=actor_user_id,
+        details={"from": str(from_canteen_id), "to": str(to_canteen_id), "quantity": str(quantity)},
+    )
     db.commit()
     return {"id": str(tr.id), "status": "transferred", "quantity": str(quantity)}
 
@@ -1054,7 +1303,11 @@ def get_inventory_alerts(db: Session, canteen_id: UUID, expiring_within_days: in
     rows = db.execute(
         select(InventoryItem, Ingredient)
         .join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
-        .where(InventoryItem.canteen_id == canteen_id, InventoryItem.current_quantity <= InventoryItem.reorder_level)
+        .where(
+            InventoryItem.canteen_id == canteen_id,
+            InventoryItem.is_archived.is_(False),
+            InventoryItem.current_quantity <= InventoryItem.reorder_level,
+        )
     ).all()
     for inv, ing in rows:
         low_stock.append({
@@ -1072,6 +1325,7 @@ def get_inventory_alerts(db: Session, canteen_id: UUID, expiring_within_days: in
         .join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
         .where(
             InventoryItem.canteen_id == canteen_id,
+            InventoryItem.is_archived.is_(False),
             StockBatch.remaining_quantity > 0,
             StockBatch.expiry_date.is_not(None),
             StockBatch.expiry_date <= cutoff,
@@ -1255,6 +1509,8 @@ def archive_inventory_item(
         reason=reason,
     )
     blocked = refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
+    ing_obj = db.get(Ingredient, inv.ingredient_id)
+    _trigger_low_stock_alert_if_needed(db, inv, ing_obj.name if ing_obj else "Ingredient", canteen_id=inv.canteen_id)
     db.commit()
     return {"inventory_item_id": str(inv.id), "is_archived": True, "blocked_items": blocked}
 
@@ -1278,6 +1534,8 @@ def restore_inventory_item(db: Session, inventory_item_id: UUID, *, actor_user_i
         actor_user_id=actor_user_id,
     )
     blocked = refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
+    ing_obj = db.get(Ingredient, inv.ingredient_id)
+    _trigger_low_stock_alert_if_needed(db, inv, ing_obj.name if ing_obj else "Ingredient", canteen_id=inv.canteen_id)
     db.commit()
     return {"inventory_item_id": str(inv.id), "is_archived": False, "blocked_items": blocked}
 
@@ -1389,6 +1647,8 @@ def restock_inventory_item(
         reason=notes or "Quick restock",
     )
     blocked = refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
+    ing_obj = db.get(Ingredient, inv.ingredient_id)
+    _trigger_low_stock_alert_if_needed(db, inv, ing_obj.name if ing_obj else "Ingredient", canteen_id=inv.canteen_id)
     db.commit()
     return {
         "inventory_item_id": str(inv.id),
@@ -1679,6 +1939,93 @@ def list_inventory_audit_logs(
             "created_at": l.created_at.isoformat() if l.created_at else None,
         }
         for l in logs
+    ]
+
+
+def cancel_purchase_order(
+    db: Session, po_id: UUID, actor_user_id: UUID, reason: Optional[str] = None
+) -> dict:
+    po = db.scalar(select(PurchaseOrder).where(PurchaseOrder.id == po_id).with_for_update())
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    if po.status == "received":
+        raise HTTPException(status_code=409, detail="Received purchase order cannot be cancelled")
+    if po.status == "cancelled":
+        return {"id": str(po.id), "po_number": po.po_number, "status": "cancelled"}
+    po.status = "cancelled"
+    if reason:
+        po.notes = f"{(po.notes or '').strip()} [Cancelled: {reason.strip()}]".strip()
+    record_audit_log(
+        db,
+        action="purchase_order.cancelled",
+        entity_type="purchase_order",
+        entity_id=po.po_number,
+        actor_user_id=actor_user_id,
+        details={"reason": reason or "Cancelled by manager"},
+    )
+    db.commit()
+    return {"id": str(po.id), "po_number": po.po_number, "status": po.status}
+
+
+def list_wastage_records(db: Session, canteen_id: UUID, limit: int = 100) -> list[dict]:
+    rows = db.execute(
+        select(WastageRecord, InventoryItem, Ingredient.name)
+        .join(InventoryItem, InventoryItem.id == WastageRecord.inventory_item_id)
+        .join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
+        .where(InventoryItem.canteen_id == canteen_id)
+        .order_by(desc(WastageRecord.created_at))
+        .limit(limit)
+    ).all()
+    user_ids = {wr.recorded_by_user_id for wr, _, _ in rows if wr.recorded_by_user_id}
+    user_map = (
+        {u.id: (u.full_name or u.email or str(u.id)) for u in db.scalars(select(User).where(User.id.in_(user_ids))).all()}
+        if user_ids
+        else {}
+    )
+    return [
+        {
+            "id": str(wr.id),
+            "inventory_item_id": str(wr.inventory_item_id),
+            "ingredient_name": ing_name,
+            "unit": inv.unit,
+            "quantity": str(wr.quantity),
+            "loss_type": wr.loss_type,
+            "reason": wr.reason,
+            "estimated_loss": str(wr.estimated_loss),
+            "recorded_by_name": user_map.get(wr.recorded_by_user_id) if wr.recorded_by_user_id else None,
+            "created_at": wr.created_at.isoformat() if wr.created_at else None,
+        }
+        for wr, inv, ing_name in rows
+    ]
+
+
+def list_stock_adjustments(db: Session, canteen_id: UUID, limit: int = 100) -> list[dict]:
+    rows = db.execute(
+        select(StockAdjustment, InventoryItem, Ingredient.name)
+        .join(InventoryItem, InventoryItem.id == StockAdjustment.inventory_item_id)
+        .join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
+        .where(InventoryItem.canteen_id == canteen_id)
+        .order_by(desc(StockAdjustment.created_at))
+        .limit(limit)
+    ).all()
+    user_ids = {sa.adjusted_by_user_id for sa, _, _ in rows if sa.adjusted_by_user_id}
+    user_map = (
+        {u.id: (u.full_name or u.email or str(u.id)) for u in db.scalars(select(User).where(User.id.in_(user_ids))).all()}
+        if user_ids
+        else {}
+    )
+    return [
+        {
+            "id": str(sa.id),
+            "inventory_item_id": str(sa.inventory_item_id),
+            "ingredient_name": ing_name,
+            "unit": inv.unit,
+            "quantity_delta": str(sa.quantity_delta),
+            "reason": sa.reason,
+            "adjusted_by_name": user_map.get(sa.adjusted_by_user_id) if sa.adjusted_by_user_id else None,
+            "created_at": sa.created_at.isoformat() if sa.created_at else None,
+        }
+        for sa, inv, ing_name in rows
     ]
 
 

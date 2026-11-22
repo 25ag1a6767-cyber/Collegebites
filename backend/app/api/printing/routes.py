@@ -10,6 +10,7 @@ from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_CASHIER,
     ROLE_COLLEGE_ADMIN,
+    ROLE_KITCHEN_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
     enforce_canteen_scope,
@@ -25,6 +26,7 @@ from app.services import receipt_service
 router = APIRouter(prefix="/printing", tags=["Receipt & Thermal Printing"])
 
 STAFF_PRINT_ROLES = (ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_CASHIER)
+KOT_PRINT_ROLES = (ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_KITCHEN_STAFF, ROLE_CASHIER)
 
 
 def _print_staff_cid(principal: Optional[AuthenticatedPrincipal]) -> Optional[UUID]:
@@ -51,7 +53,26 @@ def get_escpos_receipt(
         paper_width=width,
         user_id=principal.user.id if principal else None,
         is_staff=is_staff,
+        staff_canteen_id=_print_staff_cid(principal),
         guest_access_token=guest_token or x_guest_token,
+    )
+
+
+@router.get("/kitchen-ticket/{order_id_or_number}/escpos")
+def get_escpos_kitchen_ticket(
+    order_id_or_number: str,
+    width: str = Query(default="80mm", pattern="^(58mm|80mm)$"),
+    station_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KOT_PRINT_ROLES)),
+    db: Session = Depends(get_db),
+):
+    scoped_cid = scoped_canteen_for_principal(principal, None)
+    return receipt_service.get_kitchen_ticket_escpos_payload(
+        db,
+        order_id_or_number,
+        paper_width=width,
+        station_id=station_id,
+        staff_canteen_id=scoped_cid,
     )
 
 

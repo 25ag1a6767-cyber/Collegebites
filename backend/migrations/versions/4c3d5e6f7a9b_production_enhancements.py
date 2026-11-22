@@ -15,26 +15,33 @@ branch_labels = None
 depends_on = None
 
 
+def _add_column_if_missing(table_name: str, column: sa.Column) -> None:
+    bind = op.get_bind()
+    cols = {c["name"] for c in sa.inspect(bind).get_columns(table_name)}
+    if column.name not in cols:
+        op.add_column(table_name, column)
+
+
 def upgrade() -> None:
-    op.add_column("orders", sa.Column("guest_email", sa.String(length=160), nullable=True))
-    op.add_column("orders", sa.Column("is_priority", sa.Boolean(), nullable=False, server_default=sa.false()))
+    _add_column_if_missing("orders", sa.Column("guest_email", sa.String(length=160), nullable=True))
+    _add_column_if_missing("orders", sa.Column("is_priority", sa.Boolean(), nullable=False, server_default=sa.false()))
     op.create_index("ix_orders_canteen_created_at", "orders", ["canteen_id", "created_at"], if_not_exists=True)
 
-    op.add_column("order_items", sa.Column("prep_status", sa.String(length=24), nullable=False, server_default="PENDING"))
-    op.add_column(
+    _add_column_if_missing("order_items", sa.Column("prep_status", sa.String(length=24), nullable=False, server_default="PENDING"))
+    _add_column_if_missing(
         "order_items",
         sa.Column("station_id", sa.UUID(), sa.ForeignKey("kitchen_stations.id", ondelete="SET NULL"), nullable=True),
     )
 
-    op.add_column(
+    _add_column_if_missing(
         "food_items",
         sa.Column("station_id", sa.UUID(), sa.ForeignKey("kitchen_stations.id", ondelete="SET NULL"), nullable=True),
     )
 
-    op.add_column("notifications", sa.Column("dedup_key", sa.String(length=160), nullable=True))
+    _add_column_if_missing("notifications", sa.Column("dedup_key", sa.String(length=160), nullable=True))
     op.create_index("ix_notifications_dedup_key", "notifications", ["dedup_key"], if_not_exists=True)
 
-    op.add_column(
+    _add_column_if_missing(
         "notification_preferences",
         sa.Column("web_push_subscriptions", sa.JSON(), nullable=False, server_default="[]"),
     )

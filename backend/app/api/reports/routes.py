@@ -11,8 +11,8 @@ from app.core.permissions import (
     ROLE_COLLEGE_ADMIN,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
-    enforce_canteen_scope,
     require_roles,
+    scoped_canteen_for_principal,
 )
 from app.services import report_service
 
@@ -29,9 +29,8 @@ def get_dashboard_report(
     principal: AuthenticatedPrincipal = Depends(require_roles(*REPORT_ROLES)),
     db: Session = Depends(get_db),
 ):
-    if canteen_id:
-        enforce_canteen_scope(principal, canteen_id)
-    return report_service.get_analytics_report(db, canteen_id=canteen_id, start_date=start_date, end_date=end_date)
+    scoped_cid = scoped_canteen_for_principal(principal, canteen_id)
+    return report_service.get_analytics_report(db, canteen_id=scoped_cid, start_date=start_date, end_date=end_date)
 
 
 @router.get("/export/csv")
@@ -42,9 +41,8 @@ def export_csv(
     principal: AuthenticatedPrincipal = Depends(require_roles(*REPORT_ROLES)),
     db: Session = Depends(get_db),
 ):
-    if canteen_id:
-        enforce_canteen_scope(principal, canteen_id)
-    report = report_service.get_analytics_report(db, canteen_id=canteen_id, start_date=start_date, end_date=end_date)
+    scoped_cid = scoped_canteen_for_principal(principal, canteen_id)
+    report = report_service.get_analytics_report(db, canteen_id=scoped_cid, start_date=start_date, end_date=end_date)
     csv_text = report_service.export_report_csv(report)
     return Response(
         content=csv_text,
@@ -61,9 +59,8 @@ def export_pdf(
     principal: AuthenticatedPrincipal = Depends(require_roles(*REPORT_ROLES)),
     db: Session = Depends(get_db),
 ):
-    if canteen_id:
-        enforce_canteen_scope(principal, canteen_id)
-    report = report_service.get_analytics_report(db, canteen_id=canteen_id, start_date=start_date, end_date=end_date)
+    scoped_cid = scoped_canteen_for_principal(principal, canteen_id)
+    report = report_service.get_analytics_report(db, canteen_id=scoped_cid, start_date=start_date, end_date=end_date)
     pdf_bytes = report_service.export_report_pdf(report)
     return Response(
         content=pdf_bytes,

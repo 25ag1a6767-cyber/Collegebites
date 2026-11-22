@@ -10,7 +10,6 @@ from app.core.database import get_db
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_COLLEGE_ADMIN,
-    ROLE_KITCHEN_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
     enforce_canteen_scope,
@@ -62,7 +61,7 @@ def update_controls(
     canteen_id: UUID,
     payload: QueueControlsUpdate,
     principal: AuthenticatedPrincipal = Depends(
-        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_KITCHEN_STAFF)
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
     ),
     db: Session = Depends(get_db),
 ):

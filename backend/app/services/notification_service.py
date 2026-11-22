@@ -270,6 +270,38 @@ def notify_customer_order_event(
     )
 
 
+def notify_inventory_stock_alert(
+    db: Session,
+    *,
+    canteen_id: UUID,
+    inventory_item_id: UUID,
+    ingredient_name: str,
+    current_qty: str,
+    reorder_level: str,
+    unit: str,
+    blocked_foods: list[str],
+) -> None:
+    hour_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    blocked_note = f" Unavailable menu items: {', '.join(blocked_foods[:5])}." if blocked_foods else ""
+    title = f"Low Stock Alert • {ingredient_name}"
+    msg = f"{ingredient_name} dropped to {current_qty} {unit} (reorder level: {reorder_level} {unit}).{blocked_note}"
+    for role_name in ("inventory_manager", "canteen_manager"):
+        _create_notification(
+            db,
+            role_target=role_name,
+            canteen_id=canteen_id,
+            title=title,
+            message=msg,
+            event_type="inventory_alert",
+            dedup_key=f"inv_alert:{inventory_item_id}:{current_qty}:{hour_bucket}:{role_name}",
+            metadata_json={
+                "inventory_item_id": str(inventory_item_id),
+                "ingredient_name": ingredient_name,
+                "blocked_foods": blocked_foods,
+            },
+        )
+
+
 def list_my_notifications(
     db: Session, user_id: UUID, roles: set[str], assigned_canteen_id: Optional[UUID] = None
 ) -> list[Notification]:

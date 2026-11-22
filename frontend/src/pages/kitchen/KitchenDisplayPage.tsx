@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BellRing, Check, Clock, Flame, Search, Star, Volume2, VolumeX } from "lucide-react";
+import { AlertTriangle, BellRing, Check, Clock, Flame, Printer, Search, Star, Volume2, VolumeX } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
@@ -32,6 +32,7 @@ export const KitchenDisplayPage: React.FC = () => {
   const activeCanteenId =
     !isCollegeWide && user?.assigned_canteen_id ? user.assigned_canteen_id : canteenId || canteens[0]?.id || "";
   const [kitchenId, setKitchenId] = useState("");
+  const [stationId, setStationId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [delayedOnly, setDelayedOnly] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -67,29 +68,41 @@ export const KitchenDisplayPage: React.FC = () => {
     enabled: Boolean(activeCanteenId && accessToken),
     ssePath: activeCanteenId ? `/realtime/staff/orders/stream?canteen_id=${activeCanteenId}` : null,
     wsPath: activeCanteenId ? `/ws/kitchen/${activeCanteenId}` : null,
-    queryKeys: [["kitchen-orders", activeCanteenId, kitchenId]],
+    queryKeys: [["kitchen-orders", activeCanteenId, kitchenId, stationId], ["kitchen-stations", activeCanteenId]],
     onSnapshot: (snap) => {
       if (snap?.orders) {
         const activeOnly = snap.orders.filter(
           (o) =>
             ["PLACED", "ACCEPTED", "PREPARING", "READY"].includes(o.status) &&
-            (!kitchenId || o.kitchen_id === kitchenId)
+            (!kitchenId || o.kitchen_id === kitchenId) &&
+            (!stationId || o.items.some((it) => it.station_id === stationId))
         );
-        qc.setQueryData(["kitchen-orders", activeCanteenId, kitchenId], activeOnly);
+        qc.setQueryData(["kitchen-orders", activeCanteenId, kitchenId, stationId], activeOnly);
       } else {
         qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
       }
     },
     onEvent: () => {
       qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
+      qc.invalidateQueries({ queryKey: ["kitchen-stations", activeCanteenId] });
     },
   });
 
+  const { data: stations = [] } = useQuery<any[]>({
+    queryKey: ["kitchen-stations", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/stations`)).data,
+    refetchInterval: kdsSyncStatus === "live" ? 30000 : 8000,
+  });
+
   const { data: orders = [], refetch } = useQuery<Order[]>({
-    queryKey: ["kitchen-orders", activeCanteenId, kitchenId],
+    queryKey: ["kitchen-orders", activeCanteenId, kitchenId, stationId],
     enabled: Boolean(activeCanteenId),
     queryFn: async () => {
-      const q = kitchenId ? `?kitchen_id=${kitchenId}` : "";
+      const qs = new URLSearchParams();
+      if (kitchenId) qs.set("kitchen_id", kitchenId);
+      if (stationId) qs.set("station_id", stationId);
+      const q = qs.toString() ? `?${qs.toString()}` : "";
       return (await api.get(`/kitchen/canteens/${activeCanteenId}/orders${q}`)).data;
     },
     refetchInterval: kdsSyncStatus === "live" ? 30000 : 4000,
@@ -255,6 +268,7 @@ export const KitchenDisplayPage: React.FC = () => {
             onChange={(e) => {
               setCanteenId(e.target.value);
               setKitchenId("");
+              setStationId("");
             }}
             className="w-48 bg-slate-800 border-slate-700 text-white"
           >
@@ -264,6 +278,20 @@ export const KitchenDisplayPage: React.FC = () => {
               </option>
             ))}
           </Select>
+          {stations.length > 0 && (
+            <Select
+              value={stationId}
+              onChange={(e) => setStationId(e.target.value)}
+              className="w-44 bg-slate-800 border-slate-700 text-white"
+            >
+              <option value="">All Stations</option>
+              {stations.map((s: any) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.pending_units} items)
+                </option>
+              ))}
+            </Select>
+          )}
           {canteenDetail?.kitchens && canteenDetail.kitchens.length > 0 && (
             <Select
               value={kitchenId}
@@ -441,6 +469,22 @@ export const KitchenDisplayPage: React.FC = () => {
                           Delay
                         </Button>
                       )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        title="Download KOT ESC/POS Thermal Ticket"
+                        onClick={async () => {
+                          try {
+                            const stParam = stationId ? `&station_id=${stationId}` : "";
+                            const res = await api.get(`/printing/kitchen-ticket/${o.order_number}/escpos?width=80mm${stParam}`);
+                            pushToast(`KOT prepared (${res.data.item_count} items, ${res.data.byte_length} bytes)`, "success");
+                          } catch (err) {
+                            pushToast(getApiError(err, "KOT export failed"), "error");
+                          }
+                        }}
+                      >
+                        <Printer className="h-3.5 w-3.5" /> KOT
+                      </Button>
                       {o.status === "PLACED" && (
                         <Button
                           size="sm"

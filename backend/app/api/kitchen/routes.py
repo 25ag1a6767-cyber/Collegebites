@@ -191,3 +191,39 @@ def restore_ingredient_available(
         raise HTTPException(status_code=404, detail="Inventory item not found")
     enforce_canteen_scope(principal, inv.canteen_id)
     return kitchen_service.restore_ingredient_availability(db, inventory_item_id, principal.user.id)
+
+
+class OrderAssignIn(BaseModel):
+    kitchen_id: Optional[UUID] = None
+    station_id: Optional[UUID] = None
+    staff_user_id: Optional[UUID] = None
+    role_scope: str = Field(default="kitchen", pattern="^(kitchen|pickup)$")
+
+
+@router.get("/canteens/{canteen_id}/stations")
+def list_kitchen_stations(
+    canteen_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return kitchen_service.list_canteen_stations_with_workload(db, canteen_id)
+
+
+@router.post("/orders/{order_id}/assign")
+def assign_order(
+    order_id: UUID,
+    payload: OrderAssignIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    _enforce_order_scope(db, principal, order_id)
+    return kitchen_service.assign_order_to_station_or_staff(
+        db,
+        order_id,
+        kitchen_id=payload.kitchen_id,
+        station_id=payload.station_id,
+        staff_user_id=payload.staff_user_id,
+        role_scope=payload.role_scope,
+        actor_user_id=principal.user.id,
+    )
