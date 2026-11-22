@@ -73,7 +73,7 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
         <BrowserRouter>
-          <div className="min-h-screen flex flex-col bg-[#fdf8f0]/40 text-slate-900 pb-20 md:pb-0">
+          <div className="min-h-screen flex flex-col overflow-x-hidden bg-[#fdf8f0]/40 text-slate-900 pb-20 md:pb-0">
             <Navbar />
             <div className="flex-1">
               <Routes>

@@ -82,6 +82,7 @@ export const Navbar: React.FC = () => {
   }
 
   return (
+    <>
     <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/95 backdrop-blur-md no-print">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
         <div className="flex items-center gap-4">
@@ -321,8 +322,9 @@ export const Navbar: React.FC = () => {
           )}
         </div>
       </div>
+    </header>
 
-      <Modal open={installOpen} onClose={() => setInstallOpen(false)} title="Install CollegeBites Mobile App" maxWidth="max-w-md">
+    <Modal open={installOpen} onClose={() => setInstallOpen(false)} title="Install CollegeBites Mobile App" maxWidth="max-w-md">
         <div className="space-y-4 text-sm text-slate-700">
           <div className="flex items-center gap-3 rounded-2xl border border-[#76010d]/20 bg-[#fdf8f0] p-3">
             <img
@@ -369,6 +371,6 @@ export const Navbar: React.FC = () => {
           </div>
         </div>
       </Modal>
-    </header>
+    </>
   );
 };
