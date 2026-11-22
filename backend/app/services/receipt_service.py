@@ -3,6 +3,7 @@ import io
 import ipaddress
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
@@ -95,7 +96,7 @@ def create_receipt_for_order(db: Session, order: Order, pickup_token: PickupToke
         "brand": "COLLEGEBITES",
         "college_name": college.college_name,
         "college_short_code": college.college_short_code,
-        "college_logo_url": college.logo_url,
+        "college_logo_url": college.logo_url or "/branding/collegebites-logo.png",
         "college_address": college.address,
         "college_phone": college.contact_phone,
         "college_email": college.contact_email,
@@ -226,13 +227,13 @@ def generate_receipt_pdf_bytes(
     if paper_format == "58mm":
         page_w = 58 * mm
         est_lines = sum(3 + len(it.get("customizations", [])) for it in snap.get("items", []))
-        page_h = max(210 * mm, (140 + est_lines * 5.5) * mm)
+        page_h = max(210 * mm, (158 + est_lines * 5.5) * mm)
         c = canvas.Canvas(buf, pagesize=(page_w, page_h))
         margin = 3 * mm
     elif paper_format == "80mm":
         page_w = 80 * mm
         est_lines = sum(2 + len(it.get("customizations", [])) for it in snap.get("items", []))
-        page_h = max(210 * mm, (140 + est_lines * 5.5) * mm)
+        page_h = max(210 * mm, (158 + est_lines * 5.5) * mm)
         c = canvas.Canvas(buf, pagesize=(page_w, page_h))
         margin = 5 * mm
     else:
@@ -300,6 +301,19 @@ def generate_receipt_pdf_bytes(
         y -= 4 * mm
 
     base_font_sz = 7.2 if paper_format == "58mm" else 8.5 if paper_format == "80mm" else 9
+    logo_path = Path(__file__).resolve().parent.parent / "assets" / "collegebites-logo.png"
+    if logo_path.is_file():
+        logo_sz = 15 * mm if paper_format == "a4" else 11 * mm
+        ensure_space(logo_sz + 3 * mm)
+        c.drawImage(
+            ImageReader(str(logo_path)),
+            center_x - logo_sz / 2,
+            y - logo_sz + 1.5 * mm,
+            width=logo_sz,
+            height=logo_sz,
+            mask="auto",
+        )
+        y -= logo_sz + 2.5 * mm
     draw_center("COLLEGEBITES", "Helvetica-Bold", 14 if paper_format == "a4" else 10.5, 5.2 * mm)
     draw_center(snap["college_name"].upper(), "Helvetica-Bold", 10 if paper_format == "a4" else 8, 4.3 * mm)
     draw_center(f"{snap['canteen_name']} ({snap.get('canteen_location', '')})", "Helvetica", base_font_sz, 4 * mm)

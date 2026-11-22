@@ -10,6 +10,7 @@ import { getMobileApiError } from "../src/api/client";
 import { ordersApi } from "../src/api/orders.api";
 import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
+import { BrandLogo } from "../src/components/BrandLogo";
 
 const guestSchema = z
   .object({
@@ -173,6 +174,7 @@ export default function CheckoutScreen() {
   if (!cart || cart.items?.length === 0) {
     return (
       <View style={styles.emptyBox}>
+        <BrandLogo size={56} />
         <Text style={styles.title}>Your Cart is Empty</Text>
         <Text style={{ color: "#64748b", fontSize: 13 }}>Add delicious items from any campus canteen first.</Text>
         <Pressable onPress={() => router.push("/")} style={styles.btnPrimary}>
@@ -290,7 +292,7 @@ export default function CheckoutScreen() {
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <Pressable
               onPress={() => setRedeemPoints(redeemPoints > 0 ? 0 : loyalty.points_balance)}
-              style={[styles.btnSec, redeemPoints > 0 && { backgroundColor: "#ea580c" }]}
+              style={[styles.btnSec, redeemPoints > 0 && { backgroundColor: "#76010d" }]}
             >
               <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>
                 {redeemPoints > 0 ? `Redeeming ${redeemPoints} pts (-₹${(redeemPoints / 4).toFixed(2)})` : "Redeem Max Points"}
@@ -390,26 +392,26 @@ export default function CheckoutScreen() {
 }
 
 const styles = StyleSheet.create({
-  emptyBox: { flex: 1, justifyContent: "center", alignItems: "center", padding: 24, gap: 12, backgroundColor: "#f8fafc" },
-  container: { flex: 1, backgroundColor: "#f8fafc", padding: 16 },
+  emptyBox: { flex: 1, justifyContent: "center", alignItems: "center", padding: 24, gap: 12, backgroundColor: "#fdf8f0" },
+  container: { flex: 1, backgroundColor: "#fdf8f0", padding: 16 },
   title: { fontSize: 20, fontWeight: "800", color: "#0f172a" },
   sub: { fontSize: 13, fontWeight: "800", color: "#0f172a" },
   warnBox: { backgroundColor: "#fee2e2", padding: 12, borderRadius: 10 },
-  rowCard: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", padding: 12, borderRadius: 12, borderWidth: 1, borderColor: "#e2e8f0" },
+  rowCard: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", padding: 12, borderRadius: 12, borderWidth: 1, borderColor: "#e7d7c9" },
   itemTxt: { fontWeight: "700", color: "#0f172a", fontSize: 13 },
   qtyBtn: { width: 28, height: 28, borderRadius: 8, backgroundColor: "#e2e8f0", alignItems: "center", justifyContent: "center" },
-  totalBox: { backgroundColor: "#0f172a", padding: 14, borderRadius: 12 },
-  totalLabel: { color: "#cbd5e1", fontWeight: "700", fontSize: 15 },
+  totalBox: { backgroundColor: "#380106", padding: 14, borderRadius: 12 },
+  totalLabel: { color: "#fdedce", fontWeight: "700", fontSize: 15 },
   totalVal: { color: "#fff", fontWeight: "900", fontSize: 18 },
-  box: { backgroundColor: "#fff", padding: 12, borderRadius: 12, gap: 8, borderWidth: 1, borderColor: "#e2e8f0" },
+  box: { backgroundColor: "#fff", padding: 12, borderRadius: 12, gap: 8, borderWidth: 1, borderColor: "#e7d7c9" },
   input: { backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 },
-  btnSec: { backgroundColor: "#0f172a", borderRadius: 10, paddingHorizontal: 14, justifyContent: "center", paddingVertical: 8 },
+  btnSec: { backgroundColor: "#380106", borderRadius: 10, paddingHorizontal: 14, justifyContent: "center", paddingVertical: 8 },
   slotPill: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, backgroundColor: "#f1f5f9", marginRight: 6 },
-  slotActive: { backgroundColor: "#ea580c" },
+  slotActive: { backgroundColor: "#76010d" },
   slotTxt: { fontSize: 12, fontWeight: "700", color: "#334155" },
   payOpt: { flex: 1, minWidth: 95, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: "#cbd5e1", alignItems: "center" },
-  payOptActive: { backgroundColor: "#0f172a", borderColor: "#0f172a" },
+  payOptActive: { backgroundColor: "#380106", borderColor: "#380106" },
   policyRow: { flexDirection: "row", alignItems: "center", gap: 10, backgroundColor: "#fffbeb", padding: 10, borderRadius: 10 },
-  btnPrimary: { backgroundColor: "#ea580c", borderRadius: 12, paddingVertical: 14, paddingHorizontal: 20, alignItems: "center" },
+  btnPrimary: { backgroundColor: "#76010d", borderRadius: 12, paddingVertical: 14, paddingHorizontal: 20, alignItems: "center" },
   btnPrimaryTxt: { color: "#fff", fontWeight: "800", fontSize: 15 },
 });

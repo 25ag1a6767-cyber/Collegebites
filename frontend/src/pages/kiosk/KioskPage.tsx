@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { MonitorOff, RotateCcw, ShoppingBag } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import type { Canteen, FoodItem, Order, ReceiptSnapshot } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
 import { Button, Card, useToast } from "../../components/ui/Primitives";
@@ -149,10 +150,13 @@ export const KioskPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-100 p-6 space-y-5" onClick={resetActivity}>
-      <div className="flex items-center justify-between rounded-2xl bg-slate-900 p-4 text-white">
-        <div>
-          <h1 className="text-2xl font-black">{LABELS[lang].title}</h1>
-          <div className="text-xs text-slate-400">Session auto-resets in {idleSeconds}s</div>
+      <div className="flex items-center justify-between rounded-2xl bg-[#380106] p-4 text-white">
+        <div className="flex items-center gap-3">
+          <BrandLogo size="md" variant="dark" />
+          <div>
+            <h1 className="text-2xl font-black">{LABELS[lang].title}</h1>
+            <div className="text-xs text-[#fdedce]/75">Session auto-resets in {idleSeconds}s</div>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {(["en", "hi", "te"] as const).map((l) => (
@@ -193,7 +197,7 @@ export const KioskPage: React.FC = () => {
         <Card className="mx-auto max-w-lg p-6 space-y-4 text-center">
           <div className="text-xs font-bold uppercase text-slate-500">Kiosk Order Created</div>
           <div className="text-2xl font-black text-slate-900">{pendingOrder.order_number}</div>
-          <div className="text-3xl font-black text-orange-600">₹{pendingOrder.total_amount}</div>
+          <div className="text-3xl font-black text-[#76010d]">₹{pendingOrder.total_amount}</div>
           <div className="space-y-3">
             <div className="rounded-xl bg-slate-50 p-3 text-xs text-slate-600">
               Complete {pendingOrder.payment_method.toUpperCase()} online payment to generate your printable pickup slip.
@@ -230,17 +234,17 @@ export const KioskPage: React.FC = () => {
                     return [...prev, { item, quantity: 1 }];
                   })
                 }
-                className="rounded-2xl bg-white p-5 text-left shadow-md border-2 border-transparent hover:border-orange-500 active:scale-[0.98]"
+                className="rounded-2xl bg-white p-5 text-left shadow-md border-2 border-transparent hover:border-[#76010d] active:scale-[0.98]"
               >
                 <div className="text-lg font-extrabold text-slate-900">{item.name}</div>
-                <div className="text-xl font-black text-orange-600 mt-1">₹{item.base_price}</div>
+                <div className="text-xl font-black text-[#76010d] mt-1">₹{item.base_price}</div>
               </button>
             ))}
           </div>
 
           <Card className="p-6 space-y-4">
             <h2 className="text-xl font-extrabold flex items-center gap-2">
-              <ShoppingBag className="h-5 w-5 text-orange-600" /> Cart
+              <ShoppingBag className="h-5 w-5 text-[#76010d]" /> Cart
             </h2>
             {cartLines.length === 0 ? (
               <div className="py-10 text-center text-slate-400">{LABELS[lang].empty}</div>
@@ -261,7 +265,7 @@ export const KioskPage: React.FC = () => {
                       type="button"
                       onClick={() => setPayMethod(m)}
                       className={`rounded-lg px-2.5 py-1 text-xs font-bold uppercase border ${
-                        payMethod === m ? "border-orange-600 bg-orange-50 text-orange-800" : "border-slate-200 text-slate-600"
+                        payMethod === m ? "border-[#76010d] bg-[#fdf8f0] text-[#76010d]" : "border-slate-200 text-slate-600"
                       }`}
                     >
                       {m}

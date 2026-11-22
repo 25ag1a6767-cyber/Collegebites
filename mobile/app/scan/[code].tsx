@@ -4,6 +4,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { getMobileApiError } from "../../src/api/client";
 import { tokensApi } from "../../src/api/tokens.api";
 import { useMobileStore } from "../../src/store/useMobileStore";
+import { BrandLogo } from "../../src/components/BrandLogo";
 
 export default function ScanCodeDeepLinkScreen() {
   const { code } = useLocalSearchParams<{ code: string }>();
@@ -59,7 +60,8 @@ export default function ScanCodeDeepLinkScreen() {
         </View>
       ) : (
         <View style={styles.card}>
-          <ActivityIndicator size="large" color="#ea580c" />
+          <BrandLogo size={52} />
+          <ActivityIndicator size="large" color="#76010d" style={{ marginTop: 12 }} />
           <Text style={[styles.sub, { marginTop: 12 }]}>Verifying canteen QR...</Text>
         </View>
       )}
@@ -68,22 +70,22 @@ export default function ScanCodeDeepLinkScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f8fafc", justifyContent: "center", padding: 20 },
+  container: { flex: 1, backgroundColor: "#fdf8f0", justifyContent: "center", padding: 20 },
   card: {
     backgroundColor: "#fff",
     borderRadius: 16,
     padding: 20,
     borderWidth: 1,
-    borderColor: "#e2e8f0",
+    borderColor: "#e7d7c9",
     alignItems: "center",
   },
-  badge: { fontSize: 11, fontWeight: "800", color: "#ea580c", letterSpacing: 1 },
+  badge: { fontSize: 11, fontWeight: "800", color: "#76010d", letterSpacing: 1 },
   title: { fontSize: 22, fontWeight: "800", color: "#0f172a", marginTop: 6, textAlign: "center" },
   errTitle: { fontSize: 19, fontWeight: "800", color: "#dc2626", marginBottom: 6, textAlign: "center" },
   sub: { fontSize: 14, color: "#475569", marginTop: 4, textAlign: "center" },
   btn: {
     marginTop: 16,
-    backgroundColor: "#ea580c",
+    backgroundColor: "#76010d",
     borderRadius: 12,
     paddingHorizontal: 20,
     paddingVertical: 12,

@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ShieldCheck, Sparkles, UtensilsCrossed } from "lucide-react";
+import { ShieldCheck, Sparkles } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 const DEMO_USERS = import.meta.env.DEV
@@ -132,9 +133,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
       <div className={import.meta.env.DEV ? "grid gap-6 md:grid-cols-2" : "mx-auto max-w-lg"}>
         <Card className="p-6 md:p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-orange-600 text-white">
-              <UtensilsCrossed className="h-5 w-5" />
-            </div>
+            <BrandLogo size="md" />
             <div>
               <h1 className="text-xl font-extrabold text-slate-900">
                 {mode === "login" ? "Sign in to CollegeBites" : "Create Universal Account"}
@@ -237,7 +236,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                         setDevOtpHint(null);
                         setResetOpen(true);
                       }}
-                      className="text-xs font-bold text-orange-600 hover:underline"
+                      className="text-xs font-bold text-[#76010d] hover:underline"
                     >
                       Forgot Password?
                     </button>
@@ -355,18 +354,19 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
             </div>
           )}
 
-          <div className="mt-5 rounded-xl bg-orange-50 p-3 text-xs text-orange-900">
+          <div className="mt-5 rounded-xl border border-[#76010d]/20 bg-[#fdf8f0] p-3 text-xs text-[#380106]">
             <strong>Visiting campus?</strong> You can also skip login and order directly as a <strong>Guest</strong> at checkout with quick email or mobile OTP verification.
           </div>
         </Card>
 
         {import.meta.env.DEV && (
-          <Card className="p-6 md:p-8 bg-slate-900 text-white border-slate-800">
+          <Card className="p-6 md:p-8 bg-[#380106] text-white border-[#5d010a]">
             <div className="flex items-center gap-2 mb-3">
-              <ShieldCheck className="h-5 w-5 text-orange-400" />
+              <BrandLogo size="sm" variant="dark" />
+              <ShieldCheck className="h-5 w-5 text-[#fdedce]" />
               <h2 className="text-lg font-extrabold">Role Workspaces (Seeded Dev Accounts)</h2>
             </div>
-            <p className="text-xs text-slate-400 mb-5">
+            <p className="text-xs text-[#fdedce]/80 mb-5">
               One-click sign-in for local testing across customer, kitchen, cashier POS, pickup verification, inventory & administration roles.
             </p>
             <div className="space-y-2.5">
@@ -376,13 +376,13 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                   type="button"
                   disabled={loading}
                   onClick={() => doLogin(d.id, d.pw, d.dest)}
-                  className="flex w-full items-center justify-between rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-2.5 text-left transition hover:border-orange-500 hover:bg-slate-800"
+                  className="flex w-full items-center justify-between rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-left transition hover:border-[#fdedce]/60 hover:bg-white/10"
                 >
                   <div>
                     <div className="text-sm font-bold text-white">{d.label}</div>
-                    <div className="text-[11px] text-slate-400">{d.id}</div>
+                    <div className="text-[11px] text-[#fdedce]/75">{d.id}</div>
                   </div>
-                  <Badge tone="default" className="bg-orange-500/20 text-orange-300 border-orange-500/40">
+                  <Badge tone="default" className="bg-[#76010d] text-[#fdedce] border-[#fdedce]/30">
                     <Sparkles className="h-3 w-3" /> Launch
                   </Badge>
                 </button>

@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View, ActivityIndicator } from "react-nati
 import { Tabs } from "expo-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
+import { BrandLogo } from "../src/components/BrandLogo";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 const qc = new QueryClient({
@@ -46,9 +47,7 @@ function OnboardingOverlay({ onDone }: { onDone: () => void }) {
     <View style={styles.onboardRoot}>
       <View style={styles.onboardTop}>
         <View style={styles.brandRow}>
-          <View style={styles.logoBadge}>
-            <Text style={styles.logoText}>CB</Text>
-          </View>
+          <BrandLogo size={40} />
           <Text style={styles.brandName}>CollegeBites</Text>
         </View>
         <Pressable onPress={onDone} style={styles.skipBtn}>
@@ -58,7 +57,7 @@ function OnboardingOverlay({ onDone }: { onDone: () => void }) {
 
       <View style={styles.slideCard}>
         <View style={styles.iconCircle}>
-          <Ionicons name={slide.icon} size={46} color="#ea580c" />
+          <Ionicons name={slide.icon} size={46} color="#76010d" />
         </View>
         <Text style={styles.slideTitle}>{slide.title}</Text>
         <Text style={styles.slideBody}>{slide.body}</Text>
@@ -89,6 +88,15 @@ function OnboardingOverlay({ onDone }: { onDone: () => void }) {
   );
 }
 
+function BrandHeaderTitle({ title }: { title: string }) {
+  return (
+    <View style={styles.brandRow}>
+      <BrandLogo size={28} darkBg />
+      <Text style={styles.headerTitleTxt}>{title}</Text>
+    </View>
+  );
+}
+
 export default function RootLayout() {
   const hydrate = useMobileStore((s) => s.hydrate);
   const hydrated = useMobileStore((s) => s.hydrated);
@@ -102,12 +110,10 @@ export default function RootLayout() {
   if (!hydrated) {
     return (
       <View style={styles.splashRoot}>
-        <View style={styles.splashLogo}>
-          <Text style={styles.splashLogoTxt}>CB</Text>
-        </View>
+        <BrandLogo size={88} darkBg />
         <Text style={styles.splashTitle}>CollegeBites</Text>
         <Text style={styles.splashSub}>Smart Campus Canteen Ordering &amp; Live QR Tokens</Text>
-        <ActivityIndicator size="large" color="#ffffff" style={{ marginTop: 22 }} />
+        <ActivityIndicator size="large" color="#fdedce" style={{ marginTop: 22 }} />
       </View>
     );
   }
@@ -120,9 +126,9 @@ export default function RootLayout() {
     <QueryClientProvider client={qc}>
       <Tabs
         screenOptions={{
-          headerStyle: { backgroundColor: "#0f172a" },
+          headerStyle: { backgroundColor: "#380106" },
           headerTintColor: "#ffffff",
-          tabBarActiveTintColor: "#ea580c",
+          tabBarActiveTintColor: "#76010d",
           tabBarInactiveTintColor: "#64748b",
         }}
       >
@@ -130,6 +136,7 @@ export default function RootLayout() {
           name="index"
           options={{
             title: "CollegeBites",
+            headerTitle: () => <BrandHeaderTitle title="CollegeBites" />,
             tabBarLabel: "Home",
             tabBarIcon: ({ color, size }) => <Ionicons name="restaurant-outline" size={size} color={color} />,
           }}
@@ -139,6 +146,7 @@ export default function RootLayout() {
           name="checkout"
           options={{
             title: "Cart & Checkout",
+            headerTitle: () => <BrandHeaderTitle title="Cart & Checkout" />,
             tabBarLabel: "Cart",
             tabBarIcon: ({ color, size }) => <Ionicons name="cart-outline" size={size} color={color} />,
           }}
@@ -147,6 +155,7 @@ export default function RootLayout() {
           name="orders"
           options={{
             title: "Orders & Tokens",
+            headerTitle: () => <BrandHeaderTitle title="Orders & Tokens" />,
             tabBarLabel: "Orders",
             tabBarIcon: ({ color, size }) => <Ionicons name="receipt-outline" size={size} color={color} />,
           }}
@@ -155,6 +164,7 @@ export default function RootLayout() {
           name="profile"
           options={{
             title: "Account & Settings",
+            headerTitle: () => <BrandHeaderTitle title="Account & Settings" />,
             tabBarLabel: "Profile",
             tabBarIcon: ({ color, size }) => <Ionicons name="person-outline" size={size} color={color} />,
           }}
@@ -169,37 +179,26 @@ export default function RootLayout() {
 }
 
 const styles = StyleSheet.create({
-  splashRoot: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#ea580c", padding: 24 },
-  splashLogo: {
-    width: 82,
-    height: 82,
-    borderRadius: 24,
-    backgroundColor: "#ffffff",
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 14,
-  },
-  splashLogoTxt: { color: "#ea580c", fontSize: 32, fontWeight: "900" },
-  splashTitle: { color: "#ffffff", fontSize: 28, fontWeight: "900", letterSpacing: 0.5 },
-  splashSub: { color: "#ffedd5", fontSize: 13, fontWeight: "600", marginTop: 6, textAlign: "center" },
-  onboardRoot: { flex: 1, backgroundColor: "#f8fafc", padding: 22, justifyContent: "space-between" },
+  splashRoot: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#76010d", padding: 24, gap: 10 },
+  splashTitle: { color: "#ffffff", fontSize: 28, fontWeight: "900", letterSpacing: 0.5, marginTop: 6 },
+  splashSub: { color: "#fdedce", fontSize: 13, fontWeight: "600", textAlign: "center" },
+  onboardRoot: { flex: 1, backgroundColor: "#fdf8f0", padding: 22, justifyContent: "space-between" },
   onboardTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingTop: 24 },
   brandRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  logoBadge: { width: 38, height: 38, borderRadius: 11, backgroundColor: "#ea580c", alignItems: "center", justifyContent: "center" },
-  logoText: { color: "#fff", fontWeight: "900", fontSize: 15 },
-  brandName: { fontSize: 18, fontWeight: "900", color: "#0f172a" },
-  skipBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: "#e2e8f0" },
-  skipText: { fontSize: 12, fontWeight: "800", color: "#334155" },
-  slideCard: { backgroundColor: "#fff", borderRadius: 24, padding: 28, alignItems: "center", gap: 14, borderWidth: 1, borderColor: "#e2e8f0" },
-  iconCircle: { width: 88, height: 88, borderRadius: 44, backgroundColor: "#fff7ed", alignItems: "center", justifyContent: "center" },
+  brandName: { fontSize: 18, fontWeight: "900", color: "#380106" },
+  headerTitleTxt: { color: "#ffffff", fontSize: 17, fontWeight: "800" },
+  skipBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: "#fdedce" },
+  skipText: { fontSize: 12, fontWeight: "800", color: "#76010d" },
+  slideCard: { backgroundColor: "#ffffff", borderRadius: 24, padding: 28, alignItems: "center", gap: 14, borderWidth: 1, borderColor: "#e7d7c9" },
+  iconCircle: { width: 88, height: 88, borderRadius: 44, backgroundColor: "#fdf8f0", alignItems: "center", justifyContent: "center" },
   slideTitle: { fontSize: 22, fontWeight: "900", color: "#0f172a", textAlign: "center" },
   slideBody: { fontSize: 14, color: "#475569", textAlign: "center", lineHeight: 21 },
   dots: { flexDirection: "row", gap: 6, marginTop: 8 },
   dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: "#cbd5e1" },
-  dotActive: { width: 22, backgroundColor: "#ea580c" },
+  dotActive: { width: 22, backgroundColor: "#76010d" },
   onboardFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingBottom: 16 },
   backBtn: { paddingHorizontal: 18, paddingVertical: 12, borderRadius: 12, backgroundColor: "#e2e8f0" },
   backTxt: { fontWeight: "800", color: "#0f172a" },
-  nextBtn: { paddingHorizontal: 24, paddingVertical: 13, borderRadius: 12, backgroundColor: "#ea580c" },
+  nextBtn: { paddingHorizontal: 24, paddingVertical: 13, borderRadius: 12, backgroundColor: "#76010d" },
   nextTxt: { fontWeight: "800", color: "#fff", fontSize: 14 },
 });

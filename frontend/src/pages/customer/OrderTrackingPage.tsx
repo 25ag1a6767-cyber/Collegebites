@@ -5,6 +5,7 @@ import { CheckCircle2, Clock, HelpCircle, PackageCheck, RefreshCw, Utensils, XCi
 import { api, buildWsUrl, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Order, ReceiptSnapshot } from "../../types";
+import { BrandLoadingState, BrandLogo } from "../../components/branding/BrandLogo";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
 import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
@@ -222,7 +223,7 @@ export const OrderTrackingPage: React.FC = () => {
   }
 
   if (!order) {
-    return <div className="py-16 text-center text-sm text-slate-500">Loading order details...</div>;
+    return <BrandLoadingState message="Loading order details..." />;
   }
 
   const currentStepIdx = STEPS.findIndex((s) => s.key === order.status);
@@ -233,29 +234,32 @@ export const OrderTrackingPage: React.FC = () => {
       {/* Status Banner */}
       <Card className="p-6 no-print">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <div className="text-xs font-bold uppercase text-slate-400">
-              {order.canteen_name} • {order.counter_name}
-            </div>
-            <h1 className="text-2xl font-extrabold text-slate-900">Order {order.order_number}</h1>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-600">
-              <Badge tone={order.payment_status === "CONFIRMED" ? "green" : "amber"}>
-                Payment: {order.payment_status}
-              </Badge>
-              <Badge tone={isTerminalFail ? "red" : order.status === "READY" ? "green" : "blue"}>
-                Status: {order.status}
-              </Badge>
-              {order.delayed_minutes > 0 && (
-                <Badge tone="amber">
-                  Delayed +{order.delayed_minutes}m ({order.delay_reason})
+          <div className="flex items-start gap-3">
+            <BrandLogo size="md" className="hidden sm:inline-flex mt-0.5" />
+            <div>
+              <div className="text-xs font-bold uppercase text-slate-400">
+                {order.canteen_name} • {order.counter_name}
+              </div>
+              <h1 className="text-2xl font-extrabold text-slate-900">Order {order.order_number}</h1>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                <Badge tone={order.payment_status === "CONFIRMED" ? "green" : "amber"}>
+                  Payment: {order.payment_status}
                 </Badge>
-              )}
+                <Badge tone={isTerminalFail ? "red" : order.status === "READY" ? "green" : "blue"}>
+                  Status: {order.status}
+                </Badge>
+                {order.delayed_minutes > 0 && (
+                  <Badge tone="amber">
+                    Delayed +{order.delayed_minutes}m ({order.delay_reason})
+                  </Badge>
+                )}
+              </div>
             </div>
           </div>
 
           {order.pickup_token_code && (
-            <div className="rounded-2xl bg-slate-900 px-6 py-3 text-center text-white">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-orange-300">Pickup Token</div>
+            <div className="rounded-2xl bg-[#380106] px-6 py-3 text-center text-white">
+              <div className="text-[10px] font-bold uppercase tracking-widest text-[#fdedce]">Pickup Token</div>
               <div className="text-4xl font-black tracking-wider">{order.pickup_token_code}</div>
             </div>
           )}

@@ -17,6 +17,7 @@ import {
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, FoodCategory, FoodItem } from "../../types";
+import { BrandEmptyState, BrandLoadingState, BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Modal, Select, crowdBadgeTone, useToast } from "../../components/ui/Primitives";
 
 export const HomePage: React.FC = () => {
@@ -246,14 +247,17 @@ export const HomePage: React.FC = () => {
 
       {/* Hero + Canteen Selector */}
       <div className="grid gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2 rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-orange-950 p-6 md:p-8 text-white shadow-lg">
-          <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold text-orange-200 mb-3">
-            <Flame className="h-3.5 w-3.5 text-orange-400" /> Skip the Canteen Line • Instant QR Token
+        <div className="lg:col-span-2 rounded-3xl bg-gradient-to-br from-[#2b0308] via-[#4a040c] to-[#76010d] p-6 md:p-8 text-white shadow-lg">
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <BrandLogo size="md" variant="dark" />
+            <div className="inline-flex items-center gap-2 rounded-full bg-white/15 px-3 py-1 text-xs font-semibold text-[#fdedce]">
+              <Flame className="h-3.5 w-3.5 text-[#fdedce]" /> Skip the Canteen Line • Instant QR Token
+            </div>
           </div>
           <h1 className="text-2xl md:text-4xl font-extrabold tracking-tight">
             Fresh Campus Meals, Zero Counter Chaos.
           </h1>
-          <p className="mt-2 max-w-xl text-sm text-slate-300">
+          <p className="mt-2 max-w-xl text-sm text-[#fdedce]/85">
             Select your campus canteen, customize dishes, pay securely via UPI/Card, and receive your live pickup token & printable receipt instantly.
           </p>
 
@@ -264,8 +268,8 @@ export const HomePage: React.FC = () => {
                   key={p.id}
                   className="inline-flex items-center gap-2 rounded-xl bg-white/10 border border-white/15 px-3 py-2 text-xs"
                 >
-                  <Tag className="h-3.5 w-3.5 text-orange-300" />
-                  <span className="font-bold text-orange-200">{p.badge_text || "OFFER"}</span>
+                  <Tag className="h-3.5 w-3.5 text-[#fdedce]" />
+                  <span className="font-bold text-[#fdedce]">{p.badge_text || "OFFER"}</span>
                   <span>{p.title}</span>
                 </div>
               ))}
@@ -286,7 +290,7 @@ export const HomePage: React.FC = () => {
                     type="button"
                     onClick={() => setSelectedCanteen(c.id)}
                     className={`w-full rounded-xl border p-3 text-left transition ${
-                      isSelected ? "border-orange-500 bg-orange-50/70" : "border-slate-200 hover:bg-slate-50"
+                      isSelected ? "border-[#76010d] bg-[#fdf8f0]" : "border-slate-200 hover:bg-slate-50"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -313,7 +317,7 @@ export const HomePage: React.FC = () => {
       {recommended.length > 0 && (
         <div>
           <div className="mb-3 flex items-center gap-2">
-            <Sparkles className="h-5 w-5 text-orange-600" />
+            <Sparkles className="h-5 w-5 text-[#76010d]" />
             <h2 className="text-lg font-extrabold text-slate-900">Recommended Right Now</h2>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -321,7 +325,7 @@ export const HomePage: React.FC = () => {
               <Card
                 key={item.id}
                 onClick={() => openItemModal(item)}
-                className="flex cursor-pointer items-center gap-3 p-3 transition hover:border-orange-400 hover:shadow-md"
+                className="flex cursor-pointer items-center gap-3 p-3 transition hover:border-[#76010d]/60 hover:shadow-md"
               >
                 <img
                   src={item.images[0]?.image_url || "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=300"}
@@ -406,7 +410,7 @@ export const HomePage: React.FC = () => {
               type="button"
               onClick={() => setActiveTag(tag)}
               className={`rounded-full px-3 py-1 text-xs font-semibold capitalize ${
-                activeTag === tag ? "bg-orange-600 text-white" : "bg-orange-50 text-orange-700"
+                activeTag === tag ? "bg-[#76010d] text-white" : "bg-[#fdf8f0] text-[#76010d] border border-[#76010d]/20"
               }`}
             >
               {tag === "special" ? "Today's Special" : tag}
@@ -417,9 +421,12 @@ export const HomePage: React.FC = () => {
 
       {/* Food Grid */}
       {itemsLoading ? (
-        <div className="py-12 text-center text-sm text-slate-500">Loading canteen menu...</div>
+        <BrandLoadingState message="Loading canteen menu..." />
       ) : items.length === 0 ? (
-        <Card className="p-10 text-center text-slate-500">No dishes matched your filters in {activeCanteen?.name}.</Card>
+        <BrandEmptyState
+          title={`No dishes matched your filters in ${activeCanteen?.name || "this canteen"}`}
+          description="Try clearing search keywords or switching category filters."
+        />
       ) : (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {items.map((item, idx) => {
@@ -458,7 +465,7 @@ export const HomePage: React.FC = () => {
                     <div>
                       <div className="flex items-start justify-between gap-2">
                         <h3 className="font-bold text-slate-900">{item.name}</h3>
-                        <span className="shrink-0 font-extrabold text-orange-600">₹{item.base_price}</span>
+                        <span className="shrink-0 font-extrabold text-[#76010d]">₹{item.base_price}</span>
                       </div>
                       <p className="mt-1 line-clamp-2 text-xs text-slate-500">{item.description}</p>
                       <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
@@ -514,7 +521,7 @@ export const HomePage: React.FC = () => {
         <div className="fixed bottom-4 left-1/2 z-30 -translate-x-1/2 w-[94%] max-w-xl no-print">
           <div className="flex items-center justify-between rounded-2xl bg-slate-900 px-5 py-3.5 text-white shadow-2xl">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-orange-600 font-bold">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#76010d] font-bold">
                 <ShoppingBag className="h-5 w-5" />
               </div>
               <div>
@@ -580,7 +587,7 @@ export const HomePage: React.FC = () => {
                           !v.is_available
                             ? "border-slate-100 bg-slate-50 text-slate-400 line-through cursor-not-allowed"
                             : selVariantId === v.id
-                            ? "border-orange-600 bg-orange-50 text-orange-900"
+                            ? "border-[#76010d] bg-[#fdf8f0] text-[#380106]"
                             : "border-slate-200"
                         }`}
                       >
@@ -606,7 +613,7 @@ export const HomePage: React.FC = () => {
                       type="button"
                       onClick={() => setSelSpice(sp)}
                       className={`rounded-full px-3 py-1 text-xs font-bold ${
-                        selSpice === sp ? "bg-orange-600 text-white" : "bg-slate-100 text-slate-700"
+                        selSpice === sp ? "bg-[#76010d] text-white" : "bg-slate-100 text-slate-700"
                       }`}
                     >
                       {sp}
@@ -626,7 +633,7 @@ export const HomePage: React.FC = () => {
                       type="button"
                       onClick={() => setSelSugar(sg)}
                       className={`rounded-full px-3 py-1 text-xs font-bold ${
-                        selSugar === sg ? "bg-orange-600 text-white" : "bg-slate-100 text-slate-700"
+                        selSugar === sg ? "bg-[#76010d] text-white" : "bg-slate-100 text-slate-700"
                       }`}
                     >
                       {sg}

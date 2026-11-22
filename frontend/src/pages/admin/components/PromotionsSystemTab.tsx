@@ -27,7 +27,7 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
     <div className="grid gap-6 md:grid-cols-2">
       <Card className="p-5 space-y-3">
         <h2 className="font-bold text-slate-900 flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-orange-600" /> Highlight Banners & Combos ({promos.length})
+          <Sparkles className="h-4 w-4 text-[#76010d]" /> Highlight Banners & Combos ({promos.length})
         </h2>
         <div className="grid grid-cols-2 gap-2">
           <Input value={promoTitle} onChange={(e) => setPromoTitle(e.target.value)} placeholder="Banner title (Fresh Lunch Bowl)" />
@@ -66,7 +66,7 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
         <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
           {promos.length === 0 && <div className="text-slate-500">No active highlight banners configured.</div>}
           {promos.map((p) => (
-            <div key={p.id} className="flex items-center justify-between gap-2 rounded-lg bg-orange-50/70 p-2">
+            <div key={p.id} className="flex items-center justify-between gap-2 rounded-lg bg-[#fdf8f0] border border-[#76010d]/15 p-2">
               <div>
                 <div className="font-bold text-slate-900">
                   {p.badge_text ? `[${p.badge_text}] ` : ""}{p.title}

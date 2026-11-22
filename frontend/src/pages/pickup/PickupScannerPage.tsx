@@ -5,6 +5,7 @@ import { AlertTriangle, Camera, CheckCircle2, QrCode, ShieldAlert, XCircle } fro
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
 
 export const PickupScannerPage: React.FC = () => {
@@ -141,12 +142,12 @@ export const PickupScannerPage: React.FC = () => {
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6 space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 p-4 text-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#380106] p-4 text-white">
         <div className="flex items-center gap-3">
-          <QrCode className="h-7 w-7 text-emerald-400" />
+          <BrandLogo size="md" variant="dark" />
           <div>
             <h1 className="text-xl font-extrabold">QR Pickup Verification & Handover</h1>
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-[#fdedce]/80">
               Scanning verifies authenticity separately — staff must explicitly confirm food handover.
             </p>
           </div>

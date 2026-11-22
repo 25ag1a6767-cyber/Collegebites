@@ -141,7 +141,7 @@ export default function SupportScreen() {
           onChangeText={setDescription}
           placeholder="Describe what happened..."
         />
-        {Boolean(statusMsg) && <Text style={{ color: "#ea580c", fontWeight: "700", fontSize: 12 }}>{statusMsg}</Text>}
+        {Boolean(statusMsg) && <Text style={{ color: "#76010d", fontWeight: "700", fontSize: 12 }}>{statusMsg}</Text>}
         <Pressable disabled={busy} onPress={submitTicket} style={styles.btn}>
           <Text style={styles.btnTxt}>{busy ? "Submitting..." : "Submit Ticket"}</Text>
         </Pressable>
@@ -211,7 +211,7 @@ export default function SupportScreen() {
             <Pressable
               key={t.id}
               onPress={() => (user ? setSelectedId(t.id) : void loadGuestThread(t.id))}
-              style={[styles.ticketRow, selectedId === t.id && { borderColor: "#ea580c", backgroundColor: "#fff7ed" }]}
+              style={[styles.ticketRow, selectedId === t.id && { borderColor: "#76010d", backgroundColor: "#fdf8f0" }]}
             >
               <Text style={{ fontWeight: "800", fontSize: 13 }}>{t.ticket_number} • {t.subject}</Text>
               <Text style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
@@ -255,7 +255,7 @@ const styles = StyleSheet.create({
   catPillActive: { backgroundColor: "#0f172a" },
   catTxt: { fontSize: 11, fontWeight: "700", color: "#334155" },
   input: { backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
-  btn: { backgroundColor: "#ea580c", borderRadius: 10, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
+  btn: { backgroundColor: "#76010d", borderRadius: 10, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
   btnTxt: { color: "#fff", fontWeight: "800" },
   ticketRow: { borderWidth: 1, borderColor: "#e2e8f0", borderRadius: 10, padding: 10 },
   msgBubble: { backgroundColor: "#f1f5f9", borderRadius: 8, padding: 8 },

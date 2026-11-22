@@ -7,6 +7,7 @@ import { cartApi } from "../src/api/cart.api";
 import { getMobileApiError } from "../src/api/client";
 import { ordersApi } from "../src/api/orders.api";
 import { useMobileStore } from "../src/store/useMobileStore";
+import { BrandLogo } from "../src/components/BrandLogo";
 
 export default function OrdersScreen() {
   const router = useRouter();
@@ -227,9 +228,12 @@ export default function OrdersScreen() {
         contentContainerStyle={{ gap: 10, paddingBottom: 30 }}
         ListEmptyComponent={
           user && !isLoading ? (
-            <Text style={{ textAlign: "center", color: "#64748b", marginTop: 20, fontSize: 13 }}>
-              No orders placed yet. Explore the menu to place your first order.
-            </Text>
+            <View style={{ alignItems: "center", gap: 10, marginTop: 24, paddingHorizontal: 16 }}>
+              <BrandLogo size={52} />
+              <Text style={{ textAlign: "center", color: "#5d010a", fontWeight: "700", fontSize: 13 }}>
+                No orders placed yet. Explore the menu to place your first order.
+              </Text>
+            </View>
           ) : null
         }
         renderItem={({ item }) => (
@@ -256,17 +260,17 @@ export default function OrdersScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f8fafc", padding: 16 },
+  container: { flex: 1, backgroundColor: "#fdf8f0", padding: 16 },
   topBar: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
   title: { fontSize: 20, fontWeight: "800", color: "#0f172a" },
-  boardBtn: { backgroundColor: "#0f172a", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
-  lookupBox: { backgroundColor: "#fff", borderRadius: 12, padding: 10, gap: 6, marginBottom: 12, borderWidth: 1, borderColor: "#e2e8f0" },
-  input: { backgroundColor: "#f8fafc", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, fontSize: 12 },
-  goBtn: { backgroundColor: "#ea580c", borderRadius: 8, paddingHorizontal: 12, justifyContent: "center", paddingVertical: 6 },
-  card: { backgroundColor: "#fff", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" },
+  boardBtn: { backgroundColor: "#380106", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
+  lookupBox: { backgroundColor: "#fff", borderRadius: 12, padding: 10, gap: 6, marginBottom: 12, borderWidth: 1, borderColor: "#e7d7c9" },
+  input: { backgroundColor: "#fdf8f0", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, fontSize: 12 },
+  goBtn: { backgroundColor: "#76010d", borderRadius: 8, paddingHorizontal: 12, justifyContent: "center", paddingVertical: 6 },
+  card: { backgroundColor: "#fff", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: "#e7d7c9" },
   reorderBtn: { backgroundColor: "#f1f5f9", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: "#cbd5e1" },
   ordNo: { fontWeight: "800", fontSize: 15, color: "#0f172a" },
-  token: { fontWeight: "900", fontSize: 15, color: "#ea580c" },
+  token: { fontWeight: "900", fontSize: 15, color: "#76010d" },
   meta: { fontSize: 12, color: "#64748b", marginTop: 4 },
   errBox: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fee2e2", borderRadius: 10, padding: 10, marginBottom: 8 },
   errTxt: { flex: 1, color: "#991b1b", fontSize: 12, fontWeight: "700" },

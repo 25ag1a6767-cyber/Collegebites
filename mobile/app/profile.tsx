@@ -11,6 +11,7 @@ import { getMobileApiError } from "../src/api/client";
 import { notificationsApi } from "../src/api/notifications.api";
 import { profileApi } from "../src/api/profile.api";
 import { registerExpoPushToken } from "../src/notifications/registerPush";
+import { BrandLogo } from "../src/components/BrandLogo";
 import { useMobileStore } from "../src/store/useMobileStore";
 
 const DIETARY_OPTS = [
@@ -217,8 +218,13 @@ export default function ProfileScreen() {
       <ScrollView style={styles.container} contentContainerStyle={{ gap: 12, paddingBottom: 40 }}>
         {policyModal}
         <View style={styles.card}>
-          <Text style={styles.title}>{user.full_name}</Text>
-          <Text style={styles.sub}>{user.email || user.phone}</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <BrandLogo size={42} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.title}>{user.full_name}</Text>
+              <Text style={styles.sub}>{user.email || user.phone}</Text>
+            </View>
+          </View>
           <TextInput style={styles.input} value={fullName} onChangeText={setFullName} placeholder="Full Name" />
           <TextInput style={styles.input} value={phoneInput} onChangeText={setPhoneInput} placeholder="Mobile (+91...)" />
           <TextInput style={styles.input} value={collegeId} onChangeText={setCollegeId} placeholder="College ID / Roll No" />
@@ -267,7 +273,7 @@ export default function ProfileScreen() {
           {Boolean(msg) && <Text style={{ color: "#059669", fontWeight: "700", fontSize: 12 }}>{msg}</Text>}
         </View>
 
-        <View style={[styles.card, { backgroundColor: "#fff7ed", borderColor: "#fed7aa" }]}>
+        <View style={[styles.card, { backgroundColor: "#fdf8f0", borderColor: "#76010d" }]}>
           <Text style={styles.secTitle}>
             Loyalty: {loyalty?.points_balance || 0} pts ({loyalty?.tier_level || "BRONZE"})
           </Text>
@@ -336,7 +342,7 @@ export default function ProfileScreen() {
                   {f.name} • ₹{f.base_price}
                 </Text>
                 <Pressable onPress={() => router.push("/")}>
-                  <Text style={{ color: "#ea580c", fontWeight: "800", fontSize: 12 }}>Order</Text>
+                  <Text style={{ color: "#76010d", fontWeight: "800", fontSize: 12 }}>Order</Text>
                 </Pressable>
               </View>
             ))
@@ -357,7 +363,7 @@ export default function ProfileScreen() {
                   }
                 }}
               >
-                <Text style={{ fontSize: 11, color: "#ea580c", fontWeight: "800" }}>Mark All Read</Text>
+                <Text style={{ fontSize: 11, color: "#76010d", fontWeight: "800" }}>Mark All Read</Text>
               </Pressable>
             )}
           </View>
@@ -376,7 +382,7 @@ export default function ProfileScreen() {
                     }
                   }}
                 >
-                  <Text style={{ fontSize: 11, color: "#ea580c", fontWeight: "700", marginTop: 2 }}>Mark Read</Text>
+                  <Text style={{ fontSize: 11, color: "#76010d", fontWeight: "700", marginTop: 2 }}>Mark Read</Text>
                 </Pressable>
               )}
             </View>
@@ -479,7 +485,10 @@ export default function ProfileScreen() {
 
       {mode === "login" ? (
         <View style={styles.card}>
-          <Text style={styles.title}>Universal Campus Sign In</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <BrandLogo size={40} />
+            <Text style={styles.title}>Universal Campus Sign In</Text>
+          </View>
           <View style={styles.tabRow}>
             <Pressable
               onPress={() => {
@@ -646,14 +655,17 @@ export default function ProfileScreen() {
                 <Text style={{ color: "#fff", fontWeight: "800" }}>{busy ? "Signing in..." : "Sign In"}</Text>
               </Pressable>
               <Pressable onPress={() => setResetMode(true)}>
-                <Text style={{ color: "#ea580c", fontSize: 12, fontWeight: "700", textAlign: "right" }}>Forgot Password?</Text>
+                <Text style={{ color: "#76010d", fontSize: 12, fontWeight: "700", textAlign: "right" }}>Forgot Password?</Text>
               </Pressable>
             </>
           )}
         </View>
       ) : (
         <View style={styles.card}>
-          <Text style={styles.title}>Universal Customer Account</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <BrandLogo size={40} />
+            <Text style={styles.title}>Universal Customer Account</Text>
+          </View>
           <Text style={styles.sub}>One account for students, faculty &amp; campus visitors.</Text>
           <Controller
             control={regControl}
@@ -750,24 +762,24 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f8fafc", padding: 16 },
+  container: { flex: 1, backgroundColor: "#fdf8f0", padding: 16 },
   title: { fontSize: 19, fontWeight: "800", color: "#0f172a" },
   secTitle: { fontSize: 14, fontWeight: "800", color: "#0f172a" },
   sub: { fontSize: 12, color: "#475569", lineHeight: 18 },
-  card: { backgroundColor: "#fff", borderRadius: 14, padding: 14, gap: 10, borderWidth: 1, borderColor: "#e2e8f0" },
+  card: { backgroundColor: "#fff", borderRadius: 14, padding: 14, gap: 10, borderWidth: 1, borderColor: "#e7d7c9" },
   input: { backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9 },
   fieldErr: { fontSize: 11, color: "#dc2626", fontWeight: "700" },
-  btn: { backgroundColor: "#ea580c", borderRadius: 10, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
-  btnAlt: { backgroundColor: "#334155", borderRadius: 10, paddingVertical: 12, alignItems: "center" },
-  logoutBtn: { backgroundColor: "#0f172a", borderRadius: 10, padding: 13, alignItems: "center" },
-  policyBtn: { backgroundColor: "#e2e8f0", borderRadius: 10, padding: 12, alignItems: "center" },
-  closeBtn: { backgroundColor: "#e2e8f0", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
+  btn: { backgroundColor: "#76010d", borderRadius: 10, paddingVertical: 12, alignItems: "center", justifyContent: "center" },
+  btnAlt: { backgroundColor: "#380106", borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+  logoutBtn: { backgroundColor: "#380106", borderRadius: 10, padding: 13, alignItems: "center" },
+  policyBtn: { backgroundColor: "#fdedce", borderRadius: 10, padding: 12, alignItems: "center" },
+  closeBtn: { backgroundColor: "#fdedce", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
   prefRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   prefPill: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14, backgroundColor: "#f1f5f9", borderWidth: 1, borderColor: "#cbd5e1" },
-  prefPillActive: { backgroundColor: "#ea580c", borderColor: "#ea580c" },
+  prefPillActive: { backgroundColor: "#76010d", borderColor: "#76010d" },
   notifRow: { borderBottomWidth: 1, borderBottomColor: "#f1f5f9", paddingBottom: 6 },
   tabRow: { flexDirection: "row", gap: 8 },
-  tabBtn: { flex: 1, backgroundColor: "#e2e8f0", borderRadius: 10, paddingVertical: 10, alignItems: "center" },
-  tabBtnActive: { backgroundColor: "#0f172a" },
-  tabTxt: { fontWeight: "800", color: "#334155" },
+  tabBtn: { flex: 1, backgroundColor: "#fdedce", borderRadius: 10, paddingVertical: 10, alignItems: "center" },
+  tabBtnActive: { backgroundColor: "#380106" },
+  tabTxt: { fontWeight: "800", color: "#5d010a" },
 });

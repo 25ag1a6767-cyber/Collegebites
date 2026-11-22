@@ -5,6 +5,7 @@ import { ArrowLeft, Volume2, VolumeX } from "lucide-react";
 import { api, buildWsUrl } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Button, Select } from "../../components/ui/Primitives";
 
 export const TokenBoardPage: React.FC = () => {
@@ -63,8 +64,9 @@ export const TokenBoardPage: React.FC = () => {
           <Link to="/" className="rounded-xl bg-slate-800 p-2 text-slate-300 hover:text-white">
             <ArrowLeft className="h-5 w-5" />
           </Link>
+          <BrandLogo size="md" variant="dark" />
           <div>
-            <div className="text-xs font-bold uppercase tracking-widest text-orange-400">COLLEGEBITES LIVE STATUS</div>
+            <div className="text-xs font-bold uppercase tracking-widest text-[#fdedce]">COLLEGEBITES LIVE STATUS</div>
             <h1 className="text-3xl font-black tracking-tight">{board?.canteen_name || "Canteen Display Board"}</h1>
           </div>
         </div>

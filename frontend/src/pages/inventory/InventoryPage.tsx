@@ -9,7 +9,6 @@ import {
   Edit3,
   History,
   IndianRupee,
-  Package,
   Plus,
   RotateCcw,
   Search,
@@ -17,11 +16,11 @@ import {
   Trash2,
   Truck,
   Upload,
-  UtensilsCrossed,
 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 
 type SectionTab = "all" | "items" | "menu" | "stock" | "pricing" | "suppliers" | "recipes" | "audit";
@@ -314,12 +313,12 @@ export const InventoryPage: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Header Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-slate-900 p-5 text-white">
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-[#380106] p-5 text-white">
         <div className="flex items-center gap-3">
-          <Package className="h-7 w-7 text-orange-400" />
+          <BrandLogo size="md" variant="dark" />
           <div>
             <h1 className="text-xl font-extrabold">Inventory Manager Portal</h1>
-            <p className="text-xs text-slate-300">
+            <p className="text-xs text-[#fdedce]/80">
               Real-time stock control, damaged/expired loss tracking, supplier POs, approval-gated selling prices & audit logs
             </p>
           </div>
@@ -661,7 +660,7 @@ export const InventoryPage: React.FC = () => {
           {/* 3.3 Add New Inventory Item */}
           <Card className="p-5 space-y-2.5">
             <h2 className="font-bold text-slate-900 flex items-center gap-2">
-              <Plus className="h-4 w-4 text-orange-600" /> Add Inventory Item
+              <Plus className="h-4 w-4 text-[#76010d]" /> Add Inventory Item
             </h2>
             <Input value={ingName} onChange={(e) => setIngName(e.target.value)} placeholder="Item Name (e.g. Mozzarella Cheese)" />
             <div className="grid grid-cols-2 gap-2">
@@ -900,7 +899,7 @@ export const InventoryPage: React.FC = () => {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="font-bold text-slate-900 flex items-center gap-2">
-                <IndianRupee className="h-4 w-4 text-orange-600" /> Price Management & Selling Price Approvals
+                <IndianRupee className="h-4 w-4 text-[#76010d]" /> Price Management &amp; Selling Price Approvals
               </h2>
               <p className="text-xs text-slate-500">
                 Purchase/cost updates apply immediately. Selling-price changes require Canteen Manager / College Admin approval before going live on menus; historical order prices never change.
@@ -954,8 +953,8 @@ export const InventoryPage: React.FC = () => {
             </div>
 
             {/* Selling Price Change Request Form */}
-            <div className="rounded-xl border border-orange-200 bg-orange-50/40 p-4 space-y-2.5">
-              <div className="text-xs font-extrabold uppercase text-orange-900">
+            <div className="rounded-xl border border-[#76010d]/25 bg-[#fdf8f0] p-4 space-y-2.5">
+              <div className="text-xs font-extrabold uppercase text-[#76010d]">
                 2. Request Menu Selling Price Change (Approval-Gated)
               </div>
               <Select value={sellFoodId || menuItems[0]?.id || ""} onChange={(e) => setSellFoodId(e.target.value)}>
@@ -1326,7 +1325,7 @@ export const InventoryPage: React.FC = () => {
           <Card className="p-5 lg:col-span-2 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <UtensilsCrossed className="h-4 w-4 text-orange-600" />
+                <BrandLogo size="xs" />
                 <h2 className="font-bold text-slate-900">Customer Menu Catalog ({menuItems.length})</h2>
               </div>
               <Badge tone="amber">Selling Price Changes Approval-Gated</Badge>

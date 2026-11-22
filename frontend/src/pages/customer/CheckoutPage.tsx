@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, CreditCard, ShieldAlert, Trash2 } from "lu
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings, Order } from "../../types";
+import { BrandEmptyState, BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
 import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
 import { openRazorpayModal } from "../../utils/razorpay";
@@ -266,22 +267,23 @@ export const CheckoutPage: React.FC = () => {
   return (
     <>
       {!cart || cart.items.length === 0 ? (
-        <div className="mx-auto max-w-xl px-4 py-14 text-center">
-          <Card className="p-8 space-y-4">
-            <h1 className="text-2xl font-extrabold text-slate-900">
-              {pendingOrder ? "Complete Your Payment" : "Your Cart is Empty"}
-            </h1>
-            <p className="text-sm text-slate-600">
-              {pendingOrder
+        <div className="mx-auto max-w-xl px-4 py-14">
+          <BrandEmptyState
+            title={pendingOrder ? "Complete Your Payment" : "Your Cart is Empty"}
+            description={
+              pendingOrder
                 ? `Order ${pendingOrder.order_number} is created and awaiting payment verification.`
-                : "Browse our campus canteens and add delicious items first."}
-            </p>
-            {!pendingOrder && <Button onClick={() => navigate("/")}>Explore Menu</Button>}
-          </Card>
+                : "Browse our campus canteens and add delicious items first."
+            }
+            action={!pendingOrder ? <Button onClick={() => navigate("/")}>Explore Menu</Button> : undefined}
+          />
         </div>
       ) : (
         <div className="mx-auto max-w-6xl px-4 py-6">
-      <h1 className="mb-6 text-2xl font-extrabold text-slate-900">Checkout • {activeCanteen?.name}</h1>
+      <div className="mb-6 flex items-center gap-3">
+        <BrandLogo size="sm" />
+        <h1 className="text-2xl font-extrabold text-slate-900">Checkout • {activeCanteen?.name}</h1>
+      </div>
 
       {cart.validation_errors.length > 0 && (
         <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
@@ -314,7 +316,7 @@ export const CheckoutPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setNoteModalItem({ id: it.id, note: it.special_instructions || "" })}
-                    className="mt-0.5 text-[11px] font-semibold text-orange-600 hover:underline"
+                    className="mt-0.5 text-[11px] font-semibold text-[#76010d] hover:underline"
                   >
                     {it.special_instructions ? "Edit note" : "+ Add kitchen note"}
                   </button>
@@ -443,10 +445,10 @@ export const CheckoutPage: React.FC = () => {
                         type="button"
                         onClick={() => setPaymentMethod("razorpay")}
                         className={`rounded-xl border p-3 text-left text-xs font-bold ${
-                          paymentMethod === "razorpay" ? "border-orange-600 bg-orange-50 text-orange-900" : "border-slate-200"
+                          paymentMethod === "razorpay" ? "border-[#76010d] bg-[#fdf8f0] text-[#380106]" : "border-slate-200"
                         }`}
                       >
-                        <CreditCard className="h-4 w-4 mb-1 text-orange-600" />
+                        <CreditCard className="h-4 w-4 mb-1 text-[#76010d]" />
                         Razorpay Online
                         <div className="font-normal text-slate-500">Direct UPI Apps (GPay, PhonePe, Paytm) & UPI QR</div>
                       </button>
@@ -477,8 +479,8 @@ export const CheckoutPage: React.FC = () => {
             <h2 className="font-bold text-slate-900">Bill Summary (Server Verified)</h2>
 
             {user && (loyalty?.points_balance || 0) > 0 && (
-              <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-3 text-xs space-y-1.5">
-                <div className="flex items-center justify-between font-bold text-orange-950">
+              <div className="rounded-xl border border-[#76010d]/25 bg-[#fdf8f0] p-3 text-xs space-y-1.5">
+                <div className="flex items-center justify-between font-bold text-[#380106]">
                   <span>Redeem Loyalty Points</span>
                   <span>Avail: {loyalty.points_balance} pts (4 pts = ₹1)</span>
                 </div>
@@ -601,10 +603,13 @@ export const CheckoutPage: React.FC = () => {
       >
         {pendingOrder && pendingOrder.payment_method !== "stripe" && (
           <div className="space-y-4" data-order-id={pendingOrder.id} data-order-number={pendingOrder.order_number}>
-            <div className="rounded-xl bg-slate-900 p-4 text-white flex items-center justify-between">
-              <div>
-                <div className="text-xs text-slate-400">CollegeBites • {pendingOrder.order_number}</div>
-                <div className="text-2xl font-extrabold">₹{pendingOrder.total_amount}</div>
+            <div className="rounded-xl bg-[#380106] p-4 text-white flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <BrandLogo size="sm" variant="dark" />
+                <div>
+                  <div className="text-xs text-[#fdedce]/80">CollegeBites • {pendingOrder.order_number}</div>
+                  <div className="text-2xl font-extrabold">₹{pendingOrder.total_amount}</div>
+                </div>
               </div>
               <Badge tone="amber">RZP: {pendingOrder.razorpay_order_id}</Badge>
             </div>

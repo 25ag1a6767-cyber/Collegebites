@@ -40,7 +40,7 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
       <Card className="p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="font-bold text-slate-900 flex items-center gap-2">
-            <ClipboardList className="h-4 w-4 text-orange-600" /> All Campus Orders ({orders.length})
+            <ClipboardList className="h-4 w-4 text-[#76010d]" /> All Campus Orders ({orders.length})
           </h2>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600 cursor-pointer">

@@ -153,7 +153,7 @@ export const StaffTab: React.FC<{ activeCanteenId: string; staffList: any[]; ref
         <Card className="p-5 space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="font-bold text-slate-900 flex items-center gap-2">
-              <Users className="h-4 w-4 text-orange-600" /> Staff Directory ({staffList.length})
+              <Users className="h-4 w-4 text-[#76010d]" /> Staff Directory ({staffList.length})
             </h2>
             <div className="flex gap-2">
               <Button
@@ -307,7 +307,7 @@ export const StaffTab: React.FC<{ activeCanteenId: string; staffList: any[]; ref
       <div className="grid gap-5 md:grid-cols-2">
         <Card className="p-5 space-y-3">
           <h2 className="font-bold text-slate-900 flex items-center gap-2">
-            <Calendar className="h-4 w-4 text-orange-600" /> Staff Shift Roster ({shifts.length})
+            <Calendar className="h-4 w-4 text-[#76010d]" /> Staff Shift Roster ({shifts.length})
           </h2>
           <div className="grid grid-cols-2 gap-2 text-xs">
             <Select value={shiftUserId} onChange={(e) => setShiftUserId(e.target.value)}>

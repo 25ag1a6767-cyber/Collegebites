@@ -415,7 +415,7 @@ export const MenuTab: React.FC<{
       </Card>
 
       {/* Selling Price Approval Queue (from Inventory Manager requests) */}
-      <Card className="p-4 space-y-2.5 border-orange-200 bg-orange-50/30">
+      <Card className="p-4 space-y-2.5 border-[#76010d]/25 bg-[#fdf8f0]">
         <div className="font-bold text-slate-900 flex items-center justify-between">
           <span>Pending Menu Selling Price Approvals ({pendingPriceRequests.length})</span>
           <Badge tone={pendingPriceRequests.length > 0 ? "amber" : "green"}>
@@ -429,12 +429,12 @@ export const MenuTab: React.FC<{
             {pendingPriceRequests.map((req) => (
               <div
                 key={req.id}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-orange-200 bg-white p-3"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#76010d]/20 bg-white p-3"
               >
                 <div>
                   <div className="font-bold text-slate-900">{req.food_item_name || "Menu Item"}</div>
                   <div className="text-slate-600">
-                    ₹{req.old_price} → <strong className="text-orange-700">₹{req.new_price}</strong> • {req.reason} (Requested by{" "}
+                    ₹{req.old_price} → <strong className="text-[#76010d]">₹{req.new_price}</strong> • {req.reason} (Requested by{" "}
                     {req.requested_by_name || "Inventory Manager"})
                   </div>
                 </div>
@@ -486,7 +486,7 @@ export const MenuTab: React.FC<{
       {/* Menu Schedules Management */}
       <Card className="p-4 space-y-3">
         <div className="font-bold text-slate-900 flex items-center gap-2">
-          <CalendarClock className="h-4 w-4 text-orange-600" /> Time-Based Menu Schedules ({schedules.length})
+          <CalendarClock className="h-4 w-4 text-[#76010d]" /> Time-Based Menu Schedules ({schedules.length})
         </div>
         <div className="flex flex-wrap gap-2 items-center">
           <Input value={schedName} onChange={(e) => setSchedName(e.target.value)} placeholder="Breakfast Menu (7:30-11:00)" className="w-52" />

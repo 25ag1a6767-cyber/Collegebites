@@ -88,7 +88,7 @@ export default function BoardScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#0f172a", padding: 16 },
   pill: { backgroundColor: "#1e293b", paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, marginRight: 8 },
-  pillActive: { backgroundColor: "#ea580c" },
+  pillActive: { backgroundColor: "#76010d" },
   pillTxt: { color: "#cbd5e1", fontWeight: "700", fontSize: 12 },
   header: { color: "#fbbf24", fontWeight: "900", fontSize: 15, letterSpacing: 1 },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },

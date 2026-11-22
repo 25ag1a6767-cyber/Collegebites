@@ -3,6 +3,7 @@ import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Navbar } from "./components/layout/Navbar";
 import { MobileAppNav } from "./components/layout/MobileAppNav";
+import { BrandFooter, BrandLogo } from "./components/branding/BrandLogo";
 import { Button, Card, ToastProvider } from "./components/ui/Primitives";
 import { useAppStore } from "./store/useAppStore";
 import { AuthPage } from "./pages/auth/AuthPage";
@@ -36,6 +37,7 @@ const RequireRole: React.FC<{ allowed: string[]; children: React.ReactNode }> = 
     return (
       <div className="mx-auto max-w-md px-4 py-14">
         <Card className="p-6 text-center space-y-3">
+          <BrandLogo size="md" className="mx-auto" />
           <div className="text-lg font-extrabold text-slate-900">Staff Sign-In Required</div>
           <p className="text-xs text-slate-500">Sign in with an authorized campus staff account to access this workspace.</p>
           <Link to="/login">
@@ -51,6 +53,7 @@ const RequireRole: React.FC<{ allowed: string[]; children: React.ReactNode }> = 
     return (
       <div className="mx-auto max-w-md px-4 py-14">
         <Card className="p-6 text-center space-y-3">
+          <BrandLogo size="md" className="mx-auto" />
           <div className="text-lg font-extrabold text-slate-900">Access Restricted</div>
           <p className="text-xs text-slate-500">
             Your account does not hold the required role ({allowed.join(", ")}) for this workspace.
@@ -70,9 +73,10 @@ export function App() {
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
         <BrowserRouter>
-          <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 md:pb-6">
+          <div className="min-h-screen flex flex-col bg-[#fdf8f0]/40 text-slate-900 pb-20 md:pb-0">
             <Navbar />
-            <Routes>
+            <div className="flex-1">
+              <Routes>
               <Route path="/" element={<HomePage />} />
               <Route path="/canteen/:canteenSlug" element={<HomePage />} />
               <Route path="/login" element={<AuthPage initialMode="login" />} />
@@ -137,6 +141,8 @@ export function App() {
               <Route path="/kiosk" element={<KioskPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
+            </div>
+            <BrandFooter />
             <MobileAppNav />
           </div>
         </BrowserRouter>

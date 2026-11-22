@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { LifeBuoy, MessageSquare, Send } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
 
 export const SupportPage: React.FC = () => {
@@ -115,7 +116,8 @@ export const SupportPage: React.FC = () => {
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
       <div className="flex items-center gap-3">
-        <LifeBuoy className="h-7 w-7 text-orange-600" />
+        <BrandLogo size="md" />
+        <LifeBuoy className="h-6 w-6 text-[#76010d]" />
         <div>
           <h1 className="text-2xl font-extrabold text-slate-900">Customer Support & Feedback</h1>
           <p className="text-xs text-slate-500">
@@ -166,7 +168,7 @@ export const SupportPage: React.FC = () => {
                 rows={4}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                className="w-full rounded-xl border border-slate-300 p-3 text-sm focus:border-orange-500 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 p-3 text-sm focus:border-[#76010d] focus:outline-none"
                 placeholder="Describe what happened with your order..."
               />
             </div>
@@ -268,7 +270,7 @@ export const SupportPage: React.FC = () => {
                   type="button"
                   onClick={() => (user ? setSelectedTicketId(t.id) : void loadGuestThread(t.id))}
                   className={`w-full rounded-xl border p-3 text-left text-xs ${
-                    selectedTicketId === t.id ? "border-orange-500 bg-orange-50" : "border-slate-200"
+                    selectedTicketId === t.id ? "border-[#76010d] bg-[#fdf8f0]" : "border-slate-200"
                   }`}
                 >
                   <div className="flex items-center justify-between font-bold gap-2">

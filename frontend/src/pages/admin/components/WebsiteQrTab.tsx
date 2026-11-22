@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Check, Copy, Download, ExternalLink, Printer, QrCode, ShieldAlert, UtensilsCrossed } from "lucide-react";
+import { Check, Copy, Download, ExternalLink, Printer, QrCode, ShieldAlert } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
 import type { Canteen, FoodCategory } from "../../../types";
+import { BrandLogo, COLLEGEBITES_LOGO_SRC } from "../../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../../components/ui/Primitives";
 
 interface GeneratedWebsiteQR {
@@ -83,7 +84,7 @@ export const WebsiteQrTab: React.FC<{
     }
   }, [config]);
 
-  const activeLogoUrl = includeLogo ? (customLogoUrl.trim() || generated?.college_logo_url || "") : "";
+  const activeLogoUrl = includeLogo ? (customLogoUrl.trim() || generated?.college_logo_url || COLLEGEBITES_LOGO_SRC) : "";
   const buildDownloadQuery = (fmt: "png" | "svg") => {
     const qs = new URLSearchParams({ format: fmt, target_type: generated?.target_type || targetType });
     if ((generated?.target_type || targetType) !== "website" && selectedCanteenId) qs.set("canteen_id", selectedCanteenId);
@@ -108,14 +109,12 @@ export const WebsiteQrTab: React.FC<{
             <img
               src={activeLogoUrl}
               alt={generated.college_name}
-              className="h-14 w-14 rounded-2xl object-contain border border-slate-200 p-1 bg-white"
+              className="h-14 w-14 rounded-2xl object-contain border border-[#76010d]/20 p-0.5 bg-[#fdf8f0]"
             />
           ) : (
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-orange-500 to-amber-500 text-white shadow">
-              <UtensilsCrossed className="h-6 w-6" />
-            </div>
+            <BrandLogo size="lg" />
           )}
-          <div className="text-xs font-extrabold uppercase tracking-widest text-orange-600">
+          <div className="text-xs font-extrabold uppercase tracking-widest text-[#76010d]">
             CollegeBites Official Ordering Portal
           </div>
           <div className="text-xl font-black text-slate-900">{generated.college_name}</div>
@@ -156,7 +155,7 @@ export const WebsiteQrTab: React.FC<{
         <div className="flex items-center justify-between gap-2">
           <div>
             <h2 className="font-bold text-slate-900 flex items-center gap-2">
-              <QrCode className="h-4 w-4 text-orange-600" /> Website QR Code Generator
+              <QrCode className="h-4 w-4 text-[#76010d]" /> Website QR Code Generator
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
               Separate from table/location &amp; order pickup QRs. Always uses the environment public frontend URL.

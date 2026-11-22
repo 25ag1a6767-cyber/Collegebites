@@ -14,10 +14,10 @@ export const Button: React.FC<
   }
 > = ({ className, variant = "primary", size = "md", ...props }) => {
   const variants = {
-    primary: "bg-orange-600 text-white hover:bg-orange-700 shadow-sm",
+    primary: "bg-[#76010d] text-white hover:bg-[#5d010a] shadow-sm",
     secondary: "bg-slate-900 text-white hover:bg-slate-800 shadow-sm",
-    outline: "border border-slate-300 bg-white text-slate-800 hover:bg-slate-50",
-    ghost: "bg-transparent text-slate-700 hover:bg-slate-100",
+    outline: "border border-slate-300 bg-white text-slate-800 hover:bg-[#fdf8f0]",
+    ghost: "bg-transparent text-slate-700 hover:bg-[#fdf8f0]",
     danger: "bg-red-600 text-white hover:bg-red-700 shadow-sm",
     success: "bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm",
   };
@@ -49,7 +49,7 @@ export const Badge: React.FC<
   }
 > = ({ className, tone = "default", ...props }) => {
   const tones = {
-    default: "bg-orange-50 text-orange-700 border-orange-200",
+    default: "bg-[#fdf8f0] text-[#76010d] border-[#76010d]/25",
     green: "bg-emerald-50 text-emerald-700 border-emerald-200",
     amber: "bg-amber-50 text-amber-800 border-amber-200",
     red: "bg-red-50 text-red-700 border-red-200",
@@ -67,7 +67,7 @@ export const Badge: React.FC<
 export const Input: React.FC<React.InputHTMLAttributes<HTMLInputElement>> = ({ className, ...props }) => (
   <input
     className={cn(
-      "w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20",
+      "w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-[#76010d] focus:outline-none focus:ring-2 focus:ring-[#76010d]/20",
       className
     )}
     {...props}
@@ -77,7 +77,7 @@ export const Input: React.FC<React.InputHTMLAttributes<HTMLInputElement>> = ({ c
 export const Select: React.FC<React.SelectHTMLAttributes<HTMLSelectElement>> = ({ className, ...props }) => (
   <select
     className={cn(
-      "w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20",
+      "w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 focus:border-[#76010d] focus:outline-none focus:ring-2 focus:ring-[#76010d]/20",
       className
     )}
     {...props}

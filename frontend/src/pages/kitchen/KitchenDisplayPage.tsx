@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BellRing, Check, ChefHat, Clock, Flame, Volume2, VolumeX } from "lucide-react";
+import { AlertTriangle, BellRing, Check, Clock, Flame, Volume2, VolumeX } from "lucide-react";
 import { api, buildWsUrl, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, FoodItem, Order } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
 
 function playChime() {
@@ -145,12 +146,12 @@ export const KitchenDisplayPage: React.FC = () => {
 
   return (
     <div className="mx-auto max-w-[1440px] px-4 py-5 space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 p-4 text-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#380106] p-4 text-white">
         <div className="flex items-center gap-3">
-          <ChefHat className="h-7 w-7 text-orange-400" />
+          <BrandLogo size="md" variant="dark" />
           <div>
             <h1 className="text-xl font-extrabold">Kitchen Display System (KDS)</h1>
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-[#fdedce]/80">
               {orders.length} active orders • {delayedCount} delayed
             </p>
           </div>
@@ -250,7 +251,7 @@ export const KitchenDisplayPage: React.FC = () => {
                             </div>
                           ))}
                           {it.special_instructions && (
-                            <div className="pl-3 font-semibold text-orange-700">Note: {it.special_instructions}</div>
+                            <div className="pl-3 font-semibold text-[#76010d]">Note: {it.special_instructions}</div>
                           )}
                         </div>
                       ))}

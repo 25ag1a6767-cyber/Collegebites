@@ -5,6 +5,7 @@ import { Award, Bell, Check, Gift, Heart, KeyRound, Laptop, ShieldOff } from "lu
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { FoodItem } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
 
 export const ProfilePage: React.FC = () => {
@@ -135,7 +136,13 @@ export const ProfilePage: React.FC = () => {
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
-      <h1 className="text-2xl font-extrabold text-slate-900">Account, Loyalty & Notifications</h1>
+      <div className="flex items-center gap-3">
+        <BrandLogo size="md" />
+        <div>
+          <h1 className="text-2xl font-extrabold text-slate-900">Account, Loyalty &amp; Notifications</h1>
+          <p className="text-xs text-slate-500">{user.full_name} • {user.email || user.phone}</p>
+        </div>
+      </div>
 
       <div className="grid gap-6 md:grid-cols-2">
         <Card className="p-5 space-y-4">
@@ -228,14 +235,14 @@ export const ProfilePage: React.FC = () => {
           </form>
         </Card>
 
-        <Card className="p-5 space-y-4 bg-gradient-to-br from-orange-50 to-amber-50 border-orange-200">
+        <Card className="p-5 space-y-4 bg-gradient-to-br from-[#fdf8f0] to-[#fdedce]/60 border-[#76010d]/25">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 font-bold text-orange-950">
-              <Award className="h-5 w-5 text-orange-600" /> Campus Loyalty Rewards
+            <div className="flex items-center gap-2 font-bold text-[#380106]">
+              <Award className="h-5 w-5 text-[#76010d]" /> Campus Loyalty Rewards
             </div>
             <Badge tone="default">{loyalty?.tier_level || "BRONZE"}</Badge>
           </div>
-          <div className="text-3xl font-black text-orange-700">{loyalty?.points_balance || 0} pts</div>
+          <div className="text-3xl font-black text-[#76010d]">{loyalty?.points_balance || 0} pts</div>
           <div className="text-xs text-slate-600">
             Your Referral Code: <strong className="font-mono text-slate-900">{loyalty?.referral_code || "N/A"}</strong>
           </div>
@@ -277,7 +284,7 @@ export const ProfilePage: React.FC = () => {
         <Card className="md:col-span-2 p-5 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 font-bold text-slate-900">
-              <Bell className="h-4 w-4 text-orange-600" /> Recent Notifications ({notifications.length})
+              <Bell className="h-4 w-4 text-[#76010d]" /> Recent Notifications ({notifications.length})
             </div>
             {notifications.some((n) => !n.is_read) && (
               <Button
@@ -305,7 +312,7 @@ export const ProfilePage: React.FC = () => {
                 <div
                   key={n.id}
                   className={`flex items-start justify-between rounded-xl border p-3 text-xs ${
-                    n.is_read ? "border-slate-100 bg-white" : "border-orange-200 bg-orange-50/50"
+                    n.is_read ? "border-slate-100 bg-white" : "border-[#76010d]/25 bg-[#fdf8f0]"
                   }`}
                 >
                   <div>
@@ -354,7 +361,7 @@ export const ProfilePage: React.FC = () => {
                   <Link
                     to="/"
                     onClick={() => setSelectedCanteen(item.canteen_id)}
-                    className="rounded-lg bg-orange-600 px-2.5 py-1 font-bold text-white"
+                    className="rounded-lg bg-[#76010d] px-2.5 py-1 font-bold text-white"
                   >
                     Order
                   </Link>
@@ -383,7 +390,7 @@ export const ProfilePage: React.FC = () => {
       <div className="grid gap-6 md:grid-cols-2">
         <Card className="p-5 space-y-3">
           <div className="flex items-center gap-2 font-bold text-slate-900">
-            <KeyRound className="h-4 w-4 text-orange-600" /> Change Password
+            <KeyRound className="h-4 w-4 text-[#76010d]" /> Change Password
           </div>
           <form onSubmit={changePassword} className="space-y-3">
             <Input
@@ -418,7 +425,7 @@ export const ProfilePage: React.FC = () => {
 
         <Card className="p-5 space-y-3">
           <div className="flex items-center gap-2 font-bold text-slate-900">
-            <Laptop className="h-4 w-4 text-orange-600" /> Active Sign-in Sessions ({sessions.length})
+            <Laptop className="h-4 w-4 text-[#76010d]" /> Active Sign-in Sessions ({sessions.length})
           </div>
           <div className="space-y-2 max-h-56 overflow-y-auto text-xs">
             {sessions.map((s) => (

@@ -1,6 +1,6 @@
 import React from "react";
 import { Link, useLocation } from "react-router-dom";
-import { LifeBuoy, ReceiptText, User, UtensilsCrossed } from "lucide-react";
+import { LifeBuoy, ReceiptText, Store, User } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 
 const HIDDEN_PREFIXES = ["/board", "/kiosk", "/kitchen", "/cashier", "/pickup", "/inventory", "/admin", "/login", "/register"];
@@ -14,7 +14,7 @@ export const MobileAppNav: React.FC = () => {
   }
 
   const tabs = [
-    { to: "/", label: "Menu", icon: UtensilsCrossed, match: (p: string) => p === "/" || p === "/checkout" },
+    { to: "/", label: "Menu", icon: Store, match: (p: string) => p === "/" || p === "/checkout" },
     { to: "/orders", label: "Orders", icon: ReceiptText, match: (p: string) => p.startsWith("/orders") },
     { to: "/support", label: "Support", icon: LifeBuoy, match: (p: string) => p.startsWith("/support") },
     {
@@ -39,7 +39,7 @@ export const MobileAppNav: React.FC = () => {
               key={tab.label}
               to={tab.to}
               className={`flex flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-bold transition-colors ${
-                active ? "text-orange-600" : "text-slate-500 hover:text-slate-800"
+                active ? "text-[#76010d]" : "text-slate-500 hover:text-slate-800"
               }`}
             >
               <Icon className={`h-5 w-5 ${active ? "stroke-[2.5]" : ""}`} />

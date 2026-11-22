@@ -4,6 +4,7 @@ import { Download, Printer, RefreshCw, Usb, Wifi } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { ReceiptSnapshot } from "../../types";
+import { BrandLogo } from "../branding/BrandLogo";
 import { Badge, Button, useToast } from "../ui/Primitives";
 
 interface ReceiptSlipProps {
@@ -211,6 +212,9 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
       {/* Actual Printable Slip */}
       <div className={`mx-auto rounded-xl border border-slate-300 bg-white p-5 font-mono text-slate-900 shadow-md ${widthClass}`}>
         <div className="text-center space-y-0.5">
+          <div className="mb-1.5 flex justify-center">
+            <BrandLogo size="sm" />
+          </div>
           <div className="text-base font-extrabold tracking-wider">{receipt.brand}</div>
           <div className="font-bold uppercase">{receipt.college_name}</div>
           <div className="font-semibold uppercase">{receipt.canteen_name}</div>

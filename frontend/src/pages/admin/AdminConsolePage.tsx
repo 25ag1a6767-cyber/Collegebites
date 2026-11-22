@@ -1,10 +1,11 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Download, LayoutDashboard } from "lucide-react";
+import { Download } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CollegeSettings, FoodItem } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
 import { LocationsTab } from "./components/LocationsTab";
 import { MenuTab, QRTab } from "./components/MenuQrTab";
@@ -115,12 +116,12 @@ export const AdminConsolePage: React.FC = () => {
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 space-y-6">
-      <div className="no-print flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 p-4 text-white">
+      <div className="no-print flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#380106] p-4 text-white">
         <div className="flex items-center gap-3">
-          <LayoutDashboard className="h-7 w-7 text-orange-400" />
+          <BrandLogo size="md" variant="dark" />
           <div>
-            <h1 className="text-xl font-extrabold">CollegeBites Operations & Admin Console</h1>
-            <p className="text-xs text-slate-400">{college?.college_name} • Real-time database analytics & controls</p>
+            <h1 className="text-xl font-extrabold">CollegeBites Operations &amp; Admin Console</h1>
+            <p className="text-xs text-[#fdedce]/80">{college?.college_name} • Real-time database analytics &amp; controls</p>
           </div>
         </div>
         <Select
@@ -228,7 +229,7 @@ export const AdminConsolePage: React.FC = () => {
             </Card>
             <Card className="p-4">
               <div className="text-xs text-slate-500">Net Sales Revenue</div>
-              <div className="text-2xl font-black text-orange-600">₹{report.sales.net_sales}</div>
+              <div className="text-2xl font-black text-[#76010d]">₹{report.sales.net_sales}</div>
               <div className="text-xs text-slate-500 mt-1">
                 AOV: ₹{report.sales.average_order_value} • Tax: ₹{report.sales.tax_collected}
               </div>
@@ -259,7 +260,7 @@ export const AdminConsolePage: React.FC = () => {
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip />
-                    <Bar dataKey="revenue" fill="#ea580c" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="revenue" fill="#76010d" radius={[6, 6, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>

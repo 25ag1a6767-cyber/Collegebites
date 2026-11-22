@@ -8,6 +8,7 @@ import { ordersApi } from "../../src/api/orders.api";
 import { paymentsApi } from "../../src/api/payments.api";
 import { tokensApi } from "../../src/api/tokens.api";
 import { StripePayButton } from "../../src/components/StripePayButton";
+import { BrandLogo } from "../../src/components/BrandLogo";
 import { useMobileStore } from "../../src/store/useMobileStore";
 
 const STEPS = [
@@ -95,7 +96,8 @@ export default function OrderDetailScreen() {
   if (!order) {
     return (
       <View style={styles.center}>
-        <Text>Loading order details...</Text>
+        <BrandLogo size={54} />
+        <Text style={{ marginTop: 10, fontWeight: "700", color: "#5d010a" }}>Loading order details...</Text>
       </View>
     );
   }
@@ -368,12 +370,12 @@ export default function OrderDetailScreen() {
 }
 
 const styles = StyleSheet.create({
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24, backgroundColor: "#f8fafc" },
-  container: { flex: 1, backgroundColor: "#f8fafc", padding: 16 },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 24, backgroundColor: "#fdf8f0" },
+  container: { flex: 1, backgroundColor: "#fdf8f0", padding: 16 },
   offlineBanner: { backgroundColor: "#fef3c7", borderRadius: 10, padding: 10 },
   termBanner: { backgroundColor: "#fee2e2", borderRadius: 12, padding: 12 },
-  tokenBox: { backgroundColor: "#0f172a", borderRadius: 18, padding: 20, alignItems: "center" },
-  smallLabel: { color: "#fdba74", fontSize: 11, fontWeight: "800" },
+  tokenBox: { backgroundColor: "#380106", borderRadius: 18, padding: 20, alignItems: "center" },
+  smallLabel: { color: "#fdedce", fontSize: 11, fontWeight: "800" },
   ordNo: { color: "#fff", fontSize: 14, fontWeight: "700", marginTop: 4 },
   tokenBig: { color: "#fff", fontSize: 44, fontWeight: "900", marginVertical: 10, letterSpacing: 2 },
   counterSub: { color: "#86efac", fontSize: 12, fontWeight: "700", marginTop: 10, textAlign: "center" },
@@ -382,11 +384,11 @@ const styles = StyleSheet.create({
   stepPill: { minWidth: 68, paddingVertical: 6, paddingHorizontal: 8, borderRadius: 8, backgroundColor: "#e2e8f0", alignItems: "center" },
   stepReached: { backgroundColor: "#d1fae5" },
   stepTxt: { fontSize: 11, fontWeight: "700", color: "#475569" },
-  payBox: { backgroundColor: "#fff", borderRadius: 14, padding: 16, gap: 10, borderWidth: 1, borderColor: "#fed7aa" },
+  payBox: { backgroundColor: "#fff", borderRadius: 14, padding: 16, gap: 10, borderWidth: 1, borderColor: "#76010d" },
   payBtn: { backgroundColor: "#059669", borderRadius: 10, padding: 12, alignItems: "center" },
   cancelBtn: { backgroundColor: "#e2e8f0", borderRadius: 10, padding: 11, alignItems: "center" },
-  pdfBtn: { backgroundColor: "#ea580c", borderRadius: 12, padding: 14, alignItems: "center" },
-  card: { backgroundColor: "#fff", borderRadius: 14, padding: 16, gap: 8, borderWidth: 1, borderColor: "#e2e8f0" },
+  pdfBtn: { backgroundColor: "#76010d", borderRadius: 12, padding: 14, alignItems: "center" },
+  card: { backgroundColor: "#fff", borderRadius: 14, padding: 16, gap: 8, borderWidth: 1, borderColor: "#e7d7c9" },
   secTitle: { fontWeight: "800", fontSize: 15, marginBottom: 4 },
   itemRow: { flexDirection: "row", justifyContent: "space-between" },
   divider: { height: 1, backgroundColor: "#e2e8f0", marginVertical: 6 },

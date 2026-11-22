@@ -19,6 +19,7 @@ import { menuApi } from "../src/api/menu.api";
 import { ordersApi } from "../src/api/orders.api";
 import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
+import { BrandLogo } from "../src/components/BrandLogo";
 
 const ACTIVE_STATUSES = new Set(["PAYMENT_PENDING", "PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING", "READY"]);
 
@@ -221,7 +222,8 @@ export default function MenuScreen() {
     <View style={styles.container}>
       {/* College branding + Announcements + Live Board */}
       <View style={styles.topRow}>
-        <View style={{ flex: 1, marginRight: 8 }}>
+        <BrandLogo size={38} />
+        <View style={{ flex: 1, marginHorizontal: 10 }}>
           <Text style={styles.collegeTitle} numberOfLines={1}>
             {college?.college_name || "CollegeBites Campus"}
           </Text>
@@ -286,7 +288,7 @@ export default function MenuScreen() {
               <Text style={[styles.canteenTitle, active && { color: "#fff" }]}>
                 {c.name} {!c.is_open_now ? "(Closed)" : ""}
               </Text>
-              <Text style={[styles.canteenSub, active && { color: "#fed7aa" }]}>
+              <Text style={[styles.canteenSub, active && { color: "#fdedce" }]}>
                 {c.location ? `${c.location} • ` : ""}
                 {c.crowd_level} • ~{c.estimated_wait_minutes}m
               </Text>
@@ -346,7 +348,7 @@ export default function MenuScreen() {
           <Pressable
             key={tg}
             onPress={() => setTagFilter((cur) => (cur === tg ? "all" : tg))}
-            style={[styles.chip, tagFilter === tg && { backgroundColor: "#ea580c", borderColor: "#ea580c" }]}
+            style={[styles.chip, tagFilter === tg && { backgroundColor: "#76010d", borderColor: "#76010d" }]}
           >
             <Text style={[styles.chipTxt, tagFilter === tg && { color: "#fff" }]}>
               {tg === "special" ? "Today's Special" : tg}
@@ -360,9 +362,12 @@ export default function MenuScreen() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={{ paddingBottom: 95, gap: 10 }}
         ListEmptyComponent={
-          <Text style={{ textAlign: "center", color: "#64748b", marginTop: 24, fontSize: 13 }}>
-            {itemsLoading ? "Loading canteen menu..." : "No dishes matched your filters."}
-          </Text>
+          <View style={{ alignItems: "center", gap: 10, marginTop: 28, padding: 16 }}>
+            <BrandLogo size={56} />
+            <Text style={{ textAlign: "center", color: "#5d010a", fontWeight: "700", fontSize: 13 }}>
+              {itemsLoading ? "Loading canteen menu..." : "No dishes matched your filters."}
+            </Text>
+          </View>
         }
         renderItem={({ item }) => {
           const outOfSchedule = item.is_schedule_active_now === false;
@@ -465,7 +470,7 @@ export default function MenuScreen() {
                       style={[styles.optRow, active && styles.optRowActive, !v.is_available && { opacity: 0.45 }]}
                     >
                       <Text style={{ fontWeight: "700" }}>{v.name}{!v.is_available ? " (Out)" : ""}</Text>
-                      <Text style={{ fontWeight: "800", color: "#ea580c" }}>₹{p.toFixed(2)}</Text>
+                      <Text style={{ fontWeight: "800", color: "#76010d" }}>₹{p.toFixed(2)}</Text>
                     </Pressable>
                   );
                 })}
@@ -591,7 +596,7 @@ export default function MenuScreen() {
               </Pressable>
             </View>
 
-            {Boolean(modalMsg) && <Text style={{ color: "#ea580c", fontWeight: "700" }}>{modalMsg}</Text>}
+            {Boolean(modalMsg) && <Text style={{ color: "#76010d", fontWeight: "700" }}>{modalMsg}</Text>}
 
             {/* Item Reviews */}
             <View style={styles.secBox}>
@@ -629,27 +634,27 @@ export default function MenuScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#f8fafc", padding: 12 },
+  container: { flex: 1, backgroundColor: "#fdf8f0", padding: 12 },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
-  collegeTitle: { fontSize: 13, fontWeight: "900", color: "#0f172a" },
+  collegeTitle: { fontSize: 13, fontWeight: "900", color: "#380106" },
   brandSub: { fontSize: 11, fontWeight: "600", color: "#475569" },
-  boardChip: { backgroundColor: "#0f172a", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
+  boardChip: { backgroundColor: "#380106", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 12 },
   boardChipTxt: { color: "#fff", fontSize: 11, fontWeight: "700" },
   activeTrackBanner: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    backgroundColor: "#fff7ed",
-    borderColor: "#fed7aa",
+    backgroundColor: "#ffffff",
+    borderColor: "#76010d",
     borderWidth: 1,
     borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 8,
     marginBottom: 8,
   },
-  activeTrackTitle: { fontSize: 12, fontWeight: "900", color: "#9a3412" },
-  activeTrackSub: { fontSize: 11, color: "#c2410c", marginTop: 1 },
-  activeTrackCta: { fontSize: 12, fontWeight: "900", color: "#ea580c" },
+  activeTrackTitle: { fontSize: 12, fontWeight: "900", color: "#380106" },
+  activeTrackSub: { fontSize: 11, color: "#76010d", marginTop: 1 },
+  activeTrackCta: { fontSize: 12, fontWeight: "900", color: "#76010d" },
   errBox: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -663,8 +668,8 @@ const styles = StyleSheet.create({
   retryChip: { backgroundColor: "#991b1b", borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5 },
   retryTxt: { color: "#fff", fontSize: 11, fontWeight: "800" },
   canteenBar: { maxHeight: 62, marginBottom: 8 },
-  canteenPill: { backgroundColor: "#fff", borderRadius: 12, padding: 10, marginRight: 8, borderWidth: 1, borderColor: "#e2e8f0" },
-  canteenPillActive: { backgroundColor: "#0f172a", borderColor: "#0f172a" },
+  canteenPill: { backgroundColor: "#fff", borderRadius: 12, padding: 10, marginRight: 8, borderWidth: 1, borderColor: "#e7d7c9" },
+  canteenPillActive: { backgroundColor: "#380106", borderColor: "#380106" },
   canteenTitle: { fontWeight: "700", fontSize: 13, color: "#0f172a" },
   canteenSub: { fontSize: 11, color: "#64748b", marginTop: 2 },
   searchRow: { flexDirection: "row", gap: 6, marginBottom: 8 },
@@ -673,23 +678,23 @@ const styles = StyleSheet.create({
   vegText: { fontWeight: "700", fontSize: 12, color: "#0f172a" },
   chipBar: { maxHeight: 38, marginBottom: 8 },
   chip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 18, backgroundColor: "#fff", borderWidth: 1, borderColor: "#cbd5e1", marginRight: 6 },
-  chipActive: { backgroundColor: "#0f172a", borderColor: "#0f172a" },
+  chipActive: { backgroundColor: "#380106", borderColor: "#380106" },
   chipTxt: { fontSize: 12, fontWeight: "700", color: "#334155" },
-  card: { backgroundColor: "#fff", borderRadius: 14, padding: 12, flexDirection: "row", alignItems: "center", gap: 10, borderWidth: 1, borderColor: "#e2e8f0" },
+  card: { backgroundColor: "#fff", borderRadius: 14, padding: 12, flexDirection: "row", alignItems: "center", gap: 10, borderWidth: 1, borderColor: "#e7d7c9" },
   thumb: { width: 64, height: 64, borderRadius: 10, backgroundColor: "#e2e8f0" },
   itemTitle: { fontWeight: "800", fontSize: 14, color: "#0f172a", flex: 1 },
   itemDesc: { fontSize: 11, color: "#64748b", marginTop: 2 },
-  itemMeta: { fontSize: 12, fontWeight: "700", color: "#ea580c", marginTop: 4 },
-  addBtn: { backgroundColor: "#ea580c", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
+  itemMeta: { fontSize: 12, fontWeight: "700", color: "#76010d", marginTop: 4 },
+  addBtn: { backgroundColor: "#76010d", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 },
   addBtnText: { color: "#fff", fontWeight: "700", fontSize: 12 },
-  cartBar: { position: "absolute", bottom: 14, left: 14, right: 14, backgroundColor: "#0f172a", borderRadius: 14, padding: 14, flexDirection: "row", justifyContent: "space-between" },
+  cartBar: { position: "absolute", bottom: 14, left: 14, right: 14, backgroundColor: "#380106", borderRadius: 14, padding: 14, flexDirection: "row", justifyContent: "space-between" },
   cartBarText: { color: "#fff", fontWeight: "800", fontSize: 14 },
-  modalWrap: { flex: 1, backgroundColor: "#f8fafc", padding: 16 },
-  closeBtn: { backgroundColor: "#e2e8f0", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
+  modalWrap: { flex: 1, backgroundColor: "#fdf8f0", padding: 16 },
+  closeBtn: { backgroundColor: "#fdedce", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
   heroImg: { width: "100%", height: 180, borderRadius: 14, backgroundColor: "#e2e8f0" },
-  secBox: { backgroundColor: "#fff", borderRadius: 12, padding: 12, gap: 8, borderWidth: 1, borderColor: "#e2e8f0" },
+  secBox: { backgroundColor: "#fff", borderRadius: 12, padding: 12, gap: 8, borderWidth: 1, borderColor: "#e7d7c9" },
   secTitle: { fontWeight: "800", fontSize: 13, color: "#0f172a" },
   optRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 10, borderRadius: 10, borderWidth: 1, borderColor: "#e2e8f0" },
-  optRowActive: { borderColor: "#ea580c", backgroundColor: "#fff7ed" },
+  optRowActive: { borderColor: "#76010d", backgroundColor: "#fdf8f0" },
   qtyBtn: { width: 32, height: 32, borderRadius: 8, backgroundColor: "#e2e8f0", alignItems: "center", justifyContent: "center" },
 });

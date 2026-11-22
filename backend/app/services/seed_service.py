@@ -96,6 +96,7 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         college = CollegeSettings(
             college_name="ACE Engineering College",
             college_short_code="ACE",
+            logo_url="/branding/collegebites-logo.png",
             address="Ankushapur, Ghatkesar, Hyderabad - 501301",
             contact_phone="+91-40-2980-1122",
             contact_email="canteen@aceec.ac.in",

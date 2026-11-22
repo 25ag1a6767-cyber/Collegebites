@@ -4,6 +4,7 @@ import { CreditCard, Printer, QrCode, Search, ShoppingBag, Trash2 } from "lucide
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, FoodItem, Order, ReceiptSnapshot } from "../../types";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 
@@ -154,13 +155,13 @@ export const CashierPOSPage: React.FC = () => {
 
   return (
     <div className="mx-auto max-w-[1440px] px-4 py-5 space-y-5">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-900 p-4 text-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#380106] p-4 text-white">
         <div className="flex items-center gap-3">
-          <CreditCard className="h-7 w-7 text-sky-400" />
+          <BrandLogo size="md" variant="dark" />
           <div>
             <h1 className="text-xl font-extrabold">Cashier Point of Sale (POS)</h1>
-            <p className="text-xs text-slate-400">
-              Digital UPI/Card walk-in billing, instant tokens & thermal receipt reprinting (online-only policy)
+            <p className="text-xs text-[#fdedce]/80">
+              Digital UPI/Card walk-in billing, instant tokens &amp; thermal receipt reprinting (online-only policy)
             </p>
           </div>
         </div>
@@ -206,11 +207,11 @@ export const CashierPOSPage: React.FC = () => {
                   key={item.id}
                   type="button"
                   onClick={() => addLine(item)}
-                  className="rounded-2xl border border-slate-200 bg-white p-3.5 text-left shadow-sm transition hover:border-orange-500 hover:shadow-md active:scale-[0.98]"
+                  className="rounded-2xl border border-slate-200 bg-white p-3.5 text-left shadow-sm transition hover:border-[#76010d] hover:shadow-md active:scale-[0.98]"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className={`h-2.5 w-2.5 rounded-full ${item.is_veg ? "bg-emerald-600" : "bg-red-600"}`} />
-                    <span className="font-extrabold text-orange-600 text-sm">₹{item.base_price}</span>
+                    <span className="font-extrabold text-[#76010d] text-sm">₹{item.base_price}</span>
                   </div>
                   <div className="mt-1.5 font-bold text-slate-900 text-sm line-clamp-1">{item.name}</div>
                   <div className="text-[11px] text-slate-500">{item.category_name}</div>
@@ -222,7 +223,7 @@ export const CashierPOSPage: React.FC = () => {
           <Card className="p-5 space-y-4 h-fit">
             <div className="flex items-center justify-between">
               <h2 className="font-extrabold text-slate-900 flex items-center gap-2">
-                <ShoppingBag className="h-4 w-4 text-orange-600" /> Walk-in Ticket
+                <ShoppingBag className="h-4 w-4 text-[#76010d]" /> Walk-in Ticket
               </h2>
               {posLines.length > 0 && (
                 <button type="button" onClick={() => setPosLines([])} className="text-xs font-bold text-red-600">

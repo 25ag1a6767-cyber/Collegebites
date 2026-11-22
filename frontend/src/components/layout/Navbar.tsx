@@ -15,12 +15,12 @@ import {
   Smartphone,
   Tv,
   User as UserIcon,
-  UtensilsCrossed,
 } from "lucide-react";
 import { api, buildWsUrl, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings } from "../../types";
 import { usePwaInstall } from "../../utils/pwa";
+import { BrandLogo, COLLEGEBITES_APP_ICON_SRC } from "../branding/BrandLogo";
 import { Badge, Button, Modal, crowdBadgeTone, useToast } from "../ui/Primitives";
 
 export const Navbar: React.FC = () => {
@@ -86,9 +86,7 @@ export const Navbar: React.FC = () => {
       <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
         <div className="flex items-center gap-4">
           <Link to="/" className="flex items-center gap-2.5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-orange-500 to-red-600 text-white shadow-md">
-              <UtensilsCrossed className="h-5 w-5" />
-            </div>
+            <BrandLogo size="md" />
             <div>
               <div className="text-lg font-extrabold tracking-tight text-slate-900">CollegeBites</div>
               <div className="text-[11px] font-medium text-slate-500">
@@ -198,15 +196,15 @@ export const Navbar: React.FC = () => {
               }}
               title="Install CollegeBites Mobile App"
             >
-              <Smartphone className="h-4 w-4 text-orange-600" />
+              <Smartphone className="h-4 w-4 text-[#76010d]" />
               <span className="hidden sm:inline">Get App</span>
             </Button>
           )}
           <Button variant="outline" size="sm" onClick={() => navigate("/checkout")} className="relative">
-            <ShoppingBag className="h-4 w-4 text-orange-600" />
+            <ShoppingBag className="h-4 w-4 text-[#76010d]" />
             <span>Cart</span>
             {cartQty > 0 && (
-              <span className="ml-0.5 rounded-full bg-orange-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+              <span className="ml-0.5 rounded-full bg-[#76010d] px-1.5 py-0.5 text-[10px] font-bold text-white">
                 {cartQty}
               </span>
             )}
@@ -239,7 +237,7 @@ export const Navbar: React.FC = () => {
                                 pushToast(getApiError(err), "error");
                               }
                             }}
-                            className="text-[11px] font-bold text-slate-600 hover:text-orange-600"
+                            className="text-[11px] font-bold text-slate-600 hover:text-[#76010d]"
                           >
                             Mark all
                           </button>
@@ -250,7 +248,7 @@ export const Navbar: React.FC = () => {
                             setNotifOpen(false);
                             navigate("/profile");
                           }}
-                          className="text-[11px] font-bold text-orange-600"
+                          className="text-[11px] font-bold text-[#76010d]"
                         >
                           Manage
                         </button>
@@ -258,13 +256,16 @@ export const Navbar: React.FC = () => {
                     </div>
                     <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
                       {notifications.length === 0 ? (
-                        <div className="py-3 text-center text-slate-400">No notifications yet.</div>
+                        <div className="py-4 text-center text-slate-400 flex flex-col items-center gap-2">
+                          <BrandLogo size="sm" />
+                          <span>No notifications yet.</span>
+                        </div>
                       ) : (
                         notifications.slice(0, 6).map((n) => (
                           <div
                             key={n.id}
                             className={`rounded-xl border p-2 ${
-                              n.is_read ? "border-slate-100 bg-white" : "border-orange-200 bg-orange-50/50"
+                              n.is_read ? "border-slate-100 bg-white" : "border-[#76010d]/25 bg-[#fdf8f0]"
                             }`}
                           >
                             <div className="font-bold text-slate-900">{n.title}</div>
@@ -280,7 +281,7 @@ export const Navbar: React.FC = () => {
                                     pushToast(getApiError(err), "error");
                                   }
                                 }}
-                                className="mt-1 text-[10px] font-bold text-orange-700"
+                                className="mt-1 text-[10px] font-bold text-[#76010d]"
                               >
                                 Mark read
                               </button>
@@ -323,9 +324,19 @@ export const Navbar: React.FC = () => {
 
       <Modal open={installOpen} onClose={() => setInstallOpen(false)} title="Install CollegeBites Mobile App" maxWidth="max-w-md">
         <div className="space-y-4 text-sm text-slate-700">
-          <p className="text-xs text-slate-500">
-            Use CollegeBites directly as an app on your Android phone or iPhone for instant menu browsing, QR scanning, live order tracking, and receipts.
-          </p>
+          <div className="flex items-center gap-3 rounded-2xl border border-[#76010d]/20 bg-[#fdf8f0] p-3">
+            <img
+              src={COLLEGEBITES_APP_ICON_SRC}
+              alt="CollegeBites Installed App Icon"
+              className="h-14 w-14 shrink-0 rounded-xl object-contain"
+            />
+            <div>
+              <div className="font-extrabold text-slate-900">CollegeBites App</div>
+              <div className="text-xs text-slate-600">
+                Installed home-screen &amp; desktop icon for instant ordering, live tracking &amp; QR pickup tokens.
+              </div>
+            </div>
+          </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5">
             <div className="font-bold text-slate-900">iPhone / iPad (Safari)</div>
             <ol className="list-decimal list-inside text-xs text-slate-600 space-y-1">
@@ -353,7 +364,7 @@ export const Navbar: React.FC = () => {
               </Button>
             )}
           </div>
-          <div className="rounded-xl border border-orange-200 bg-orange-50/70 p-3 text-xs text-orange-900">
+          <div className="rounded-xl border border-[#76010d]/20 bg-[#fdf8f0] p-3 text-xs text-[#380106]">
             <strong>Native Android &amp; iOS App:</strong> Supports deep links (<span className="font-mono">collegebites://</span>), live QR camera scanning, and push notifications via the Expo mobile app (<span className="font-mono">mobile/</span>).
           </div>
         </div>

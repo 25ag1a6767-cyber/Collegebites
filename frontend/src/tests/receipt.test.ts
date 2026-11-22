@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { api, buildWsUrl, getApiError } from "../api/client";
+import { COLLEGEBITES_APP_ICON_SRC, COLLEGEBITES_LOGO_SRC } from "../components/branding/BrandLogo";
 import { crowdBadgeTone } from "../components/ui/Primitives";
 import { buildRazorpayOptions, openRazorpayModal } from "../utils/razorpay";
 
@@ -74,6 +75,10 @@ describe("CollegeBites Web Utilities", () => {
       { method: "upi", flows: ["collect", "intent", "qr"] },
     ]);
     expect(options.config.display.preferences.show_default_blocks).toBe(true);
+    expect(options.theme.color).toBe("#76010d");
+    expect(COLLEGEBITES_LOGO_SRC).toBe("/branding/collegebites-logo.png");
+    expect(COLLEGEBITES_APP_ICON_SRC).toBe("/icons/icon-192.png");
+    expect(COLLEGEBITES_LOGO_SRC).not.toBe(COLLEGEBITES_APP_ICON_SRC);
   });
 
   it("wires payment.failed and modal dismiss handlers cleanly", async () => {

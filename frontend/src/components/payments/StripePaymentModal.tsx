@@ -4,6 +4,7 @@ import { loadStripe, type Stripe } from "@stripe/stripe-js";
 import { AlertTriangle, CreditCard, Lock } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import type { Order } from "../../types";
+import { BrandLogo } from "../branding/BrandLogo";
 import { Badge, Button, Modal } from "../ui/Primitives";
 
 const stripePromiseCache = new Map<string, Promise<Stripe | null>>();
@@ -176,10 +177,13 @@ export const StripePaymentModal: React.FC<{
           data-order-number={order.order_number}
           data-stripe-intent={order.stripe_payment_intent_id || ""}
         >
-          <div className="rounded-xl bg-slate-900 p-4 text-white flex items-center justify-between gap-3">
-            <div>
-              <div className="text-xs text-slate-400">CollegeBites • {order.order_number}</div>
-              <div className="text-2xl font-extrabold">₹{order.total_amount}</div>
+          <div className="rounded-xl bg-[#380106] p-4 text-white flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <BrandLogo size="sm" variant="dark" />
+              <div>
+                <div className="text-xs text-[#fdedce]/80">CollegeBites • {order.order_number}</div>
+                <div className="text-2xl font-extrabold">₹{order.total_amount}</div>
+              </div>
             </div>
             <Badge tone="amber">
               Stripe: {order.stripe_payment_intent_id || order.stripe_session_id || "Pending"}

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Camera, CameraOff, CheckCircle2, QrCode, XCircle } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
+import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Button, Card, Input } from "../../components/ui/Primitives";
 
 function extractQrLocationCode(rawValue: string): string {
@@ -125,7 +126,7 @@ export const ScanQRPage: React.FC = () => {
       <div className="mx-auto max-w-lg px-4 py-8 space-y-4">
         <Card className="p-6 space-y-4">
           <div className="text-center space-y-1">
-            <QrCode className="mx-auto h-10 w-10 text-orange-600" />
+            <BrandLogo size="md" className="mx-auto mb-1" />
             <h1 className="text-xl font-extrabold text-slate-900">Scan Canteen / Table QR</h1>
             <p className="text-xs text-slate-500">
               Scan the QR sticker on your table, pickup counter, or canteen entrance to load the right menu instantly.
@@ -140,7 +141,7 @@ export const ScanQRPage: React.FC = () => {
 
           {cameraActive ? (
             <div className="space-y-2">
-              <div className="overflow-hidden rounded-2xl border-2 border-orange-500 bg-black aspect-[4/3]">
+              <div className="overflow-hidden rounded-2xl border-2 border-[#76010d] bg-black aspect-[4/3]">
                 <video ref={videoRef} playsInline muted className="h-full w-full object-cover" />
               </div>
               <Button variant="outline" className="w-full" onClick={stopCamera}>
@@ -208,7 +209,7 @@ export const ScanQRPage: React.FC = () => {
                 ? `Pickup Counter: ${resolved.counter.name}`
                 : resolved.canteen.location}
             </p>
-            <div className="rounded-xl bg-orange-50 p-3 text-xs text-orange-900">
+            <div className="rounded-xl bg-[#fdf8f0] border border-[#76010d]/20 p-3 text-xs text-[#380106]">
               No login required — browse the menu and order as a guest or signed-in student.
             </div>
             <Button className="w-full" size="lg" onClick={() => navigate("/")}>
@@ -217,7 +218,7 @@ export const ScanQRPage: React.FC = () => {
           </>
         ) : (
           <>
-            <QrCode className="mx-auto h-12 w-12 animate-pulse text-orange-600" />
+            <BrandLogo size="md" className="mx-auto animate-pulse" />
             <h1 className="text-lg font-bold text-slate-800">Identifying Canteen QR Location...</h1>
           </>
         )}

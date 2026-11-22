@@ -106,7 +106,7 @@ def build_website_qr_target(
         "title": title,
         "subtitle": subtitle,
         "college_name": college.college_name,
-        "college_logo_url": college.logo_url,
+        "college_logo_url": college.logo_url or "/branding/collegebites-logo.png",
         "canteen_name": canteen_name,
         "category_name": category_name,
         "poster_headline": "Scan to Order Food",
@@ -154,7 +154,7 @@ def get_website_qr_config(db: Session) -> dict:
         "is_production": is_prod,
         "is_valid_public_url": valid,
         "college_name": college.college_name,
-        "college_logo_url": college.logo_url,
+        "college_logo_url": college.logo_url or "/branding/collegebites-logo.png",
         "poster_headline": "Scan to Order Food",
         "canteens": [
             {

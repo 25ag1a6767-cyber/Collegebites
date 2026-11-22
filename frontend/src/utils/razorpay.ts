@@ -72,7 +72,7 @@ export function buildRazorpayOptions(opts: RazorpayModalOptions): Record<string,
       },
     },
     retry: { enabled: true },
-    theme: { color: "#ea580c" },
+    theme: { color: "#76010d" },
     handler: async (response: {
       razorpay_order_id: string;
       razorpay_payment_id: string;

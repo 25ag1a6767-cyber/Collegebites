@@ -1,10 +1,14 @@
-const CACHE_NAME = "collegebites-shell-v1";
+const CACHE_NAME = "collegebites-shell-v2";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
   "/manifest.webmanifest",
+  "/branding/collegebites-logo.png",
+  "/favicon.png",
+  "/favicon-32.png",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
+  "/icons/icon-maskable-512.png",
   "/icons/apple-touch-icon.png",
 ];
 
@@ -63,6 +67,8 @@ self.addEventListener("fetch", (event) => {
   if (
     url.pathname.startsWith("/assets/") ||
     url.pathname.startsWith("/icons/") ||
+    url.pathname.startsWith("/branding/") ||
+    url.pathname.startsWith("/favicon") ||
     url.pathname === "/manifest.webmanifest"
   ) {
     event.respondWith(

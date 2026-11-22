@@ -5,6 +5,7 @@ import { ArrowRight, Receipt, RotateCcw, Search } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { Order } from "../../types";
+import { BrandEmptyState, BrandLoadingState } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 export const MyOrdersPage: React.FC = () => {
@@ -115,7 +116,7 @@ export const MyOrdersPage: React.FC = () => {
               <Link
                 key={ordNo}
                 to={`/orders/${ordNo}`}
-                className="inline-flex items-center gap-1 rounded-full bg-orange-50 border border-orange-200 px-3 py-1 text-xs font-bold text-orange-800"
+                className="inline-flex items-center gap-1 rounded-full bg-[#fdf8f0] border border-[#76010d]/25 px-3 py-1 text-xs font-bold text-[#76010d]"
               >
                 <Receipt className="h-3 w-3" /> {ordNo}
               </Link>
@@ -216,11 +217,17 @@ export const MyOrdersPage: React.FC = () => {
 
       {user ? (
         isLoading ? (
-          <div className="text-sm text-slate-500">Loading order history...</div>
+          <BrandLoadingState message="Loading order history..." />
         ) : orders.length === 0 ? (
-          <Card className="p-8 text-center text-slate-500">
-            No orders placed yet. <Link to="/" className="font-bold text-orange-600">Browse menus →</Link>
-          </Card>
+          <BrandEmptyState
+            title="No orders placed yet"
+            description="Explore campus canteens to customize a meal and generate your live QR pickup token."
+            action={
+              <Link to="/">
+                <Button size="sm">Browse menus →</Button>
+              </Link>
+            }
+          />
         ) : (
           <div className="space-y-3">
             {orders.map((o) => (
