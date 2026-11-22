@@ -70,8 +70,10 @@ describe("CollegeBites Web Utilities", () => {
     expect(options.currency).toBe("INR");
     expect(options.order_id).toBe("order_test_123");
     expect(options.config.display.sequence).toEqual(["block.upi"]);
-    expect(options.config.display.blocks.upi.instruments).toEqual([{ method: "upi" }]);
-    expect(options.config.display.preferences.show_default_blocks).toBe(false);
+    expect(options.config.display.blocks.upi.instruments).toEqual([
+      { method: "upi", flows: ["collect", "intent", "qr"] },
+    ]);
+    expect(options.config.display.preferences.show_default_blocks).toBe(true);
   });
 
   it("wires payment.failed and modal dismiss handlers cleanly", async () => {

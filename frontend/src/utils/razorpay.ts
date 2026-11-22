@@ -56,18 +56,18 @@ export function buildRazorpayOptions(opts: RazorpayModalOptions): Record<string,
     description: opts.description || `Order ${order.order_number}`,
     order_id: order.razorpay_order_id,
     prefill: opts.prefill,
-    // Force Razorpay Standard Checkout into direct UPI-only mode (UPI Intent on mobile + locked QR on desktop)
+    // Prioritize UPI Apps / Collect / QR first while keeping Razorpay Test Mode & fallback rails accessible
     config: {
       display: {
         blocks: {
           upi: {
             name: "Pay directly with UPI App or QR",
-            instruments: [{ method: "upi" }],
+            instruments: [{ method: "upi", flows: ["collect", "intent", "qr"] }],
           },
         },
         sequence: ["block.upi"],
         preferences: {
-          show_default_blocks: false,
+          show_default_blocks: true,
         },
       },
     },
