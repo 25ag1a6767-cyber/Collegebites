@@ -46,10 +46,24 @@ export const AdminConsolePage: React.FC = () => {
   if (reportEndDate) reportParams.set("end_date", reportEndDate);
   const reportQueryCanteen = reportParams.toString() ? `?${reportParams.toString()}` : "";
 
+  const streamCanteenScope =
+    !isCollegeAdmin && user?.assigned_canteen_id
+      ? user.assigned_canteen_id
+      : scopeReportToCanteen && activeCanteenId
+      ? activeCanteenId
+      : "";
+  const { status: adminSyncStatus, lastSyncedAt: adminLastSyncedAt } = useRealtimeSync({
+    enabled: tab === "analytics" || tab === "queue",
+    ssePath: `/realtime/staff/orders/stream${streamCanteenScope ? `?canteen_id=${streamCanteenScope}` : ""}`,
+    wsPath: activeCanteenId ? `/ws/kitchen/${activeCanteenId}` : "/ws/board/all",
+    queryKeys: [["admin-report"], ["admin-queue"], ["admin-all-orders"]],
+  });
+
   const { data: report } = useQuery<any>({
     queryKey: ["admin-report", activeCanteenId, scopeReportToCanteen, reportStartDate, reportEndDate],
     enabled: tab === "analytics",
     queryFn: async () => (await api.get(`/reports/dashboard${reportQueryCanteen}`)).data,
+    refetchInterval: adminSyncStatus === "live" ? 30000 : 6000,
   });
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
