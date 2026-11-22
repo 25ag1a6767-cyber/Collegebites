@@ -136,7 +136,10 @@ export const AdminConsolePage: React.FC = () => {
         <div className="flex items-center gap-3">
           <BrandLogo size="md" variant="dark" />
           <div>
-            <h1 className="text-xl font-extrabold">CollegeBites Operations &amp; Admin Console</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-extrabold">CollegeBites Operations &amp; Admin Console</h1>
+              <RealtimeStatusBadge status={adminSyncStatus} lastSyncedAt={adminLastSyncedAt} darkSurface />
+            </div>
             <p className="text-xs text-[#fdedce]/80">{college?.college_name} • Real-time database analytics &amp; controls</p>
           </div>
         </div>

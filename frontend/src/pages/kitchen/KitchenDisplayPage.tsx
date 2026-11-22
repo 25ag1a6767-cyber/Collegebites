@@ -1,11 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, BellRing, Check, Clock, Flame, Volume2, VolumeX } from "lucide-react";
-import { api, buildWsUrl, getApiError } from "../../api/client";
+import { api, getApiError } from "../../api/client";
+import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, FoodItem, Order } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
+import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 
 function playChime() {
   try {
@@ -57,6 +59,28 @@ export const KitchenDisplayPage: React.FC = () => {
     queryFn: async () => (await api.get(`/canteens/${activeCanteenId}`)).data,
   });
 
+  const { status: kdsSyncStatus, lastSyncedAt: kdsLastSyncedAt } = useRealtimeSync<{ orders?: Order[] }>({
+    enabled: Boolean(activeCanteenId && accessToken),
+    ssePath: activeCanteenId ? `/realtime/staff/orders/stream?canteen_id=${activeCanteenId}` : null,
+    wsPath: activeCanteenId ? `/ws/kitchen/${activeCanteenId}` : null,
+    queryKeys: [["kitchen-orders", activeCanteenId, kitchenId]],
+    onSnapshot: (snap) => {
+      if (snap?.orders) {
+        const activeOnly = snap.orders.filter(
+          (o) =>
+            ["PLACED", "ACCEPTED", "PREPARING", "READY"].includes(o.status) &&
+            (!kitchenId || o.kitchen_id === kitchenId)
+        );
+        qc.setQueryData(["kitchen-orders", activeCanteenId, kitchenId], activeOnly);
+      } else {
+        qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
+      }
+    },
+    onEvent: () => {
+      qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
+    },
+  });
+
   const { data: orders = [], refetch } = useQuery<Order[]>({
     queryKey: ["kitchen-orders", activeCanteenId, kitchenId],
     enabled: Boolean(activeCanteenId),
@@ -64,7 +88,8 @@ export const KitchenDisplayPage: React.FC = () => {
       const q = kitchenId ? `?kitchen_id=${kitchenId}` : "";
       return (await api.get(`/kitchen/canteens/${activeCanteenId}/orders${q}`)).data;
     },
-    refetchInterval: 4000,
+    refetchInterval: kdsSyncStatus === "live" ? 30000 : 4000,
+    refetchIntervalInBackground: true,
   });
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
@@ -93,21 +118,7 @@ export const KitchenDisplayPage: React.FC = () => {
     prevPlacedIds.current = placedIds;
   }, [orders, soundEnabled]);
 
-  // WebSocket live push
-  useEffect(() => {
-    if (!activeCanteenId || !accessToken) return;
-    let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(buildWsUrl(`/ws/kitchen/${activeCanteenId}`, { token: accessToken }));
-      ws.onmessage = () => {
-        if (soundEnabled) playChime();
-        qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
-      };
-    } catch {
-      // polling handles updates
-    }
-    return () => ws?.close();
-  }, [activeCanteenId, accessToken, soundEnabled, qc]);
+  // Real-time stream + WS handled by useRealtimeSync above
 
   const act = async (url: string, msg: string) => {
     try {
@@ -150,7 +161,10 @@ export const KitchenDisplayPage: React.FC = () => {
         <div className="flex items-center gap-3">
           <BrandLogo size="md" variant="dark" />
           <div>
-            <h1 className="text-xl font-extrabold">Kitchen Display System (KDS)</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-extrabold">Kitchen Display System (KDS)</h1>
+              <RealtimeStatusBadge status={kdsSyncStatus} lastSyncedAt={kdsLastSyncedAt} darkSurface />
+            </div>
             <p className="text-xs text-[#fdedce]/80">
               {orders.length} active orders • {delayedCount} delayed
             </p>

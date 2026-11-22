@@ -1,15 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Html5Qrcode } from "html5-qrcode";
 import { AlertTriangle, Camera, CheckCircle2, QrCode, ShieldAlert, XCircle } from "lucide-react";
 import { api, getApiError } from "../../api/client";
+import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
+import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 
 export const PickupScannerPage: React.FC = () => {
   const { pushToast } = useToast();
+  const qc = useQueryClient();
   const { user, selectedCanteenId } = useAppStore();
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
@@ -25,13 +28,24 @@ export const PickupScannerPage: React.FC = () => {
     queryFn: async () => (await api.get(`/canteens/${activeCanteenId}`)).data,
   });
 
+  const { status: boardSyncStatus, lastSyncedAt: boardSyncedAt } = useRealtimeSync({
+    enabled: Boolean(activeCanteenId),
+    ssePath: activeCanteenId ? `/realtime/board/stream?canteen_id=${activeCanteenId}` : null,
+    wsPath: activeCanteenId ? `/ws/board/${activeCanteenId}` : null,
+    queryKeys: [["pickup-scanner-board", activeCanteenId]],
+    onSnapshot: (snap) => {
+      qc.setQueryData(["pickup-scanner-board", activeCanteenId], snap);
+    },
+  });
+
   const { data: boardData, refetch: refetchBoard } = useQuery<{
     ready_for_pickup: { token_code: string; counter_name: string; order_status: string; ready_at?: string }[];
     now_preparing: { token_code: string; counter_name: string; order_status: string }[];
   }>({
     queryKey: ["pickup-scanner-board", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    refetchInterval: 4000,
+    refetchInterval: boardSyncStatus === "live" ? 30000 : 4000,
+    refetchIntervalInBackground: true,
     queryFn: async () => (await api.get(`/pickup/board/${activeCanteenId}`)).data,
   });
 
@@ -146,7 +160,10 @@ export const PickupScannerPage: React.FC = () => {
         <div className="flex items-center gap-3">
           <BrandLogo size="md" variant="dark" />
           <div>
-            <h1 className="text-xl font-extrabold">QR Pickup Verification & Handover</h1>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-xl font-extrabold">QR Pickup Verification & Handover</h1>
+              <RealtimeStatusBadge status={boardSyncStatus} lastSyncedAt={boardSyncedAt} darkSurface />
+            </div>
             <p className="text-xs text-[#fdedce]/80">
               Scanning verifies authenticity separately — staff must explicitly confirm food handover.
             </p>
