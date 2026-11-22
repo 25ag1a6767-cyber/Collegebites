@@ -8,31 +8,37 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.engagement import Notification
-from app.models.inventory import InventoryItem, StockMovement
+from app.models.inventory import InventoryItem, StockBatch, StockMovement
 from app.models.menu import FoodItem, Ingredient
-from app.models.order import Order, OrderItem
+from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.schemas.operations import DelayReportRequest, ItemUnavailableRequest
 from app.schemas.order import OrderOut
 from app.services.audit_service import record_audit_log
 from app.services.inventory_service import refresh_food_item_ingredient_sufficiency
 from app.services.notification_service import notify_customer_order_event
 from app.services.order_service import cancel_or_reject_order, serialize_order, serialize_orders_batch, transition_order_status
-from app.websockets import emit_order_event_sync, ws_manager
+from app.websockets import emit_order_event_sync, emit_user_notification_sync, ws_manager
 
 KITCHEN_ACTIVE_STATUSES = ("PLACED", "ACCEPTED", "PREPARING", "READY")
 
 
 def list_kitchen_orders(
-    db: Session, canteen_id: UUID, status_filter: Optional[str] = None, kitchen_id: Optional[UUID] = None
+    db: Session,
+    canteen_id: UUID,
+    status_filter: Optional[str] = None,
+    kitchen_id: Optional[UUID] = None,
+    station_id: Optional[UUID] = None,
 ) -> list[OrderOut]:
     stmt = (
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
         .where(Order.canteen_id == canteen_id)
-        .order_by(Order.created_at.asc())
+        .order_by(Order.is_priority.desc(), Order.created_at.asc())
     )
     if kitchen_id:
         stmt = stmt.where(Order.kitchen_id == kitchen_id)
+    if station_id:
+        stmt = stmt.where(Order.id.in_(select(OrderItem.order_id).where(OrderItem.station_id == station_id)))
     if status_filter:
         stmt = stmt.where(Order.status == status_filter)
     else:
@@ -137,10 +143,22 @@ def report_order_delay(db: Session, order_id: UUID, payload: DelayReportRequest,
     )
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if order.payment_status != "CONFIRMED" or order.status not in KITCHEN_ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Cannot delay order in status {order.status}")
+    prev_status = order.status
     order.delayed_minutes += payload.additional_minutes
     order.delay_reason = payload.reason
     base_pickup = order.estimated_pickup_at or datetime.now(timezone.utc)
     order.estimated_pickup_at = base_pickup + timedelta(minutes=payload.additional_minutes)
+    db.add(
+        OrderStatusHistory(
+            order_id=order.id,
+            from_status=prev_status,
+            to_status=prev_status,
+            changed_by_user_id=staff_user_id,
+            reason=f"Delayed +{payload.additional_minutes}m: {payload.reason}",
+        )
+    )
     notify_customer_order_event(
         db,
         order,
@@ -148,6 +166,7 @@ def report_order_delay(db: Session, order_id: UUID, payload: DelayReportRequest,
         title=f"Order Delayed +{payload.additional_minutes} min",
         message=f"Order {order.order_number} delayed by {payload.additional_minutes} mins ({payload.reason}).",
         send_external=True,
+        dedup_suffix=str(order.delayed_minutes),
     )
     record_audit_log(
         db,
@@ -170,6 +189,89 @@ def report_order_delay(db: Session, order_id: UUID, payload: DelayReportRequest,
         "order.delayed",
         {"delayed_minutes": order.delayed_minutes, "reason": payload.reason},
     )
+    if loaded.customer_id:
+        emit_user_notification_sync(
+            str(loaded.customer_id),
+            "order_delayed",
+            {"title": f"Order Delayed +{payload.additional_minutes} min", "order_number": loaded.order_number},
+        )
+    return serialize_order(db, loaded)
+
+
+def toggle_order_priority(db: Session, order_id: UUID, is_priority: bool, staff_user_id: UUID) -> OrderOut:
+    order = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == order_id)
+        .with_for_update()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.status not in KITCHEN_ACTIVE_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Cannot change priority in status {order.status}")
+    order.is_priority = is_priority
+    record_audit_log(
+        db,
+        action="kitchen.order_priority_updated",
+        entity_type="order",
+        entity_id=order.order_number,
+        actor_user_id=staff_user_id,
+        details={"is_priority": is_priority},
+    )
+    db.commit()
+    db.expire_all()
+    loaded = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == order.id)
+    )
+    emit_order_event_sync(
+        str(order.canteen_id),
+        str(order.id),
+        "order.priority_updated",
+        {"is_priority": is_priority},
+    )
+    return serialize_order(db, loaded)
+
+
+def update_order_item_prep_status(
+    db: Session, order_item_id: UUID, prep_status: str, staff_user_id: UUID
+) -> OrderOut:
+    item = db.scalar(select(OrderItem).where(OrderItem.id == order_item_id).with_for_update())
+    if not item:
+        raise HTTPException(status_code=404, detail="Order item not found")
+    order = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == item.order_id)
+        .with_for_update()
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.status not in ("ACCEPTED", "PREPARING", "PLACED"):
+        raise HTTPException(status_code=409, detail=f"Cannot update item prep status when order is {order.status}")
+    item.prep_status = prep_status
+    record_audit_log(
+        db,
+        action="kitchen.order_item_prep_status",
+        entity_type="order_item",
+        entity_id=str(item.id),
+        actor_user_id=staff_user_id,
+        details={"order_number": order.order_number, "item_name": item.item_name, "prep_status": prep_status},
+    )
+    db.commit()
+    db.expire_all()
+    loaded = db.scalar(
+        select(Order)
+        .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+        .where(Order.id == order.id)
+    )
+    emit_order_event_sync(
+        str(order.canteen_id),
+        str(order.id),
+        "order.item_updated",
+        {"order_item_id": str(item.id), "prep_status": prep_status},
+    )
     return serialize_order(db, loaded)
 
 
@@ -180,6 +282,19 @@ def toggle_item_availability_from_kitchen(
     if not item:
         raise HTTPException(status_code=404, detail="Food item not found")
     item.is_available = payload.is_available
+    if not payload.is_available:
+        for role_name in ("inventory_manager", "canteen_manager"):
+            db.add(
+                Notification(
+                    role_target=role_name,
+                    canteen_id=item.canteen_id,
+                    channel="in_app",
+                    title=f"Item Marked Unavailable • {item.name}",
+                    message=f"Kitchen disabled {item.name}: {payload.reason}",
+                    event_type="item_unavailable",
+                    delivery_status="sent",
+                )
+            )
     record_audit_log(
         db,
         action="kitchen.item_availability_changed",
@@ -221,6 +336,12 @@ def reject_order_from_kitchen(db: Session, order_id: UUID, reason: str, staff_us
             send_external=True,
         )
         db.commit()
+        if order.customer_id:
+            emit_user_notification_sync(
+                str(order.customer_id),
+                "order_rejected",
+                {"title": f"Order {order.order_number} Rejected", "order_number": order.order_number},
+            )
     return out
 
 
@@ -228,7 +349,7 @@ def list_canteen_ingredients_for_kitchen(db: Session, canteen_id: UUID) -> list[
     rows = db.execute(
         select(InventoryItem, Ingredient)
         .join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
-        .where(InventoryItem.canteen_id == canteen_id)
+        .where(InventoryItem.canteen_id == canteen_id, InventoryItem.is_archived.is_(False))
         .order_by(Ingredient.name)
     ).all()
     return [
@@ -240,19 +361,28 @@ def list_canteen_ingredients_for_kitchen(db: Session, canteen_id: UUID) -> list[
             "unit": inv.unit,
             "current_quantity": str(inv.current_quantity),
             "reorder_level": str(inv.reorder_level),
+            "is_available": inv.is_available,
         }
         for inv, ing in rows
     ]
 
 
 def report_ingredient_unavailable(db: Session, inventory_item_id: UUID, reason: str, staff_user_id: UUID) -> dict:
-    inv = db.get(InventoryItem, inventory_item_id)
+    inv = db.scalar(select(InventoryItem).where(InventoryItem.id == inventory_item_id).with_for_update())
     if not inv:
         raise HTTPException(status_code=404, detail="Inventory item not found")
     ing = db.get(Ingredient, inv.ingredient_id)
     prev_qty = inv.current_quantity
     delta = -prev_qty if prev_qty > 0 else Decimal("0.000")
     inv.current_quantity = Decimal("0.000")
+    inv.is_available = False
+    batches = db.scalars(
+        select(StockBatch)
+        .where(StockBatch.inventory_item_id == inv.id, StockBatch.remaining_quantity > 0)
+        .with_for_update()
+    ).all()
+    for batch in batches:
+        batch.remaining_quantity = Decimal("0.000")
     if delta != 0:
         db.add(
             StockMovement(
@@ -267,17 +397,18 @@ def report_ingredient_unavailable(db: Session, inventory_item_id: UUID, reason: 
             )
         )
     blocked = refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
-    db.add(
-        Notification(
-            role_target="inventory_manager",
-            canteen_id=inv.canteen_id,
-            channel="in_app",
-            title=f"Kitchen Ingredient Out of Stock • {ing.name if ing else inv.id}",
-            message=f"Reported unavailable by kitchen: {reason}. Blocked dishes: {', '.join(blocked) or 'None'}",
-            event_type="ingredient_unavailable",
-            delivery_status="sent",
+    for role_name in ("inventory_manager", "canteen_manager"):
+        db.add(
+            Notification(
+                role_target=role_name,
+                canteen_id=inv.canteen_id,
+                channel="in_app",
+                title=f"Kitchen Ingredient Out of Stock • {ing.name if ing else inv.id}",
+                message=f"Reported unavailable by kitchen: {reason}. Blocked dishes: {', '.join(blocked) or 'None'}",
+                event_type="ingredient_unavailable",
+                delivery_status="sent",
+            )
         )
-    )
     record_audit_log(
         db,
         action="kitchen.ingredient_unavailable",
@@ -299,5 +430,35 @@ def report_ingredient_unavailable(db: Session, inventory_item_id: UUID, reason: 
         "inventory_item_id": str(inv.id),
         "ingredient_name": ing.name if ing else "",
         "current_quantity": "0.000",
+        "is_available": inv.is_available,
+        "blocked_food_items": blocked,
+    }
+
+
+def restore_ingredient_availability(db: Session, inventory_item_id: UUID, staff_user_id: UUID) -> dict:
+    inv = db.scalar(select(InventoryItem).where(InventoryItem.id == inventory_item_id).with_for_update())
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    ing = db.get(Ingredient, inv.ingredient_id)
+    inv.is_available = True
+    blocked = refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
+    record_audit_log(
+        db,
+        action="kitchen.ingredient_restored",
+        entity_type="inventory_item",
+        entity_id=str(inv.id),
+        actor_user_id=staff_user_id,
+        details={"ingredient": ing.name if ing else None, "blocked_items": blocked},
+    )
+    db.commit()
+    ws_manager.schedule_broadcast(
+        f"kitchen:{inv.canteen_id}",
+        {"event": "menu.availability_changed", "canteen_id": str(inv.canteen_id), "data": {"blocked_food_items": blocked}},
+    )
+    return {
+        "inventory_item_id": str(inv.id),
+        "ingredient_name": ing.name if ing else "",
+        "current_quantity": str(inv.current_quantity),
+        "is_available": inv.is_available,
         "blocked_food_items": blocked,
     }

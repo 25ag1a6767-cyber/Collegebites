@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
+  BellRing,
   ChefHat,
   CreditCard,
   LayoutDashboard,
@@ -16,9 +17,11 @@ import {
   Tv,
   User as UserIcon,
 } from "lucide-react";
-import { api, buildWsUrl, getApiError } from "../../api/client";
+import { api, getApiError } from "../../api/client";
+import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen, CartSummary, CollegeSettings } from "../../types";
+import { enableBrowserPushNotifications, playOrderAlertChime, showBrowserNotification } from "../../utils/notifications";
 import { usePwaInstall } from "../../utils/pwa";
 import { BrandLogo, COLLEGEBITES_APP_ICON_SRC } from "../branding/BrandLogo";
 import { Badge, Button, Modal, crowdBadgeTone, useToast } from "../ui/Primitives";
@@ -31,22 +34,53 @@ export const Navbar: React.FC = () => {
   const { user, accessToken, logout, selectedCanteenId, setSelectedCanteen } = useAppStore();
   const [notifOpen, setNotifOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
+  const [notifPerm, setNotifPerm] = useState<string>(() =>
+    typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported"
+  );
+  const seenNotifIdsRef = useRef<Set<string>>(new Set());
+  const seededNotifsRef = useRef(false);
   const pwa = usePwaInstall();
 
-  useEffect(() => {
-    if (!user?.id || !accessToken) return;
-    let ws: WebSocket | null = null;
-    try {
-      ws = new WebSocket(buildWsUrl(`/ws/notifications/${user.id}`, { token: accessToken }));
-      ws.onmessage = () => {
-        qc.invalidateQueries({ queryKey: ["notifications-my"] });
-        qc.invalidateQueries({ queryKey: ["my-orders"] });
-      };
-    } catch {
-      // polling fallback handles it
+  const handleIncomingNotifications = (list: any[]) => {
+    if (!seededNotifsRef.current) {
+      for (const n of list) seenNotifIdsRef.current.add(n.id);
+      seededNotifsRef.current = true;
+      return;
     }
-    return () => ws?.close();
-  }, [user?.id, accessToken, qc]);
+    const freshUnread = list.filter((n) => !n.is_read && !seenNotifIdsRef.current.has(n.id));
+    for (const n of list) seenNotifIdsRef.current.add(n.id);
+    if (freshUnread.length > 0) {
+      const latest = freshUnread[0];
+      playOrderAlertChime(latest.event_type === "order_ready" || latest.event_type === "order_delayed");
+      pushToast(`${latest.title}: ${latest.message}`, "info");
+      const orderNum = latest.metadata_json?.order_number;
+      const targetUrl = orderNum
+        ? `/orders/${orderNum}`
+        : latest.event_type === "kitchen_new_order"
+        ? "/kitchen"
+        : "/orders";
+      void showBrowserNotification(latest.title, latest.message, targetUrl);
+      qc.invalidateQueries({ queryKey: ["my-orders"] });
+    }
+  };
+
+  useEffect(() => {
+    seenNotifIdsRef.current.clear();
+    seededNotifsRef.current = false;
+  }, [user?.id]);
+
+  useRealtimeSync<{ notifications?: any[] }>({
+    enabled: Boolean(user?.id && accessToken),
+    ssePath: user?.id ? "/realtime/notifications/stream" : null,
+    wsPath: user?.id ? `/ws/notifications/${user.id}` : null,
+    queryKeys: [["notifications-my"], ["my-orders"]],
+    onSnapshot: (snap) => {
+      if (snap?.notifications) {
+        qc.setQueryData(["notifications-my"], snap.notifications);
+        handleIncomingNotifications(snap.notifications);
+      }
+    },
+  });
 
   const { data: college } = useQuery<CollegeSettings>({
     queryKey: ["college-settings"],
@@ -69,7 +103,12 @@ export const Navbar: React.FC = () => {
   const { data: notifications = [] } = useQuery<any[]>({
     queryKey: ["notifications-my"],
     enabled: Boolean(user),
-    queryFn: async () => (await api.get("/notifications/my")).data,
+    queryFn: async () => {
+      const list = (await api.get("/notifications/my")).data;
+      handleIncomingNotifications(list);
+      return list;
+    },
+    refetchInterval: 20000,
   });
 
   const unreadCount = notifications.filter((n) => !n.is_read).length;
@@ -77,7 +116,12 @@ export const Navbar: React.FC = () => {
   const roles = new Set(user?.roles || []);
   const isStaff = (r: string[]) => roles.has("super_admin") || r.some((x) => roles.has(x));
 
-  if (location.pathname.startsWith("/board") || location.pathname.startsWith("/kiosk")) {
+  if (
+    location.pathname.startsWith("/board") ||
+    location.pathname.startsWith("/display") ||
+    location.pathname.startsWith("/tv") ||
+    location.pathname.startsWith("/kiosk")
+  ) {
     return null;
   }
 
@@ -133,8 +177,16 @@ export const Navbar: React.FC = () => {
             to="/board"
             className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
           >
-            <Tv className="h-3.5 w-3.5" /> Token Board
+            <Tv className="h-3.5 w-3.5" /> Pickup Display
           </Link>
+          {isStaff(["canteen_manager", "kitchen_staff", "pickup_staff", "cashier", "college_admin"]) && (
+            <Link
+              to="/token-board"
+              className="inline-flex items-center gap-1 rounded-lg bg-[#fdf8f0] border border-[#76010d]/25 px-2.5 py-1.5 text-xs font-bold text-[#76010d] hover:bg-[#fdedce]"
+            >
+              <Tv className="h-3.5 w-3.5" /> Token Board
+            </Link>
+          )}
 
           {isStaff(["kitchen_staff", "canteen_manager", "college_admin"]) && (
             <Link
@@ -227,6 +279,23 @@ export const Navbar: React.FC = () => {
                     <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-2">
                       <span className="text-xs font-extrabold text-slate-900">Notifications ({unreadCount} unread)</span>
                       <div className="flex items-center gap-2">
+                        {notifPerm !== "granted" && notifPerm !== "unsupported" && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const res = await enableBrowserPushNotifications();
+                              setNotifPerm(Notification.permission);
+                              if (res.granted) {
+                                pushToast("Browser order alerts enabled!", "success");
+                              } else {
+                                pushToast("Notification permission was not granted.", "info");
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 hover:underline"
+                          >
+                            <BellRing className="h-3 w-3" /> Push
+                          </button>
+                        )}
                         {unreadCount > 0 && (
                           <button
                             type="button"
@@ -255,40 +324,65 @@ export const Navbar: React.FC = () => {
                         </button>
                       </div>
                     </div>
-                    <div className="space-y-1.5 max-h-60 overflow-y-auto text-xs">
+                    <div className="space-y-1.5 max-h-72 overflow-y-auto text-xs">
                       {notifications.length === 0 ? (
                         <div className="py-4 text-center text-slate-400 flex flex-col items-center gap-2">
                           <BrandLogo size="sm" />
                           <span>No notifications yet.</span>
                         </div>
                       ) : (
-                        notifications.slice(0, 6).map((n) => (
-                          <div
-                            key={n.id}
-                            className={`rounded-xl border p-2 ${
-                              n.is_read ? "border-slate-100 bg-white" : "border-[#76010d]/25 bg-[#fdf8f0]"
-                            }`}
-                          >
-                            <div className="font-bold text-slate-900">{n.title}</div>
-                            <div className="text-slate-600 mt-0.5 line-clamp-2">{n.message}</div>
-                            {!n.is_read && (
-                              <button
-                                type="button"
-                                onClick={async () => {
+                        notifications.slice(0, 12).map((n) => {
+                          const orderNum = n.metadata_json?.order_number;
+                          const navTarget = orderNum
+                            ? `/orders/${orderNum}`
+                            : n.event_type === "kitchen_new_order"
+                            ? "/kitchen"
+                            : n.event_type === "inventory_alert" || n.event_type === "ingredient_unavailable"
+                            ? "/inventory"
+                            : null;
+                          return (
+                            <div
+                              key={n.id}
+                              onClick={async () => {
+                                if (!n.is_read) {
                                   try {
                                     await api.post(`/notifications/${n.id}/read`);
                                     qc.invalidateQueries({ queryKey: ["notifications-my"] });
-                                  } catch (err) {
-                                    pushToast(getApiError(err), "error");
+                                  } catch {
+                                    // non-blocking
                                   }
-                                }}
-                                className="mt-1 text-[10px] font-bold text-[#76010d]"
-                              >
-                                Mark read
-                              </button>
-                            )}
-                          </div>
-                        ))
+                                }
+                                if (navTarget) {
+                                  setNotifOpen(false);
+                                  navigate(navTarget);
+                                }
+                              }}
+                              className={`rounded-xl border p-2 ${navTarget ? "cursor-pointer hover:border-[#76010d]/40" : ""} ${
+                                n.is_read ? "border-slate-100 bg-white" : "border-[#76010d]/25 bg-[#fdf8f0]"
+                              }`}
+                            >
+                              <div className="font-bold text-slate-900">{n.title}</div>
+                              <div className="text-slate-600 mt-0.5 line-clamp-2">{n.message}</div>
+                              {!n.is_read && (
+                                <button
+                                  type="button"
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    try {
+                                      await api.post(`/notifications/${n.id}/read`);
+                                      qc.invalidateQueries({ queryKey: ["notifications-my"] });
+                                    } catch (err) {
+                                      pushToast(getApiError(err), "error");
+                                    }
+                                  }}
+                                  className="mt-1 text-[10px] font-bold text-[#76010d]"
+                                >
+                                  Mark read
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
                       )}
                     </div>
                   </div>

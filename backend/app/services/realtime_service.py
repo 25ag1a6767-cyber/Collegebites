@@ -11,11 +11,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.database import get_db
 from app.core.security import sha256_hex
 from app.core.time_utils import today_college
+from app.models.engagement import Notification
 from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.models.payment import OrderQRCode, PickupToken
-from app.schemas.operations import DigitalBoardResponse
+from app.schemas.operations import DigitalBoardResponse, OperationalTokenBoardResponse
 from app.schemas.order import OrderOut
-from app.services import order_service, pickup_service
+from app.services import notification_service, order_service, pickup_service
 
 
 def resolve_db_session(request: Request) -> tuple[Any, Session]:
@@ -142,6 +143,7 @@ def compute_staff_orders_version(
         func.coalesce(func.sum(case((Order.status == "COMPLETED", 1), else_=0)), 0),
         func.coalesce(func.sum(case((Order.status.in_(("CANCELLED", "REJECTED")), 1), else_=0)), 0),
         func.coalesce(func.sum(Order.delayed_minutes), 0),
+        func.coalesce(func.sum(case((Order.is_priority.is_(True), 1), else_=0)), 0),
     )
     if canteen_id is not None:
         stmt = stmt.where(Order.canteen_id == canteen_id)
@@ -150,6 +152,9 @@ def compute_staff_orders_version(
     if payment_status:
         stmt = stmt.where(Order.payment_status == payment_status)
     row = db.execute(stmt).one()
+    item_prep_ready = db.scalar(
+        select(func.count(OrderItem.id)).where(OrderItem.prep_status != "PENDING")
+    ) or 0
     raw = "|".join(
         [
             str(canteen_id or "all"),
@@ -159,10 +164,74 @@ def compute_staff_orders_version(
             str(row[0] or 0),
             row[1].isoformat() if row[1] else "",
             row[2].isoformat() if row[2] else "",
-            *(str(row[idx] or 0) for idx in range(3, 11)),
+            *(str(row[idx] or 0) for idx in range(3, 12)),
+            str(item_prep_ready),
         ]
     )
     return sha256_hex(raw)[:16]
+
+
+def fetch_token_board_snapshot(db: Session, canteen_id: Optional[UUID] = None) -> OperationalTokenBoardResponse:
+    return pickup_service.get_operational_token_board(db, canteen_id)
+
+
+def compute_user_notifications_version(
+    db: Session,
+    *,
+    user_id: UUID,
+    roles: set[str],
+) -> str:
+    conds = [Notification.user_id == user_id]
+    if roles:
+        conds.append(Notification.role_target.in_(list(roles)))
+    row = db.execute(
+        select(
+            func.count(Notification.id),
+            func.coalesce(func.sum(case((Notification.is_read.is_(False), 1), else_=0)), 0),
+            func.max(Notification.created_at),
+            func.max(Notification.read_at),
+        ).where(or_(*conds))
+    ).one()
+    raw = "|".join(
+        [
+            str(user_id),
+            str(row[0] or 0),
+            str(row[1] or 0),
+            row[2].isoformat() if row[2] else "",
+            row[3].isoformat() if row[3] else "",
+        ]
+    )
+    return sha256_hex(raw)[:16]
+
+
+def fetch_user_notifications_snapshot(
+    db: Session,
+    *,
+    user_id: UUID,
+    roles: set[str],
+    assigned_canteen_id: Optional[UUID] = None,
+) -> tuple[str, dict[str, Any]]:
+    version = compute_user_notifications_version(db, user_id=user_id, roles=roles)
+    rows = notification_service.list_my_notifications(db, user_id, roles, assigned_canteen_id=assigned_canteen_id)
+    serialized = [
+        {
+            "id": str(n.id),
+            "title": n.title,
+            "message": n.message,
+            "event_type": n.event_type,
+            "order_id": str(n.order_id) if n.order_id else None,
+            "canteen_id": str(n.canteen_id) if n.canteen_id else None,
+            "is_read": n.is_read,
+            "created_at": n.created_at.isoformat() if n.created_at else None,
+            "metadata_json": n.metadata_json or {},
+        }
+        for n in rows
+    ]
+    return version, {
+        "version": version,
+        "unread_count": sum(1 for r in serialized if not r["is_read"]),
+        "notifications": serialized,
+    }
 
 
 def fetch_staff_orders_snapshot(

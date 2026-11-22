@@ -202,6 +202,7 @@ def _serialize_order_with_maps(
         estimated_pickup_at=order.estimated_pickup_at,
         delayed_minutes=order.delayed_minutes,
         delay_reason=order.delay_reason,
+        is_priority=order.is_priority,
         pickup_token_code=token_row.token_code if token_row else None,
         qr_verification_path=qr_row.verification_path if qr_row else None,
         qr_token_raw=qr_row.qr_payload_encoded if qr_row else None,
@@ -595,6 +596,7 @@ def checkout_order(
             is_guest=is_guest,
             guest_name=payload.guest_name.strip() if payload.guest_name else None,
             guest_phone=payload.guest_phone.strip() if payload.guest_phone else None,
+            guest_email=payload.guest_email.strip() if payload.guest_email else None,
             guest_access_token_hash=guest_token_hash,
             order_type=payload.order_type,
             order_channel=payload.order_channel,
@@ -622,6 +624,8 @@ def checkout_order(
                 order_id=order.id,
                 food_item_id=food.id,
                 variant_id=variant.id if variant else None,
+                station_id=getattr(food, "station_id", None),
+                prep_status="PENDING",
                 item_name=food.name,
                 variant_name=variant.name if variant else None,
                 quantity=qty,
@@ -859,6 +863,19 @@ def cancel_or_reject_order(
         actor_user_id=actor_user_id,
         details={"reason": reason, "payment_retained": True, "refund_initiated": False},
     )
+    if cancellation_type == "cancelled":
+        try:
+            from app.services.notification_service import notify_customer_order_event
+            notify_customer_order_event(
+                db,
+                order,
+                event_type="order_cancelled",
+                title=f"Order {order.order_number} Cancelled",
+                message=f"Order {order.order_number} was cancelled ({reason}). Payment records remain stored per campus policy.",
+                send_external=True,
+            )
+        except ImportError:
+            pass
     db.commit()
     db.refresh(order)
     emit_order_event_sync(str(order.canteen_id), str(order.id), f"order.{target_status.lower()}", {"status": order.status})

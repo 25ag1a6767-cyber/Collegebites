@@ -125,6 +125,8 @@ class OrderItemOut(ORMModel):
     id: UUID
     food_item_id: Optional[UUID]
     variant_id: Optional[UUID] = None
+    station_id: Optional[UUID] = None
+    prep_status: str = "PENDING"
     item_name: str
     variant_name: Optional[str]
     quantity: int
@@ -172,6 +174,7 @@ class OrderOut(ORMModel):
     estimated_pickup_at: Optional[datetime]
     delayed_minutes: int
     delay_reason: Optional[str]
+    is_priority: bool = False
     pickup_token_code: Optional[str] = None
     qr_verification_path: Optional[str] = None
     qr_token_raw: Optional[str] = None

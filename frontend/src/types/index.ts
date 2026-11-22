@@ -217,6 +217,7 @@ export interface Order {
   estimated_pickup_at?: string | null;
   delayed_minutes: number;
   delay_reason?: string | null;
+  is_priority?: boolean;
   pickup_token_code?: string | null;
   qr_verification_path?: string | null;
   qr_token_raw?: string | null;
@@ -237,6 +238,8 @@ export interface Order {
     id: string;
     food_item_id?: string | null;
     variant_id?: string | null;
+    station_id?: string | null;
+    prep_status?: string;
     item_name: string;
     variant_name?: string | null;
     quantity: number;
@@ -288,6 +291,62 @@ export interface DigitalBoardResponse {
   recently_completed: TokenBoardItem[];
   updated_at: string;
   version?: string | null;
+}
+
+export interface TokenBoardOrderItemDetail {
+  id: string;
+  item_name: string;
+  variant_name?: string | null;
+  quantity: number;
+  prep_status: "PENDING" | "PREPARING" | "READY" | string;
+  station_id?: string | null;
+  station_name?: string | null;
+  special_instructions?: string | null;
+}
+
+export interface OperationalTokenCard {
+  order_id: string;
+  order_number: string;
+  token_code: string;
+  sequence_number: number;
+  qr_reference?: string | null;
+  qr_verification_path?: string | null;
+  canteen_id: string;
+  canteen_name: string;
+  counter_id: string;
+  counter_name: string;
+  customer_label: string;
+  order_type: string;
+  order_channel: string;
+  status: string;
+  payment_status: string;
+  payment_method: string;
+  total_amount: string;
+  is_priority: boolean;
+  delayed_minutes: number;
+  delay_reason?: string | null;
+  estimated_prep_minutes: number;
+  estimated_pickup_at?: string | null;
+  created_at: string;
+  confirmed_at?: string | null;
+  accepted_at?: string | null;
+  preparing_at?: string | null;
+  ready_at?: string | null;
+  completed_at?: string | null;
+  items: TokenBoardOrderItemDetail[];
+}
+
+export interface OperationalTokenBoardResponse {
+  canteen_id?: string | null;
+  canteen_name: string;
+  new_orders: OperationalTokenCard[];
+  accepted_orders: OperationalTokenCard[];
+  preparing_orders: OperationalTokenCard[];
+  ready_for_pickup: OperationalTokenCard[];
+  completed_orders: OperationalTokenCard[];
+  counts: Record<string, number>;
+  updated_at: string;
+  version: string;
 }
 
 export interface ReceiptSnapshot {

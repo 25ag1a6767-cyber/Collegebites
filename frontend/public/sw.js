@@ -1,4 +1,4 @@
-const CACHE_NAME = "collegebites-shell-v2";
+const CACHE_NAME = "collegebites-shell-v3";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -86,4 +86,46 @@ self.addEventListener("fetch", (event) => {
       })
     );
   }
+});
+
+self.addEventListener("push", (event) => {
+  let payload = { title: "CollegeBites Order Update", body: "Your order status has changed.", url: "/orders" };
+  try {
+    if (event.data) {
+      const parsed = event.data.json();
+      payload = {
+        title: parsed.title || payload.title,
+        body: parsed.body || parsed.message || payload.body,
+        url: parsed.url || payload.url,
+      };
+    }
+  } catch {
+    if (event.data) payload.body = event.data.text();
+  }
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body: payload.body,
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      data: { url: payload.url },
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification.data && event.notification.data.url) || "/orders";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if ("focus" in client) {
+          client.focus();
+          if ("navigate" in client) return client.navigate(targetUrl);
+          return client;
+        }
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
+      return null;
+    })
+  );
 });

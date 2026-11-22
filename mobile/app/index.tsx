@@ -237,9 +237,14 @@ export default function MenuScreen() {
                 : "Select a canteen")}
           </Text>
         </View>
-        <Pressable onPress={() => router.push("/board")} style={styles.boardChip}>
-          <Text style={styles.boardChipTxt}>Live Board →</Text>
-        </Pressable>
+        <View style={{ flexDirection: "row", gap: 6 }}>
+          <Pressable onPress={() => router.push("/scan")} style={[styles.boardChip, { backgroundColor: "#1e293b" }]}>
+            <Text style={styles.boardChipTxt}>Scan QR</Text>
+          </Pressable>
+          <Pressable onPress={() => router.push("/board")} style={styles.boardChip}>
+            <Text style={styles.boardChipTxt}>Display →</Text>
+          </Pressable>
+        </View>
       </View>
 
       {liveOrder && (

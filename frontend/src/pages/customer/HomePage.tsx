@@ -232,8 +232,34 @@ export const HomePage: React.FC = () => {
   const cartTotal = Number(cart?.total_amount || 0);
   const cartCount = cart?.items?.reduce((s, i) => s + i.quantity, 0) || 0;
 
+  const { data: myOrders = [] } = useQuery<any[]>({
+    queryKey: ["my-orders"],
+    enabled: Boolean(user),
+    queryFn: async () => (await api.get("/orders/my")).data,
+    refetchInterval: 20000,
+  });
+  const activeOrder = myOrders.find((o) =>
+    ["PLACED", "ACCEPTED", "PREPARING", "READY"].includes(o.status)
+  );
+
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6 pb-24 space-y-6">
+    <div className="mx-auto max-w-7xl px-4 py-6 pb-28 space-y-6">
+      {activeOrder && (
+        <div
+          onClick={() => navigate(`/orders/${activeOrder.order_number}`)}
+          className="cursor-pointer flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-500/40 bg-emerald-950 px-4 py-3 text-white shadow-sm hover:bg-emerald-900 transition"
+        >
+          <div className="flex items-center gap-3">
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-ping" />
+            <div className="text-xs sm:text-sm font-bold">
+              Live Order {activeOrder.order_number} • Token{" "}
+              <span className="text-[#fdedce] font-mono text-base">{activeOrder.pickup_token_code}</span> is{" "}
+              <span className="underline">{activeOrder.status}</span>
+            </div>
+          </div>
+          <span className="text-xs font-extrabold text-emerald-300">Track Live →</span>
+        </div>
+      )}
       {/* Announcements Banner */}
       {announcements.length > 0 && (
         <div className="flex items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -518,7 +544,7 @@ export const HomePage: React.FC = () => {
 
       {/* Floating Cart Bar */}
       {cartCount > 0 && (
-        <div className="fixed bottom-4 left-1/2 z-30 -translate-x-1/2 w-[94%] max-w-xl no-print">
+        <div className="fixed bottom-20 md:bottom-4 left-1/2 z-30 -translate-x-1/2 w-[94%] max-w-xl no-print">
           <div className="flex items-center justify-between rounded-2xl bg-slate-900 px-5 py-3.5 text-white shadow-2xl">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#76010d] font-bold">

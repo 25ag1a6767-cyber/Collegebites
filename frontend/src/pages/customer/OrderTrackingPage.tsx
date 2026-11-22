@@ -1,11 +1,23 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Clock, HelpCircle, PackageCheck, RefreshCw, Utensils, XCircle } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
+import {
+  BellRing,
+  CheckCircle2,
+  Clock,
+  HelpCircle,
+  PackageCheck,
+  RefreshCw,
+  RotateCcw,
+  Utensils,
+  XCircle,
+} from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Order, ReceiptSnapshot } from "../../types";
+import { enableBrowserPushNotifications, playOrderAlertChime, showBrowserNotification } from "../../utils/notifications";
 import { BrandLoadingState, BrandLogo } from "../../components/branding/BrandLogo";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
 import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
@@ -14,6 +26,7 @@ import { StripePaymentModal } from "../../components/payments/StripePaymentModal
 import { openRazorpayModal } from "../../utils/razorpay";
 
 const STEPS = [
+  { key: "PAYMENT_PENDING", label: "Payment Pending" },
   { key: "PAYMENT_CONFIRMED", label: "Payment Verified" },
   { key: "PLACED", label: "Order Placed" },
   { key: "ACCEPTED", label: "Accepted" },
@@ -22,21 +35,38 @@ const STEPS = [
   { key: "COMPLETED", label: "Handed Over" },
 ];
 
+function formatCountdown(secs: number): string {
+  const s = Math.max(0, Math.floor(secs));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+}
+
 export const OrderTrackingPage: React.FC = () => {
   const { orderNumber } = useParams<{ orderNumber: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { pushToast } = useToast();
-  const { accessToken, guestOrderTokens } = useAppStore();
+  const { accessToken, guestOrderTokens, setSelectedCanteen } = useAppStore();
 
   const guestToken = searchParams.get("guest_token") || (orderNumber ? guestOrderTokens[orderNumber] : undefined);
   const [manualGuestToken, setManualGuestToken] = useState(guestToken || "");
   const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stripeModalOrder, setStripeModalOrder] = useState<Order | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [notifPerm, setNotifPerm] = useState<string>(() =>
+    typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported"
+  );
   const handledStripeRef = useRef<string | null>(null);
   const realtimeLiveRef = useRef(false);
+  const prevTrackStateRef = useRef<{ status: string; delayed: number } | null>(null);
+
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const effectiveToken = guestToken || manualGuestToken || undefined;
   const querySuffix = effectiveToken ? `?guest_token=${encodeURIComponent(effectiveToken)}` : "";
 
@@ -232,6 +262,86 @@ export const OrderTrackingPage: React.FC = () => {
   const currentStepIdx = STEPS.findIndex((s) => s.key === order.status);
   const isTerminalFail = ["CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(order.status);
 
+  useEffect(() => {
+    const prev = prevTrackStateRef.current;
+    if (!prev) {
+      prevTrackStateRef.current = { status: order.status, delayed: order.delayed_minutes };
+      return;
+    }
+    if (prev.status !== order.status) {
+      playOrderAlertChime(order.status === "READY");
+      const msg =
+        order.status === "READY"
+          ? `Token ${order.pickup_token_code || order.order_number} is READY at ${order.counter_name}!`
+          : `Order ${order.order_number} is now ${order.status}`;
+      pushToast(msg, order.status === "READY" ? "success" : "info");
+      void showBrowserNotification(`Order ${order.status}`, msg, `/orders/${order.order_number}`);
+    } else if (order.delayed_minutes > prev.delayed) {
+      playOrderAlertChime(true);
+      const msg = `Order ${order.order_number} delayed (+${order.delayed_minutes}m): ${order.delay_reason || ""}`;
+      pushToast(msg, "info");
+      void showBrowserNotification("Order Delayed", msg, `/orders/${order.order_number}`);
+    }
+    prevTrackStateRef.current = { status: order.status, delayed: order.delayed_minutes };
+  }, [order.status, order.delayed_minutes, order.delay_reason, order.order_number, order.pickup_token_code, order.counter_name, pushToast]);
+
+  const handleReorderOrder = async () => {
+    setBusy(true);
+    try {
+      let added = 0;
+      for (const it of order.items) {
+        if (!it.food_item_id) continue;
+        const addons: { addon_id: string; quantity: number }[] = [];
+        let spiceLevel: string | null = null;
+        let sugarLevel: string | null = null;
+        const removedIngredients: string[] = [];
+        for (const c of it.customizations || []) {
+          if (c.customization_type === "addon" && c.addon_id) addons.push({ addon_id: c.addon_id, quantity: c.quantity || 1 });
+          else if (c.customization_type === "spice") spiceLevel = c.option_value;
+          else if (c.customization_type === "sugar") sugarLevel = c.option_value;
+          else if (c.customization_type === "remove_ingredient") removedIngredients.push(c.option_value);
+        }
+        try {
+          await api.post("/carts/items", {
+            canteen_id: order.canteen_id,
+            food_item_id: it.food_item_id,
+            variant_id: it.variant_id || null,
+            quantity: it.quantity,
+            spice_level: spiceLevel,
+            sugar_level: sugarLevel,
+            removed_ingredients: removedIngredients,
+            addons,
+            special_instructions: it.special_instructions || null,
+          });
+          added += 1;
+        } catch {
+          // continue adding remaining items
+        }
+      }
+      if (added === 0) {
+        pushToast("These dishes are currently unavailable to reorder", "error");
+        return;
+      }
+      setSelectedCanteen(order.canteen_id);
+      qc.invalidateQueries({ queryKey: ["cart", order.canteen_id] });
+      pushToast(`Added ${added} item(s) to cart!`, "success");
+      navigate("/checkout");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startMs = new Date(order.confirmed_at || order.created_at).getTime();
+  const targetMs = order.estimated_pickup_at
+    ? new Date(order.estimated_pickup_at).getTime()
+    : startMs + (order.estimated_prep_minutes + order.delayed_minutes) * 60000;
+  const remainingSecs = Math.max(0, Math.floor((targetMs - nowMs) / 1000));
+  const totalEtaSecs = Math.max(60, Math.floor((targetMs - startMs) / 1000));
+  const progressPct =
+    order.status === "READY" || order.status === "COMPLETED"
+      ? 100
+      : Math.min(95, Math.max(8, Math.round(((totalEtaSecs - remainingSecs) / totalEtaSecs) * 100)));
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
       {/* Status Banner */}
@@ -262,34 +372,64 @@ export const OrderTrackingPage: React.FC = () => {
           </div>
 
           {order.pickup_token_code && (
-            <div className="rounded-2xl bg-[#380106] px-6 py-3 text-center text-white">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-[#fdedce]">Pickup Token</div>
-              <div className="text-4xl font-black tracking-wider">{order.pickup_token_code}</div>
+            <div className="flex items-center gap-3">
+              <div className="rounded-2xl bg-[#380106] px-6 py-3 text-center text-white">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-[#fdedce]">Pickup Token</div>
+                <div className="text-4xl font-black tracking-wider">{order.pickup_token_code}</div>
+              </div>
+              {order.qr_token_raw && (
+                <div className="rounded-2xl border border-slate-200 bg-white p-2 text-center shadow-sm">
+                  <QRCodeSVG value={order.qr_token_raw} size={74} />
+                  <div className="text-[9px] font-bold text-slate-500 mt-0.5">Pickup QR</div>
+                </div>
+              )}
             </div>
           )}
         </div>
 
         {/* Live Progress Timeline */}
         {!isTerminalFail ? (
-          <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-6">
-            {STEPS.map((step, idx) => {
-              const reached = currentStepIdx >= idx || (order.status === "PLACED" && idx === 0);
-              return (
-                <div
-                  key={step.key}
-                  className={`rounded-xl border p-2.5 text-center text-xs font-bold transition ${
-                    reached
-                      ? "border-emerald-500 bg-emerald-50 text-emerald-800"
-                      : "border-slate-200 bg-slate-50 text-slate-400"
-                  }`}
-                >
-                  <div className="mx-auto mb-1 flex h-6 w-6 items-center justify-center rounded-full bg-white shadow-sm">
-                    {reached ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <Clock className="h-3.5 w-3.5" />}
+          <div className="mt-6 space-y-3">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-7">
+              {STEPS.map((step, idx) => {
+                const reached = currentStepIdx >= idx || (order.status === "PLACED" && idx <= 2);
+                return (
+                  <div
+                    key={step.key}
+                    className={`rounded-xl border p-2 text-center text-[11px] font-bold transition ${
+                      reached
+                        ? "border-emerald-500 bg-emerald-50 text-emerald-800"
+                        : "border-slate-200 bg-slate-50 text-slate-400"
+                    }`}
+                  >
+                    <div className="mx-auto mb-1 flex h-5 w-5 items-center justify-center rounded-full bg-white shadow-sm">
+                      {reached ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> : <Clock className="h-3 w-3" />}
+                    </div>
+                    {step.label}
                   </div>
-                  {step.label}
+                );
+              })}
+            </div>
+            {order.payment_status === "CONFIRMED" && order.status !== "COMPLETED" && (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-600">
+                  <span>
+                    {order.status === "READY"
+                      ? `Order ready at ${order.counter_name}! Present your QR token.`
+                      : remainingSecs > 0
+                      ? `Estimated ready in ${formatCountdown(remainingSecs)} (Target ${new Date(targetMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})`
+                      : "Finishing preparation shortly — kitchen is finalizing your order."}
+                  </span>
+                  <span className="font-mono">{progressPct}%</span>
                 </div>
-              );
-            })}
+                <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-500 ${order.status === "READY" ? "bg-emerald-500" : "bg-[#76010d]"}`}
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <div className="mt-5 flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
@@ -304,8 +444,23 @@ export const OrderTrackingPage: React.FC = () => {
         )}
 
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
-          <div className="text-xs text-slate-500 flex items-center gap-2">
-            <Utensils className="h-4 w-4" /> Est. Ready: ~{order.estimated_prep_minutes} mins
+          <div className="text-xs text-slate-500 flex flex-wrap items-center gap-3">
+            <span className="inline-flex items-center gap-1">
+              <Utensils className="h-4 w-4" /> Est. Prep: ~{order.estimated_prep_minutes + order.delayed_minutes} mins
+            </span>
+            {notifPerm !== "granted" && notifPerm !== "unsupported" && (
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await enableBrowserPushNotifications();
+                  setNotifPerm(Notification.permission);
+                  if (res.granted) pushToast("Live Ready alerts enabled for your browser!", "success");
+                }}
+                className="inline-flex items-center gap-1 rounded-full bg-[#fdf8f0] border border-[#76010d]/25 px-2.5 py-0.5 text-[11px] font-bold text-[#76010d]"
+              >
+                <BellRing className="h-3 w-3" /> Enable Ready Alerts
+              </button>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
             {order.payment_status !== "CONFIRMED" && ["PAYMENT_PENDING", "PAYMENT_FAILED"].includes(order.status) && (
@@ -336,6 +491,11 @@ export const OrderTrackingPage: React.FC = () => {
                 </Button>
               </>
             )}
+            {order.items.length > 0 && (
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => void handleReorderOrder()}>
+                <RotateCcw className="h-3.5 w-3.5" /> Reorder
+              </Button>
+            )}
             {["PAYMENT_PENDING", "PLACED", "ACCEPTED"].includes(order.status) && (
               <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirmCancelOpen(true)}>
                 Cancel Order
@@ -348,6 +508,21 @@ export const OrderTrackingPage: React.FC = () => {
             </Link>
           </div>
         </div>
+
+        {order.status_history && order.status_history.length > 0 && (
+          <div className="mt-4 border-t border-slate-100 pt-3">
+            <div className="text-[11px] font-bold uppercase text-slate-400 mb-2">Order Activity Log</div>
+            <div className="flex flex-wrap gap-2">
+              {order.status_history.map((h) => (
+                <div key={h.id} className="rounded-lg bg-slate-50 border border-slate-200/80 px-2.5 py-1 text-[11px] text-slate-700">
+                  <strong>{h.to_status}</strong> •{" "}
+                  {new Date(h.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  {h.reason ? ` (${h.reason})` : ""}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* Complete Printable Receipt & QR Code */}

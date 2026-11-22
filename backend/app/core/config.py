@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     TWILIO_WHATSAPP_FROM: str = ""
     SMS_WEBHOOK_URL: str = ""
 
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    VAPID_SUBJECT: str = "mailto:admin@collegebites.edu"
+
     NETWORK_PRINTER_ENABLED: bool = False
     DEFAULT_PRINTER_IP: str = "192.168.1.200"
     DEFAULT_PRINTER_PORT: int = 9100

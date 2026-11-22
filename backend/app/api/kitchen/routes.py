@@ -17,7 +17,7 @@ from app.core.permissions import (
 )
 from app.models.inventory import InventoryItem
 from app.models.menu import FoodItem
-from app.models.order import Order
+from app.models.order import Order, OrderItem
 from app.schemas.operations import DelayReportRequest, ItemUnavailableRequest
 from app.schemas.order import OrderOut
 from app.services import kitchen_service
@@ -39,11 +39,14 @@ def get_kitchen_orders(
     canteen_id: UUID,
     status: Optional[str] = Query(default=None),
     kitchen_id: Optional[UUID] = Query(default=None),
+    station_id: Optional[UUID] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, canteen_id)
-    return kitchen_service.list_kitchen_orders(db, canteen_id, status_filter=status, kitchen_id=kitchen_id)
+    return kitchen_service.list_kitchen_orders(
+        db, canteen_id, status_filter=status, kitchen_id=kitchen_id, station_id=station_id
+    )
 
 
 @router.post("/orders/{order_id}/accept", response_model=OrderOut)
@@ -130,6 +133,39 @@ def list_kitchen_ingredients(
     return kitchen_service.list_canteen_ingredients_for_kitchen(db, canteen_id)
 
 
+class OrderPriorityIn(BaseModel):
+    is_priority: bool
+
+
+class OrderItemPrepStatusIn(BaseModel):
+    prep_status: str = Field(pattern="^(PENDING|PREPARING|READY)$")
+
+
+@router.post("/orders/{order_id}/priority", response_model=OrderOut)
+def set_order_priority(
+    order_id: UUID,
+    payload: OrderPriorityIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    _enforce_order_scope(db, principal, order_id)
+    return kitchen_service.toggle_order_priority(db, order_id, payload.is_priority, principal.user.id)
+
+
+@router.post("/order-items/{order_item_id}/prep-status", response_model=OrderOut)
+def set_order_item_prep_status(
+    order_item_id: UUID,
+    payload: OrderItemPrepStatusIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    oi = db.get(OrderItem, order_item_id)
+    if not oi:
+        raise HTTPException(status_code=404, detail="Order item not found")
+    _enforce_order_scope(db, principal, oi.order_id)
+    return kitchen_service.update_order_item_prep_status(db, order_item_id, payload.prep_status, principal.user.id)
+
+
 @router.post("/ingredients/{inventory_item_id}/unavailable")
 def report_ingredient_unavailable(
     inventory_item_id: UUID,
@@ -142,3 +178,16 @@ def report_ingredient_unavailable(
         raise HTTPException(status_code=404, detail="Inventory item not found")
     enforce_canteen_scope(principal, inv.canteen_id)
     return kitchen_service.report_ingredient_unavailable(db, inventory_item_id, payload.reason, principal.user.id)
+
+
+@router.post("/ingredients/{inventory_item_id}/restore")
+def restore_ingredient_available(
+    inventory_item_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    inv = db.get(InventoryItem, inventory_item_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    enforce_canteen_scope(principal, inv.canteen_id)
+    return kitchen_service.restore_ingredient_availability(db, inventory_item_id, principal.user.id)

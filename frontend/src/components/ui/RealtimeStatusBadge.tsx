@@ -5,9 +5,15 @@ interface Props {
   status: RealtimeStatus;
   lastSyncedAt?: Date | null;
   darkSurface?: boolean;
+  connectedLabel?: string;
 }
 
-export const RealtimeStatusBadge: React.FC<Props> = ({ status, lastSyncedAt, darkSurface = false }) => {
+export const RealtimeStatusBadge: React.FC<Props> = ({
+  status,
+  lastSyncedAt,
+  darkSurface = false,
+  connectedLabel = "Live Sync",
+}) => {
   const palette = (() => {
     if (status === "live") {
       return darkSurface
@@ -33,9 +39,9 @@ export const RealtimeStatusBadge: React.FC<Props> = ({ status, lastSyncedAt, dar
 
   const label =
     status === "live"
-      ? "Live Sync"
+      ? connectedLabel
       : status === "offline"
-      ? "Offline — paused"
+      ? "Offline"
       : status === "reconnecting"
       ? "Reconnecting..."
       : "Connecting...";

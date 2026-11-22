@@ -47,6 +47,7 @@ class FoodItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     kitchen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("kitchens.id", ondelete="SET NULL"))
     counter_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("counters.id", ondelete="SET NULL"))
+    station_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("kitchen_stations.id", ondelete="SET NULL"))
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     slug: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)

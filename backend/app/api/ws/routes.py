@@ -125,6 +125,11 @@ async def _watch_room_db_changes(
             elif watch_kind == "kitchen":
                 watermark = realtime_service.compute_staff_orders_version(db, canteen_id=target_id)
                 event_name = "kitchen.updated"
+            elif watch_kind == "notifications" and target_id is not None:
+                from app.core.permissions import load_user_roles_and_permissions
+                roles, _perms, _cid = load_user_roles_and_permissions(db, target_id)
+                watermark = realtime_service.compute_user_notifications_version(db, user_id=target_id, roles=roles)
+                event_name = "notifications.updated"
             else:
                 continue
 
@@ -222,4 +227,4 @@ async def ws_notifications(websocket: WebSocket, user_id: str):
     ):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    await _serve_room(f"user:{user_id}", websocket)
+    await _serve_room(f"user:{user_id}", websocket, watch_kind="notifications", target_id=uid)

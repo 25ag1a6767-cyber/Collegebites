@@ -206,8 +206,13 @@ export default function OrderDetailScreen() {
             )}
             <Text style={styles.counterSub}>
               Counter: {order.counter_name} • {order.status}
-              {order.estimated_prep_minutes ? ` • Est ${order.estimated_prep_minutes}m` : ""}
+              {order.estimated_prep_minutes ? ` • Est ${order.estimated_prep_minutes + (order.delayed_minutes || 0)}m` : ""}
             </Text>
+            {order.delayed_minutes > 0 && (
+              <Text style={{ color: "#fbbf24", fontSize: 12, fontWeight: "800", marginTop: 4 }}>
+                Delayed +{order.delayed_minutes} min{order.delay_reason ? `: ${order.delay_reason}` : ""}
+              </Text>
+            )}
           </>
         ) : (
           <Text style={{ color: "#fbbf24", fontWeight: "700", marginTop: 8 }}>

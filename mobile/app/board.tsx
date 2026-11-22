@@ -88,6 +88,20 @@ export default function BoardScreen() {
           <Text style={styles.emptyTxt}>No orders waiting at counter right now.</Text>
         )}
       </View>
+      <Text style={[styles.header, { color: "#94a3b8" }]}>
+        RECENTLY COMPLETED ({board?.recently_completed?.length || 0})
+      </Text>
+      <View style={styles.grid}>
+        {(board?.recently_completed || []).map((t: any) => (
+          <View key={t.order_id || t.token_code} style={[styles.prepCard, { opacity: 0.7 }]}>
+            <Text style={styles.prepToken}>{t.token_code}</Text>
+            <Text style={styles.statusTxt}>{t.counter_name}</Text>
+          </View>
+        ))}
+        {(!board?.recently_completed || board.recently_completed.length === 0) && (
+          <Text style={styles.emptyTxt}>Completed tokens will appear here after handover.</Text>
+        )}
+      </View>
     </ScrollView>
   );
 }

@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import time
-from typing import Optional
+from typing import Any, Callable, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -25,6 +25,7 @@ from app.core.permissions import (
     enforce_canteen_scope,
     get_optional_principal,
     require_roles,
+    scoped_canteen_for_principal,
 )
 from app.core.security import sha256_hex
 from app.models.college import Canteen
@@ -42,6 +43,15 @@ STAFF_ROLES = (
     ROLE_KITCHEN_STAFF,
     ROLE_INVENTORY_MANAGER,
     ROLE_PICKUP_STAFF,
+)
+
+TOKEN_BOARD_ROLES = (
+    ROLE_SUPER_ADMIN,
+    ROLE_COLLEGE_ADMIN,
+    ROLE_CANTEEN_MANAGER,
+    ROLE_KITCHEN_STAFF,
+    ROLE_PICKUP_STAFF,
+    ROLE_CASHIER,
 )
 
 SSE_HEADERS = {
@@ -76,7 +86,6 @@ def _authorize_order_for_stream(
     principal: Optional[AuthenticatedPrincipal],
     guest_token: Optional[str],
 ) -> Order:
-    stmt = None
     try:
         uid = UUID(order_id_or_number)
         stmt = select(Order).where(Order.id == uid)
@@ -90,7 +99,7 @@ def _authorize_order_for_stream(
         return order
     if principal and order.customer_id and order.customer_id == principal.user.id:
         return order
-    if principal and principal.has_role(*STAFF_ROLES):
+    if principal and order.canteen_id and principal.has_role(*STAFF_ROLES):
         enforce_canteen_scope(principal, order.canteen_id)
         return order
     if guest_token and order.guest_access_token_hash and sha256_hex(guest_token.strip()) == order.guest_access_token_hash:
@@ -100,21 +109,18 @@ def _authorize_order_for_stream(
     raise HTTPException(status_code=401, detail="Authentication or valid guest token required")
 
 
-@router.get("/board/stream")
-async def stream_digital_board(
+def _stream_with_watermark(
+    *,
     request: Request,
-    canteen_id: Optional[UUID] = Query(default=None),
-    last_version: Optional[str] = Query(default=None),
-    once: bool = Query(default=False),
-    max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
-    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
-    db: Session = Depends(get_db),
-):
-    """Server-Sent Events stream for real-time public Token Board synchronization across all instances."""
-    if canteen_id is not None and not db.get(Canteen, canteen_id):
-        raise HTTPException(status_code=404, detail="Canteen not found")
-
-    topic = f"board:{canteen_id}" if canteen_id is not None else "board:all"
+    topic: str,
+    event_name: str,
+    last_version: Optional[str],
+    last_event_id: Optional[str],
+    once: bool,
+    max_seconds: Optional[float],
+    compute_version: Callable[[Session], Optional[str]],
+    fetch_payload: Callable[[Session], tuple[Optional[str], Optional[dict[str, Any]]]],
+) -> StreamingResponse:
     window_secs = _default_stream_window(max_seconds)
     seen_version = (last_version or last_event_id or "").strip() or None
 
@@ -138,9 +144,8 @@ async def stream_digital_board(
                     if remaining <= 0:
                         yield _format_sse("stream.reconnect", {"reason": "cycle", "version": seen_version})
                         break
-                    wait_for = min(0.9, remaining)
                     try:
-                        await asyncio.wait_for(queue.get(), timeout=wait_for)
+                        await asyncio.wait_for(queue.get(), timeout=min(0.9, remaining))
                         while not queue.empty():
                             try:
                                 queue.get_nowait()
@@ -152,18 +157,14 @@ async def stream_digital_board(
 
                 gen, sess = realtime_service.resolve_db_session(request)
                 try:
-                    watermark = realtime_service.compute_board_watermark(sess, canteen_id)
-                    if first_cycle or woken_by_event or watermark != last_watermark:
+                    watermark = compute_version(sess)
+                    if watermark and (first_cycle or woken_by_event or watermark != last_watermark):
                         last_watermark = watermark
-                        snapshot = realtime_service.fetch_board_snapshot(sess, canteen_id)
-                        snap_version = snapshot.version or watermark
-                        if first_cycle or snap_version != seen_version:
-                            seen_version = snap_version
-                            yield _format_sse(
-                                "board.snapshot",
-                                snapshot.model_dump(mode="json"),
-                                event_id=snap_version,
-                            )
+                        snap_ver, payload = fetch_payload(sess)
+                        eff_ver = snap_ver or watermark
+                        if payload is not None and (first_cycle or eff_ver != seen_version):
+                            seen_version = eff_ver
+                            yield _format_sse(event_name, payload, event_id=eff_ver)
                 finally:
                     realtime_service.close_db_session(gen)
 
@@ -182,6 +183,67 @@ async def stream_digital_board(
             ws_manager.unsubscribe(topic, queue)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@router.get("/board/stream")
+async def stream_digital_board(
+    request: Request,
+    canteen_id: Optional[UUID] = Query(default=None),
+    last_version: Optional[str] = Query(default=None),
+    once: bool = Query(default=False),
+    max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    db: Session = Depends(get_db),
+):
+    """Server-Sent Events stream for public TV Pickup Display synchronization."""
+    if canteen_id is not None and not db.get(Canteen, canteen_id):
+        raise HTTPException(status_code=404, detail="Canteen not found")
+
+    def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+        snap = realtime_service.fetch_board_snapshot(sess, canteen_id)
+        return snap.version, snap.model_dump(mode="json")
+
+    return _stream_with_watermark(
+        request=request,
+        topic=f"board:{canteen_id}" if canteen_id is not None else "board:all",
+        event_name="board.snapshot",
+        last_version=last_version,
+        last_event_id=last_event_id,
+        once=once,
+        max_seconds=max_seconds,
+        compute_version=lambda sess: realtime_service.compute_board_watermark(sess, canteen_id),
+        fetch_payload=_fetch,
+    )
+
+
+@router.get("/token-board/stream")
+async def stream_operational_token_board(
+    request: Request,
+    canteen_id: Optional[UUID] = Query(default=None),
+    last_version: Optional[str] = Query(default=None),
+    once: bool = Query(default=False),
+    max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*TOKEN_BOARD_ROLES)),
+):
+    """Authenticated SSE stream for the 5-section Operational Token Board."""
+    scoped_canteen = scoped_canteen_for_principal(principal, canteen_id)
+
+    def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+        snap = realtime_service.fetch_token_board_snapshot(sess, scoped_canteen)
+        return snap.version, snap.model_dump(mode="json")
+
+    return _stream_with_watermark(
+        request=request,
+        topic=f"kitchen:{scoped_canteen}" if scoped_canteen is not None else "staff:orders",
+        event_name="token_board.snapshot",
+        last_version=last_version,
+        last_event_id=last_event_id,
+        once=once,
+        max_seconds=max_seconds,
+        compute_version=lambda sess: realtime_service.compute_staff_orders_version(sess, canteen_id=scoped_canteen),
+        fetch_payload=_fetch,
+    )
 
 
 @router.get("/orders/{order_id_or_number}/stream")
@@ -200,73 +262,24 @@ async def stream_order_updates(
     """Server-Sent Events stream for real-time customer & staff single-order status tracking."""
     order = _authorize_order_for_stream(db, order_id_or_number, principal, guest_token or x_guest_token)
     order_id = order.id
-    topic = f"order:{order_id}"
-    window_secs = _default_stream_window(max_seconds)
-    seen_version = (last_version or last_event_id or "").strip() or None
 
-    async def event_generator():
-        nonlocal seen_version
-        queue = ws_manager.subscribe(topic)
-        started_at = time.monotonic()
-        last_ping = started_at
-        last_computed: Optional[str] = None
-        first_cycle = True
+    def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+        ver, out = realtime_service.fetch_order_snapshot(sess, order_id)
+        if not ver or not out:
+            return None, None
+        return ver, {"version": ver, "order": out.model_dump(mode="json")}
 
-        try:
-            yield "retry: 1500\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-
-                woken_by_event = False
-                if not first_cycle:
-                    remaining = window_secs - (time.monotonic() - started_at)
-                    if remaining <= 0:
-                        yield _format_sse("stream.reconnect", {"reason": "cycle", "version": seen_version})
-                        break
-                    try:
-                        await asyncio.wait_for(queue.get(), timeout=min(0.9, remaining))
-                        while not queue.empty():
-                            try:
-                                queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                break
-                        woken_by_event = True
-                    except asyncio.TimeoutError:
-                        pass
-
-                gen, sess = realtime_service.resolve_db_session(request)
-                try:
-                    ver = realtime_service.compute_order_version(sess, order_id)
-                    if ver and (first_cycle or woken_by_event or ver != last_computed):
-                        last_computed = ver
-                        if first_cycle or ver != seen_version:
-                            snap_ver, order_out = realtime_service.fetch_order_snapshot(sess, order_id)
-                            if snap_ver and order_out:
-                                seen_version = snap_ver
-                                yield _format_sse(
-                                    "order.snapshot",
-                                    {"version": snap_ver, "order": order_out.model_dump(mode="json")},
-                                    event_id=snap_ver,
-                                )
-                finally:
-                    realtime_service.close_db_session(gen)
-
-                first_cycle = False
-                if once:
-                    break
-
-                now = time.monotonic()
-                if now - last_ping >= 12.0:
-                    last_ping = now
-                    yield ": keepalive\n\n"
-                if now - started_at >= window_secs:
-                    yield _format_sse("stream.reconnect", {"reason": "cycle", "version": seen_version})
-                    break
-        finally:
-            ws_manager.unsubscribe(topic, queue)
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
+    return _stream_with_watermark(
+        request=request,
+        topic=f"order:{order_id}",
+        event_name="order.snapshot",
+        last_version=last_version,
+        last_event_id=last_event_id,
+        once=once,
+        max_seconds=max_seconds,
+        compute_version=lambda sess: realtime_service.compute_order_version(sess, order_id),
+        fetch_payload=_fetch,
+    )
 
 
 @router.get("/staff/orders/stream")
@@ -284,86 +297,81 @@ async def stream_staff_orders(
     principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_ROLES)),
 ):
     """Server-Sent Events stream for Canteen Manager, Kitchen Display, Pickup, and Admin consoles."""
-    scoped_canteen = canteen_id
-    if not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
-        enforce_canteen_scope(principal, canteen_id or principal.assigned_canteen_id)
-        scoped_canteen = canteen_id or principal.assigned_canteen_id
+    scoped_canteen = scoped_canteen_for_principal(principal, canteen_id)
 
-    topic = f"kitchen:{scoped_canteen}" if scoped_canteen is not None else "staff:orders"
-    window_secs = _default_stream_window(max_seconds)
-    seen_version = (last_version or last_event_id or "").strip() or None
+    def _compute(sess: Session) -> str:
+        ver = realtime_service.compute_staff_orders_version(
+            sess,
+            canteen_id=scoped_canteen,
+            status_filter=status_filter,
+            payment_status=payment_status,
+            q=q,
+        )
+        board_wm = realtime_service.compute_board_watermark(sess, scoped_canteen)
+        return sha256_hex(f"{ver}|{board_wm}")[:16]
 
-    async def event_generator():
-        nonlocal seen_version
-        queue = ws_manager.subscribe(topic)
-        started_at = time.monotonic()
-        last_ping = started_at
-        last_watermark: Optional[str] = None
-        first_cycle = True
+    def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+        snap = realtime_service.fetch_staff_orders_snapshot(
+            sess,
+            canteen_id=scoped_canteen,
+            status_filter=status_filter,
+            payment_status=payment_status,
+            q=q,
+            limit=limit,
+        )
+        ver = _compute(sess)
+        snap["version"] = ver
+        return ver, snap
 
-        try:
-            yield "retry: 1500\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
+    return _stream_with_watermark(
+        request=request,
+        topic=f"kitchen:{scoped_canteen}" if scoped_canteen is not None else "staff:orders",
+        event_name="orders.snapshot",
+        last_version=last_version,
+        last_event_id=last_event_id,
+        once=once,
+        max_seconds=max_seconds,
+        compute_version=_compute,
+        fetch_payload=_fetch,
+    )
 
-                woken_by_event = False
-                if not first_cycle:
-                    remaining = window_secs - (time.monotonic() - started_at)
-                    if remaining <= 0:
-                        yield _format_sse("stream.reconnect", {"reason": "cycle", "version": seen_version})
-                        break
-                    try:
-                        await asyncio.wait_for(queue.get(), timeout=min(0.9, remaining))
-                        while not queue.empty():
-                            try:
-                                queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                break
-                        woken_by_event = True
-                    except asyncio.TimeoutError:
-                        pass
 
-                gen, sess = realtime_service.resolve_db_session(request)
-                try:
-                    ver = realtime_service.compute_staff_orders_version(
-                        sess,
-                        canteen_id=scoped_canteen,
-                        status_filter=status_filter,
-                        payment_status=payment_status,
-                        q=q,
-                    )
-                    board_wm = realtime_service.compute_board_watermark(sess, scoped_canteen)
-                    combined_wm = sha256_hex(f"{ver}|{board_wm}")[:16]
-                    if first_cycle or woken_by_event or combined_wm != last_watermark:
-                        last_watermark = combined_wm
-                        if first_cycle or combined_wm != seen_version:
-                            snap = realtime_service.fetch_staff_orders_snapshot(
-                                sess,
-                                canteen_id=scoped_canteen,
-                                status_filter=status_filter,
-                                payment_status=payment_status,
-                                q=q,
-                                limit=limit,
-                            )
-                            seen_version = combined_wm
-                            snap["version"] = combined_wm
-                            yield _format_sse("orders.snapshot", snap, event_id=combined_wm)
-                finally:
-                    realtime_service.close_db_session(gen)
+@router.get("/notifications/stream")
+async def stream_user_notifications(
+    request: Request,
+    last_version: Optional[str] = Query(default=None),
+    once: bool = Query(default=False),
+    max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    principal: AuthenticatedPrincipal = Depends(require_roles(
+        ROLE_SUPER_ADMIN,
+        ROLE_COLLEGE_ADMIN,
+        ROLE_CANTEEN_MANAGER,
+        ROLE_CASHIER,
+        ROLE_KITCHEN_STAFF,
+        ROLE_INVENTORY_MANAGER,
+        ROLE_PICKUP_STAFF,
+        "customer",
+    )),
+):
+    """SSE stream for authenticated customer & staff in-app + browser push notifications."""
+    uid = principal.user.id
+    roles = principal.roles
+    assigned_cid = principal.assigned_canteen_id
 
-                first_cycle = False
-                if once:
-                    break
+    def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+        return realtime_service.fetch_user_notifications_snapshot(
+            sess, user_id=uid, roles=roles, assigned_canteen_id=assigned_cid
+        )
 
-                now = time.monotonic()
-                if now - last_ping >= 12.0:
-                    last_ping = now
-                    yield ": keepalive\n\n"
-                if now - started_at >= window_secs:
-                    yield _format_sse("stream.reconnect", {"reason": "cycle", "version": seen_version})
-                    break
-        finally:
-            ws_manager.unsubscribe(topic, queue)
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
+    return _stream_with_watermark(
+        request=request,
+        topic=f"user:{uid}",
+        event_name="notifications.snapshot",
+        last_version=last_version,
+        last_event_id=last_event_id,
+        once=once,
+        max_seconds=max_seconds,
+        compute_version=lambda sess: realtime_service.compute_user_notifications_version(sess, user_id=uid, roles=roles),
+        fetch_payload=_fetch,
+    )

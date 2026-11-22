@@ -4,7 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import event, or_, select
 from sqlalchemy.orm import Session
 
 from app.integrations.email_provider import send_email
@@ -18,25 +18,60 @@ from app.websockets import emit_user_notification_sync
 logger = logging.getLogger("collegebites.notifications")
 
 
-def _safe_send_email(to_email: str, subject: str, body: str) -> None:
+@event.listens_for(Session, "after_commit")
+def _flush_after_commit_ws_notifications(session: Session) -> None:
+    pending = session.info.pop("_pending_notif_ws", None)
+    if not pending:
+        return
+    for target_type, target_id, event_type, payload in pending:
+        if target_type == "user":
+            emit_user_notification_sync(target_id, event_type, payload)
+
+
+def _queue_ws_notification(
+    db: Session,
+    *,
+    user_id: UUID,
+    event_type: str,
+    title: str,
+    message: str,
+    order_number: Optional[str] = None,
+) -> None:
+    queue = db.info.setdefault("_pending_notif_ws", [])
+    queue.append(("user", str(user_id), event_type, {"title": title, "message": message, "order_number": order_number}))
+
+
+def _safe_send_email(to_email: str, subject: str, body: str) -> tuple[bool, str]:
     try:
-        send_email(to_email, subject, body)
+        ok, reason = send_email(to_email, subject, body)
+        if not ok:
+            logger.warning("Email delivery failed/skipped to %s: %s", to_email, reason)
+        return ok, reason
     except Exception as exc:
         logger.warning("Non-fatal email delivery failure to %s: %s", to_email, exc)
+        return False, str(exc)
 
 
-def _safe_send_sms(phone: str, msg: str, channel: str = "sms") -> None:
+def _safe_send_sms(phone: str, msg: str, channel: str = "sms") -> tuple[bool, str]:
     try:
-        send_sms_or_whatsapp(phone, msg, channel)
+        ok, reason = send_sms_or_whatsapp(phone, msg, channel)
+        if not ok:
+            logger.warning("%s delivery failed/skipped to %s: %s", channel, phone, reason)
+        return ok, reason
     except Exception as exc:
         logger.warning("Non-fatal %s delivery failure to %s: %s", channel, phone, exc)
+        return False, str(exc)
 
 
-def _safe_send_push(token: str, title: str, msg: str, data: Optional[dict] = None) -> None:
+def _safe_send_push(token: str, title: str, msg: str, data: Optional[dict] = None) -> tuple[bool, str]:
     try:
-        send_expo_push(token, title, msg, data or {})
+        ok, reason = send_expo_push(token, title, msg, data or {})
+        if not ok:
+            logger.warning("Expo push delivery failed/skipped: %s", reason)
+        return ok, reason
     except Exception as exc:
         logger.warning("Non-fatal push delivery failure: %s", exc)
+        return False, str(exc)
 
 
 def _create_notification(
@@ -50,22 +85,38 @@ def _create_notification(
     title: str,
     message: str,
     event_type: str,
-) -> Notification:
+    dedup_key: Optional[str] = None,
+    metadata_json: Optional[dict] = None,
+) -> tuple[Notification, bool]:
+    if dedup_key:
+        existing = db.scalar(select(Notification).where(Notification.dedup_key == dedup_key))
+        if existing:
+            return existing, False
+
     n = Notification(
         user_id=user_id,
         role_target=role_target,
         canteen_id=canteen_id,
         order_id=order_id,
+        dedup_key=dedup_key,
         channel=channel,
         title=title,
         message=message,
         event_type=event_type,
         delivery_status="sent",
+        metadata_json=metadata_json or {},
     )
     db.add(n)
     if user_id:
-        emit_user_notification_sync(str(user_id), event_type, {"title": title, "message": message})
-    return n
+        _queue_ws_notification(
+            db,
+            user_id=user_id,
+            event_type=event_type,
+            title=title,
+            message=message,
+            order_number=(metadata_json or {}).get("order_number"),
+        )
+    return n, True
 
 
 def _dispatch_user_notifications(
@@ -76,13 +127,21 @@ def _dispatch_user_notifications(
     msg: str,
     event_type: str,
     send_external: bool = True,
+    dedup_suffix: Optional[str] = None,
 ) -> None:
+    suffix = f":{dedup_suffix}" if dedup_suffix else ""
+    meta = {"order_number": order.order_number, "canteen_id": str(order.canteen_id)}
+
     if order.customer_id:
         pref = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == order.customer_id))
         cust_prof = db.scalar(select(CustomerProfile).where(CustomerProfile.user_id == order.customer_id))
         opt_in = True if cust_prof is None else cust_prof.notification_opt_in
+        dedup = f"{event_type}:{order.id}:{order.customer_id}{suffix}"
+
+        created = True
+        notif: Optional[Notification] = None
         if not pref or pref.in_app_enabled:
-            _create_notification(
+            notif, created = _create_notification(
                 db,
                 user_id=order.customer_id,
                 canteen_id=order.canteen_id,
@@ -90,41 +149,98 @@ def _dispatch_user_notifications(
                 title=title,
                 message=msg,
                 event_type=event_type,
+                dedup_key=dedup,
+                metadata_json=meta,
             )
-        if not opt_in or not send_external:
+        else:
+            existing = db.scalar(select(Notification.id).where(Notification.dedup_key == dedup))
+            created = existing is None
+
+        if not created or not opt_in or not send_external:
             return
+
+        delivery_errors: dict[str, str] = {}
         user = db.get(User, order.customer_id)
         if user and user.email and (not pref or pref.email_enabled):
-            _safe_send_email(user.email, title, msg)
+            ok, reason = _safe_send_email(user.email, title, msg)
+            if not ok:
+                delivery_errors["email"] = reason
         if user and user.phone and (not pref or pref.sms_enabled):
-            _safe_send_sms(user.phone, msg, "sms")
+            ok, reason = _safe_send_sms(user.phone, msg, "sms")
+            if not ok:
+                delivery_errors["sms"] = reason
         if user and user.phone and pref and pref.whatsapp_enabled:
-            _safe_send_sms(user.phone, msg, "whatsapp")
+            ok, reason = _safe_send_sms(user.phone, msg, "whatsapp")
+            if not ok:
+                delivery_errors["whatsapp"] = reason
         if pref and pref.push_enabled and pref.expo_push_token:
-            _safe_send_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
-    elif order.guest_phone and send_external:
-        _safe_send_sms(order.guest_phone, msg, "sms")
+            ok, reason = _safe_send_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
+            if not ok:
+                delivery_errors["expo_push"] = reason
+        if notif and delivery_errors:
+            notif.metadata_json = {**meta, "delivery_errors": delivery_errors}
+    elif send_external:
+        guest_dedup = f"{event_type}:guest:{order.id}{suffix}"
+        existing_guest = db.scalar(select(Notification.id).where(Notification.dedup_key == guest_dedup))
+        if existing_guest:
+            return
+        notif, _ = _create_notification(
+            db,
+            canteen_id=order.canteen_id,
+            order_id=order.id,
+            channel="external_guest",
+            title=title,
+            message=msg,
+            event_type=event_type,
+            dedup_key=guest_dedup,
+            metadata_json=meta,
+        )
+        delivery_errors: dict[str, str] = {}
+        if order.guest_phone:
+            ok, reason = _safe_send_sms(order.guest_phone, msg, "sms")
+            if not ok:
+                delivery_errors["sms"] = reason
+        if getattr(order, "guest_email", None):
+            ok, reason = _safe_send_email(order.guest_email, title, msg)
+            if not ok:
+                delivery_errors["email"] = reason
+        if delivery_errors:
+            notif.metadata_json = {**meta, "delivery_errors": delivery_errors}
 
 
 def notify_order_confirmed(db: Session, order: Order, pickup_token: str) -> None:
     title = f"Order Confirmed • Token {pickup_token}"
     msg = f"Payment confirmed for {order.order_number}. Show token {pickup_token} at pickup."
     _dispatch_user_notifications(db, order=order, title=title, msg=msg, event_type="order_confirmed", send_external=True)
-    _create_notification(
-        db,
-        role_target="kitchen_staff",
-        canteen_id=order.canteen_id,
-        order_id=order.id,
-        title=f"New Kitchen Order • {pickup_token}",
-        message=f"Order {order.order_number} ready for acceptance.",
-        event_type="kitchen_new_order",
-    )
+    for role_name in ("kitchen_staff", "canteen_manager"):
+        _create_notification(
+            db,
+            role_target=role_name,
+            canteen_id=order.canteen_id,
+            order_id=order.id,
+            title=f"New Paid Order • {pickup_token}",
+            message=f"Order {order.order_number} confirmed and ready for acceptance.",
+            event_type="kitchen_new_order",
+            dedup_key=f"kitchen_new_order:{order.id}:{role_name}",
+            metadata_json={"order_number": order.order_number, "token_code": pickup_token},
+        )
 
 
 def notify_order_ready(db: Session, order: Order) -> None:
     title = "Food Ready for Pickup!"
     msg = f"Order {order.order_number} is ready! Please proceed to your pickup counter with your QR code."
     _dispatch_user_notifications(db, order=order, title=title, msg=msg, event_type="order_ready", send_external=True)
+    _create_notification(
+        db,
+        role_target="pickup_staff",
+        canteen_id=order.canteen_id,
+        order_id=order.id,
+        title=f"Order Ready at Counter • {order.order_number}",
+        message=f"Order {order.order_number} is ready for QR verification & handover.",
+        event_type="pickup_ready",
+        dedup_key=f"pickup_ready:{order.id}",
+        metadata_json={"order_number": order.order_number},
+    )
 
 
 def notify_order_completed(db: Session, order: Order) -> None:
@@ -134,9 +250,24 @@ def notify_order_completed(db: Session, order: Order) -> None:
 
 
 def notify_customer_order_event(
-    db: Session, order: Order, *, event_type: str, title: str, message: str, send_external: bool = False
+    db: Session,
+    order: Order,
+    *,
+    event_type: str,
+    title: str,
+    message: str,
+    send_external: bool = False,
+    dedup_suffix: Optional[str] = None,
 ) -> None:
-    _dispatch_user_notifications(db, order=order, title=title, msg=message, event_type=event_type, send_external=send_external)
+    _dispatch_user_notifications(
+        db,
+        order=order,
+        title=title,
+        msg=message,
+        event_type=event_type,
+        send_external=send_external,
+        dedup_suffix=dedup_suffix,
+    )
 
 
 def list_my_notifications(
@@ -168,17 +299,57 @@ def mark_notification_read(db: Session, notification_id: UUID, user_id: UUID, ro
     return n
 
 
-def mark_all_notifications_read(db: Session, user_id: UUID, roles: Optional[set[str]] = None) -> int:
+def mark_all_notifications_read(
+    db: Session,
+    user_id: UUID,
+    roles: Optional[set[str]] = None,
+    assigned_canteen_id: Optional[UUID] = None,
+) -> int:
     now = datetime.now(timezone.utc)
     conds = [Notification.user_id == user_id]
     if roles:
         conds.append(Notification.role_target.in_(list(roles)))
     rows = db.scalars(select(Notification).where(or_(*conds), Notification.is_read.is_(False))).all()
+    marked = 0
     for n in rows:
+        if n.user_id is None and n.role_target and assigned_canteen_id and n.canteen_id and n.canteen_id != assigned_canteen_id:
+            continue
         n.is_read = True
         n.read_at = now
+        marked += 1
     db.commit()
-    return len(rows)
+    return marked
+
+
+def register_web_push_subscription(db: Session, user_id: UUID, subscription: dict) -> NotificationPreference:
+    pref = get_or_create_preferences(db, user_id)
+    endpoint = str(subscription.get("endpoint") or "").strip()
+    if not endpoint:
+        raise HTTPException(status_code=400, detail="Web push endpoint is required")
+    existing = [s for s in (pref.web_push_subscriptions or []) if isinstance(s, dict) and s.get("endpoint") != endpoint]
+    existing.append(
+        {
+            "endpoint": endpoint,
+            "keys": subscription.get("keys") or {},
+            "device_name": subscription.get("device_name"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    pref.web_push_subscriptions = existing[-10:]
+    pref.push_enabled = True
+    db.commit()
+    db.refresh(pref)
+    return pref
+
+
+def unregister_web_push_subscription(db: Session, user_id: UUID, endpoint: str) -> NotificationPreference:
+    pref = get_or_create_preferences(db, user_id)
+    pref.web_push_subscriptions = [
+        s for s in (pref.web_push_subscriptions or []) if isinstance(s, dict) and s.get("endpoint") != endpoint.strip()
+    ]
+    db.commit()
+    db.refresh(pref)
+    return pref
 
 
 def get_or_create_preferences(db: Session, user_id: UUID) -> NotificationPreference:

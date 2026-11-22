@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
@@ -35,6 +36,12 @@ class PreferencesUpdateIn(BaseModel):
 class PushTokenRegisterIn(BaseModel):
     token: str = Field(min_length=5, max_length=300)
     platform: Optional[str] = Field(default="android", max_length=32)
+    device_name: Optional[str] = Field(default=None, max_length=120)
+
+
+class WebPushSubscriptionIn(BaseModel):
+    endpoint: str = Field(min_length=10, max_length=1000)
+    keys: dict = Field(default_factory=dict)
     device_name: Optional[str] = Field(default=None, max_length=120)
 
 
@@ -71,8 +78,38 @@ def mark_all_read(
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
-    count = notification_service.mark_all_notifications_read(db, principal.user.id, principal.roles)
+    count = notification_service.mark_all_notifications_read(
+        db, principal.user.id, principal.roles, assigned_canteen_id=principal.assigned_canteen_id
+    )
     return {"marked_read": count}
+
+
+@router.get("/web-push/public-key")
+def get_vapid_public_key():
+    return {
+        "public_key": settings.VAPID_PUBLIC_KEY or None,
+        "supported": bool(settings.VAPID_PUBLIC_KEY),
+    }
+
+
+@router.post("/web-push/subscribe")
+def subscribe_web_push(
+    payload: WebPushSubscriptionIn,
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    pref = notification_service.register_web_push_subscription(db, principal.user.id, payload.model_dump())
+    return {"status": "subscribed", "subscription_count": len(pref.web_push_subscriptions or [])}
+
+
+@router.delete("/web-push/subscribe")
+def unsubscribe_web_push(
+    endpoint: str = Query(min_length=10),
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    pref = notification_service.unregister_web_push_subscription(db, principal.user.id, endpoint)
+    return {"status": "unsubscribed", "subscription_count": len(pref.web_push_subscriptions or [])}
 
 
 @router.get("/preferences")

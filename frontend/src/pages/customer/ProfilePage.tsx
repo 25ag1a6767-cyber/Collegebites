@@ -266,6 +266,19 @@ export const ProfilePage: React.FC = () => {
       <div className="grid gap-6 md:grid-cols-3">
         <Card className="p-5 space-y-3">
           <h2 className="font-bold text-slate-900">Notification Channels</h2>
+          {typeof window !== "undefined" && "Notification" in window && Notification.permission !== "granted" && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={async () => {
+                const { enableBrowserPushNotifications } = await import("../../utils/notifications");
+                const r = await enableBrowserPushNotifications();
+                if (r.granted) pushToast("Browser notifications enabled!", "success");
+              }}
+            >
+              <Bell className="h-3.5 w-3.5" /> Enable Browser Alerts
+            </Button>
+          )}
           {prefs &&
             [
               ["in_app_enabled", "In-App Alerts"],

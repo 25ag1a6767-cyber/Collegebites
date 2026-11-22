@@ -21,10 +21,13 @@ export const MyOrdersPage: React.FC = () => {
   const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [recoveredOrders, setRecoveredOrders] = useState<Order[]>([]);
   const [busyRecover, setBusyRecover] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState<"all" | "active" | "completed" | "cancelled">("all");
+  const [historySearch, setHistorySearch] = useState("");
 
   const handleReorder = async (o: Order) => {
     try {
       let added = 0;
+      const skipped: string[] = [];
       for (const it of o.items) {
         if (!it.food_item_id) continue;
         const addons: { addon_id: string; quantity: number }[] = [];
@@ -42,26 +45,33 @@ export const MyOrdersPage: React.FC = () => {
             removedIngredients.push(c.option_value);
           }
         }
-        await api.post("/carts/items", {
-          canteen_id: o.canteen_id,
-          food_item_id: it.food_item_id,
-          variant_id: it.variant_id || null,
-          quantity: it.quantity,
-          spice_level: spiceLevel,
-          sugar_level: sugarLevel,
-          removed_ingredients: removedIngredients,
-          addons,
-          special_instructions: it.special_instructions || null,
-        });
-        added += 1;
+        try {
+          await api.post("/carts/items", {
+            canteen_id: o.canteen_id,
+            food_item_id: it.food_item_id,
+            variant_id: it.variant_id || null,
+            quantity: it.quantity,
+            spice_level: spiceLevel,
+            sugar_level: sugarLevel,
+            removed_ingredients: removedIngredients,
+            addons,
+            special_instructions: it.special_instructions || null,
+          });
+          added += 1;
+        } catch {
+          skipped.push(it.item_name);
+        }
       }
       if (added === 0) {
-        pushToast("No reorderable menu items found in this order", "info");
+        pushToast("No reorderable menu items are currently available for this order", "error");
         return;
       }
       setSelectedCanteen(o.canteen_id);
       qc.invalidateQueries({ queryKey: ["cart", o.canteen_id] });
-      pushToast("Items added back to cart!", "success");
+      pushToast(
+        skipped.length > 0 ? `Added ${added} item(s). Unavailable: ${skipped.join(", ")}` : "Items added back to cart!",
+        skipped.length > 0 ? "info" : "success"
+      );
       navigate("/checkout");
     } catch (err) {
       pushToast(getApiError(err, "Some items are currently unavailable to reorder"), "error");
@@ -72,6 +82,20 @@ export const MyOrdersPage: React.FC = () => {
     queryKey: ["my-orders"],
     enabled: Boolean(user),
     queryFn: async () => (await api.get("/orders/my")).data,
+    refetchInterval: 15000,
+  });
+
+  const filteredOrders = orders.filter((o) => {
+    if (historyFilter === "active" && !["PAYMENT_PENDING", "PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING", "READY"].includes(o.status)) return false;
+    if (historyFilter === "completed" && o.status !== "COMPLETED") return false;
+    if (historyFilter === "cancelled" && !["CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(o.status)) return false;
+    const q = historySearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      o.order_number.toLowerCase().includes(q) ||
+      (o.pickup_token_code || "").toLowerCase().includes(q) ||
+      o.items.some((i) => i.item_name.toLowerCase().includes(q))
+    );
   });
 
   const savedGuestEntries = Object.entries(guestOrderTokens);
@@ -230,39 +254,64 @@ export const MyOrdersPage: React.FC = () => {
           />
         ) : (
           <div className="space-y-3">
-            {orders.map((o) => (
-              <Card key={o.id} className="p-4 flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-extrabold text-slate-900">{o.order_number}</span>
-                    {o.pickup_token_code && <Badge tone="default">Token {o.pickup_token_code}</Badge>}
-                    <Badge tone={o.status === "COMPLETED" ? "green" : o.status === "READY" ? "green" : "blue"}>
-                      {o.status}
-                    </Badge>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap gap-1.5">
+                {(["all", "active", "completed", "cancelled"] as const).map((tabKey) => (
+                  <Button
+                    key={tabKey}
+                    size="sm"
+                    variant={historyFilter === tabKey ? "secondary" : "outline"}
+                    onClick={() => setHistoryFilter(tabKey)}
+                  >
+                    {tabKey === "all" ? "All Orders" : tabKey === "active" ? "Active" : tabKey === "completed" ? "Completed" : "Cancelled / Failed"}
+                  </Button>
+                ))}
+              </div>
+              <Input
+                value={historySearch}
+                onChange={(e) => setHistorySearch(e.target.value)}
+                placeholder="Search order, token, dish..."
+                className="w-56"
+              />
+            </div>
+
+            {filteredOrders.length === 0 ? (
+              <Card className="p-6 text-center text-xs text-slate-500">No orders matched the selected filter.</Card>
+            ) : (
+              filteredOrders.map((o) => (
+                <Card key={o.id} className="p-4 flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-extrabold text-slate-900">{o.order_number}</span>
+                      {o.pickup_token_code && <Badge tone="default">Token {o.pickup_token_code}</Badge>}
+                      <Badge tone={o.status === "COMPLETED" ? "green" : o.status === "READY" ? "green" : "blue"}>
+                        {o.status}
+                      </Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      {o.canteen_name} / {o.counter_name} • {new Date(o.created_at).toLocaleString()} •{" "}
+                      {o.items.map((i) => `${i.quantity}x ${i.item_name}`).join(", ")}
+                    </div>
                   </div>
-                  <div className="mt-1 text-xs text-slate-500">
-                    {o.canteen_name} / {o.counter_name} • {new Date(o.created_at).toLocaleString()} •{" "}
-                    {o.items.map((i) => `${i.quantity}x ${i.item_name}`).join(", ")}
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="text-right">
-                    <div className="font-extrabold text-slate-900">₹{o.total_amount}</div>
-                    <div className="text-[11px] text-slate-500">{o.payment_status}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button size="sm" variant="ghost" onClick={() => handleReorder(o)}>
-                      <RotateCcw className="h-3.5 w-3.5" /> Reorder
-                    </Button>
-                    <Link to={`/orders/${o.order_number}`}>
-                      <Button size="sm" variant="outline">
-                        Receipt & Track <ArrowRight className="h-3.5 w-3.5" />
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      <div className="font-extrabold text-slate-900">₹{o.total_amount}</div>
+                      <div className="text-[11px] text-slate-500">{o.payment_status}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" variant="ghost" onClick={() => handleReorder(o)}>
+                        <RotateCcw className="h-3.5 w-3.5" /> Reorder
                       </Button>
-                    </Link>
+                      <Link to={`/orders/${o.order_number}`}>
+                        <Button size="sm" variant="outline">
+                          Receipt & Track <ArrowRight className="h-3.5 w-3.5" />
+                        </Button>
+                      </Link>
+                    </div>
                   </div>
-                </div>
-              </Card>
-            ))}
+                </Card>
+              ))
+            )}
           </div>
         )
       ) : (

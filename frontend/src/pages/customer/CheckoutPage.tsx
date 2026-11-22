@@ -528,7 +528,7 @@ export const CheckoutPage: React.FC = () => {
               </div>
               <div className="flex justify-between border-t border-slate-200 pt-2 text-lg font-extrabold text-slate-900">
                 <span>Total Payable</span>
-                <span>₹{cart.total_amount}</span>
+                <span>₹{Math.max(0, Number(cart.total_amount) - (redeemPoints > 0 ? redeemPoints / 4 : 0)).toFixed(2)}</span>
               </div>
             </div>
 

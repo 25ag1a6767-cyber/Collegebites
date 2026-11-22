@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import sha256_hex, verify_signed_qr_token_format
 from app.core.time_utils import today_college
-from app.models.college import Canteen, Counter
+from app.models.auth import User
+from app.models.college import Canteen, Counter, KitchenStation
 from app.models.order import Order, OrderItem, SlotReservation
 from app.models.payment import (
     OrderHandoverRecord,
@@ -19,9 +20,12 @@ from app.models.payment import (
 from app.schemas.operations import (
     DigitalBoardResponse,
     HandoverConfirmRequest,
+    OperationalTokenBoardResponse,
+    OperationalTokenCard,
     PickupVerifyRequest,
     PickupVerifyResponse,
     TokenBoardItem,
+    TokenBoardOrderItemDetail,
 )
 from app.services.audit_service import record_audit_log
 from app.services.order_service import transition_order_status
@@ -455,6 +459,194 @@ def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> D
         now_preparing=preparing,
         ready_for_pickup=ready,
         recently_completed=completed,
+        updated_at=datetime.now(timezone.utc),
+        version=version,
+    )
+
+
+def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) -> OperationalTokenBoardResponse:
+    """Real-time 5-section operational Token Board for Canteen Managers, Kitchen & Pickup Staff."""
+    canteen_name = "All Campus Canteens"
+    if canteen_id is not None:
+        canteen = db.get(Canteen, canteen_id)
+        if not canteen:
+            raise HTTPException(status_code=404, detail="Canteen not found")
+        canteen_name = canteen.name
+
+    today = today_college()
+    base_cols = (
+        PickupToken.token_code,
+        PickupToken.sequence_number,
+        Counter.id,
+        Counter.name,
+        Canteen.id,
+        Canteen.name,
+        Order.id,
+        Order.order_number,
+        Order.status,
+        Order.payment_status,
+        Order.payment_method,
+        Order.total_amount,
+        Order.order_type,
+        Order.order_channel,
+        Order.is_priority,
+        Order.delayed_minutes,
+        Order.delay_reason,
+        Order.estimated_prep_minutes,
+        Order.estimated_pickup_at,
+        Order.created_at,
+        Order.confirmed_at,
+        Order.accepted_at,
+        Order.preparing_at,
+        Order.ready_at,
+        Order.completed_at,
+        Order.updated_at,
+        Order.guest_name,
+        Order.customer_id,
+        OrderQRCode.token_hash,
+        OrderQRCode.verification_path,
+    )
+
+    active_stmt = (
+        select(*base_cols)
+        .join(Order, Order.id == PickupToken.order_id)
+        .join(Counter, Counter.id == PickupToken.counter_id)
+        .join(Canteen, Canteen.id == Order.canteen_id)
+        .outerjoin(OrderQRCode, OrderQRCode.order_id == Order.id)
+        .where(
+            PickupToken.service_date == today,
+            Order.payment_status == "CONFIRMED",
+            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
+        )
+        .order_by(Order.is_priority.desc(), PickupToken.sequence_number.asc(), Order.created_at.asc())
+        .limit(180)
+    )
+    completed_stmt = (
+        select(*base_cols)
+        .join(Order, Order.id == PickupToken.order_id)
+        .join(Counter, Counter.id == PickupToken.counter_id)
+        .join(Canteen, Canteen.id == Order.canteen_id)
+        .outerjoin(OrderQRCode, OrderQRCode.order_id == Order.id)
+        .where(
+            PickupToken.service_date == today,
+            Order.payment_status == "CONFIRMED",
+            Order.status == "COMPLETED",
+        )
+        .order_by(Order.completed_at.desc(), PickupToken.sequence_number.desc())
+        .limit(30)
+    )
+    if canteen_id is not None:
+        active_stmt = active_stmt.where(Order.canteen_id == canteen_id)
+        completed_stmt = completed_stmt.where(Order.canteen_id == canteen_id)
+
+    active_rows = db.execute(active_stmt).all()
+    completed_rows = db.execute(completed_stmt).all()
+    all_rows = active_rows + completed_rows
+
+    order_ids = [r[6] for r in all_rows]
+    customer_ids = list({r[27] for r in all_rows if r[27] is not None})
+    user_names = (
+        {u.id: u.full_name for u in db.scalars(select(User).where(User.id.in_(customer_ids))).all()}
+        if customer_ids
+        else {}
+    )
+    stations = {s.id: s.name for s in db.scalars(select(KitchenStation)).all()}
+    items_by_order: dict[UUID, list[TokenBoardOrderItemDetail]] = {}
+    if order_ids:
+        item_rows = db.scalars(
+            select(OrderItem).where(OrderItem.order_id.in_(order_ids)).order_by(OrderItem.id.asc())
+        ).all()
+        for it in item_rows:
+            items_by_order.setdefault(it.order_id, []).append(
+                TokenBoardOrderItemDetail(
+                    id=it.id,
+                    item_name=it.item_name,
+                    variant_name=it.variant_name,
+                    quantity=it.quantity,
+                    prep_status=getattr(it, "prep_status", "PENDING") or "PENDING",
+                    station_id=getattr(it, "station_id", None),
+                    station_name=stations.get(getattr(it, "station_id", None)),
+                    special_instructions=it.special_instructions,
+                )
+            )
+
+    new_orders: list[OperationalTokenCard] = []
+    accepted_orders: list[OperationalTokenCard] = []
+    preparing_orders: list[OperationalTokenCard] = []
+    ready_orders: list[OperationalTokenCard] = []
+    completed_orders: list[OperationalTokenCard] = []
+
+    fp_parts = [f"ops|{today.isoformat()}|{canteen_id or 'all'}"]
+    for r in all_rows:
+        (
+            tc, seq, cnt_id, cnt_name, cid, cname, oid, onum, st, pst, pmethod,
+            tot_amt, otype, ochan, is_prio, dmin, dreason, est_mins, est_at,
+            crt, cnf, acc, prp, rdy, cmp, upd, gname, cust_id, qr_hash, qr_path
+        ) = r
+        cust_label = user_names.get(cust_id) or (gname.strip() if gname else None) or "Walk-in / Guest"
+        card_items = items_by_order.get(oid, [])
+        qr_ref = f"QR-{qr_hash[:8].upper()}" if qr_hash else f"TKN-{tc}"
+        card = OperationalTokenCard(
+            order_id=oid,
+            order_number=onum,
+            token_code=tc,
+            sequence_number=seq,
+            qr_reference=qr_ref,
+            qr_verification_path=qr_path,
+            canteen_id=cid,
+            canteen_name=cname,
+            counter_id=cnt_id,
+            counter_name=cnt_name,
+            customer_label=cust_label,
+            order_type=otype,
+            order_channel=ochan,
+            status=st,
+            payment_status=pst,
+            payment_method=pmethod,
+            total_amount=tot_amt,
+            is_priority=bool(is_prio),
+            delayed_minutes=int(dmin or 0),
+            delay_reason=dreason,
+            estimated_prep_minutes=int(est_mins or 12),
+            estimated_pickup_at=est_at,
+            created_at=crt,
+            confirmed_at=cnf,
+            accepted_at=acc,
+            preparing_at=prp,
+            ready_at=rdy,
+            completed_at=cmp,
+            items=card_items,
+        )
+        item_fp = ",".join(f"{i.id}:{i.prep_status}" for i in card_items)
+        fp_parts.append(f"{oid}:{st}:{bool(is_prio)}:{dmin}:{upd.isoformat() if upd else ''}:{item_fp}")
+
+        if st == "PLACED":
+            new_orders.append(card)
+        elif st == "ACCEPTED":
+            accepted_orders.append(card)
+        elif st == "PREPARING":
+            preparing_orders.append(card)
+        elif st == "READY":
+            ready_orders.append(card)
+        elif st == "COMPLETED":
+            completed_orders.append(card)
+
+    version = sha256_hex("|".join(fp_parts))[:16]
+    return OperationalTokenBoardResponse(
+        canteen_id=canteen_id,
+        canteen_name=canteen_name,
+        new_orders=new_orders,
+        accepted_orders=accepted_orders,
+        preparing_orders=preparing_orders,
+        ready_for_pickup=ready_orders,
+        completed_orders=completed_orders,
+        counts={
+            "new_orders": len(new_orders),
+            "accepted_orders": len(accepted_orders),
+            "preparing_orders": len(preparing_orders),
+            "ready_for_pickup": len(ready_orders),
+            "completed_orders": len(completed_orders),
+        },
         updated_at=datetime.now(timezone.utc),
         version=version,
     )

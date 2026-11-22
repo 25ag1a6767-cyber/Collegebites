@@ -9,17 +9,20 @@ from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_CASHIER,
     ROLE_COLLEGE_ADMIN,
+    ROLE_KITCHEN_STAFF,
     ROLE_PICKUP_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
     enforce_canteen_scope,
     require_roles,
+    scoped_canteen_for_principal,
 )
 from app.models.order import Order
 from app.schemas.operations import (
     DigitalBoardResponse,
     HandoverConfirmRequest,
     HandoverRecordOut,
+    OperationalTokenBoardResponse,
     PickupVerifyRequest,
     PickupVerifyResponse,
 )
@@ -28,6 +31,14 @@ from app.services import pickup_service
 router = APIRouter(prefix="/pickup", tags=["QR Pickup Verification & Token Board"])
 
 PICKUP_ROLES = (ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_CASHIER, ROLE_PICKUP_STAFF)
+TOKEN_BOARD_STAFF_ROLES = (
+    ROLE_SUPER_ADMIN,
+    ROLE_COLLEGE_ADMIN,
+    ROLE_CANTEEN_MANAGER,
+    ROLE_KITCHEN_STAFF,
+    ROLE_PICKUP_STAFF,
+    ROLE_CASHIER,
+)
 
 
 @router.post("/verify", response_model=PickupVerifyResponse)
@@ -67,3 +78,13 @@ def get_digital_board_all_or_filtered(
 @router.get("/board/{canteen_id}", response_model=DigitalBoardResponse)
 def get_digital_board(canteen_id: UUID, db: Session = Depends(get_db)):
     return pickup_service.get_digital_token_board(db, canteen_id)
+
+
+@router.get("/token-board", response_model=OperationalTokenBoardResponse)
+def get_operational_token_board(
+    canteen_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*TOKEN_BOARD_STAFF_ROLES)),
+    db: Session = Depends(get_db),
+):
+    scoped_canteen = scoped_canteen_for_principal(principal, canteen_id)
+    return pickup_service.get_operational_token_board(db, scoped_canteen)

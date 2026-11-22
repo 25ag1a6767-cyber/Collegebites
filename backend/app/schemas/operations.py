@@ -88,6 +88,62 @@ class DigitalBoardResponse(BaseModel):
     version: Optional[str] = None
 
 
+class TokenBoardOrderItemDetail(BaseModel):
+    id: UUID
+    item_name: str
+    variant_name: Optional[str] = None
+    quantity: int
+    prep_status: str = "PENDING"
+    station_id: Optional[UUID] = None
+    station_name: Optional[str] = None
+    special_instructions: Optional[str] = None
+
+
+class OperationalTokenCard(BaseModel):
+    order_id: UUID
+    order_number: str
+    token_code: str
+    sequence_number: int
+    qr_reference: Optional[str] = None
+    qr_verification_path: Optional[str] = None
+    canteen_id: UUID
+    canteen_name: str
+    counter_id: UUID
+    counter_name: str
+    customer_label: str
+    order_type: str
+    order_channel: str
+    status: str
+    payment_status: str
+    payment_method: str
+    total_amount: Decimal
+    is_priority: bool = False
+    delayed_minutes: int = 0
+    delay_reason: Optional[str] = None
+    estimated_prep_minutes: int
+    estimated_pickup_at: Optional[datetime] = None
+    created_at: datetime
+    confirmed_at: Optional[datetime] = None
+    accepted_at: Optional[datetime] = None
+    preparing_at: Optional[datetime] = None
+    ready_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    items: list[TokenBoardOrderItemDetail] = []
+
+
+class OperationalTokenBoardResponse(BaseModel):
+    canteen_id: Optional[UUID] = None
+    canteen_name: str
+    new_orders: list[OperationalTokenCard]
+    accepted_orders: list[OperationalTokenCard]
+    preparing_orders: list[OperationalTokenCard]
+    ready_for_pickup: list[OperationalTokenCard]
+    completed_orders: list[OperationalTokenCard]
+    counts: dict[str, int]
+    updated_at: datetime
+    version: str
+
+
 class POSWalkInOrderRequest(BaseModel):
     canteen_id: UUID
     counter_id: Optional[UUID] = None

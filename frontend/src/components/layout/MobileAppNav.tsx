@@ -3,7 +3,20 @@ import { Link, useLocation } from "react-router-dom";
 import { LifeBuoy, ReceiptText, Store, User } from "lucide-react";
 import { useAppStore } from "../../store/useAppStore";
 
-const HIDDEN_PREFIXES = ["/board", "/kiosk", "/kitchen", "/cashier", "/pickup", "/inventory", "/admin", "/login", "/register"];
+const HIDDEN_PREFIXES = [
+  "/board",
+  "/display",
+  "/tv",
+  "/kiosk",
+  "/kitchen",
+  "/cashier",
+  "/pickup",
+  "/inventory",
+  "/admin",
+  "/token-board",
+  "/login",
+  "/register",
+];
 
 export const MobileAppNav: React.FC = () => {
   const { pathname } = useLocation();

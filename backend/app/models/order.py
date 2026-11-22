@@ -85,6 +85,7 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "orders"
     __table_args__ = (
         Index("ix_orders_canteen_status", "canteen_id", "status"),
+        Index("ix_orders_canteen_created_at", "canteen_id", "created_at"),
         Index("ix_orders_customer", "customer_id", "created_at"),
         Index("ix_orders_counter_status", "counter_id", "status"),
     )
@@ -104,6 +105,7 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_guest: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     guest_name: Mapped[Optional[str]] = mapped_column(String(160))
     guest_phone: Mapped[Optional[str]] = mapped_column(String(32))
+    guest_email: Mapped[Optional[str]] = mapped_column(String(160))
     guest_access_token_hash: Mapped[Optional[str]] = mapped_column(String(128), index=True)
 
     order_type: Mapped[str] = mapped_column(String(32), nullable=False, default="pickup")  # pickup | dine_in | walk_in | kiosk | qr_table
@@ -128,6 +130,7 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     delayed_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     delay_reason: Mapped[Optional[str]] = mapped_column(String(255))
+    is_priority: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     inventory_deducted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
@@ -141,6 +144,8 @@ class OrderItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
     food_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("food_items.id", ondelete="SET NULL"))
     variant_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("food_variants.id", ondelete="SET NULL"))
+    station_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("kitchen_stations.id", ondelete="SET NULL"))
+    prep_status: Mapped[str] = mapped_column(String(24), nullable=False, default="PENDING")  # PENDING | PREPARING | READY
     # Historical snapshot fields (never mutated when menus change)
     item_name: Mapped[str] = mapped_column(String(160), nullable=False)
     variant_name: Mapped[Optional[str]] = mapped_column(String(100))

@@ -30,6 +30,7 @@ class NotificationPreference(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     sms_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     whatsapp_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     expo_push_token: Mapped[Optional[str]] = mapped_column(String(255))
+    web_push_subscriptions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
 
 class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -39,6 +40,7 @@ class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     role_target: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("canteens.id", ondelete="SET NULL"))
     order_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"))
+    dedup_key: Mapped[Optional[str]] = mapped_column(String(160), index=True)
     channel: Mapped[str] = mapped_column(String(32), nullable=False, default="in_app")
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
