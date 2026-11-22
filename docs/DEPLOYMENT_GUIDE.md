@@ -16,6 +16,7 @@ CollegeBites runs as one shared system across:
 - `PUBLIC_BASE_URL=https://collegebites-alpha.vercel.app`
 - `PUBLIC_FRONTEND_URL=https://collegebites-alpha.vercel.app`
 - `CORS_ORIGINS=["https://collegebites-alpha.vercel.app"]`
+- `CRON_SECRET` (random 16+ char secret so Vercel Schedules in `vercel.json` `schedules.collegebites-hourly-maintenance` can securely invoke `POST /api/v1/admin/maintenance/run`)
 
 ### Payment Gateways (Strict Online-Only Policy)
 Live online checkout requires configured gateway credentials (`503 Service Unavailable` returned cleanly if unconfigured in production):

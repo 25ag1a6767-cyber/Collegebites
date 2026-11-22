@@ -1,11 +1,14 @@
+import hmac
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
@@ -14,6 +17,7 @@ from app.core.permissions import (
     AuthenticatedPrincipal,
     client_ip_from_request,
     enforce_canteen_scope,
+    get_optional_principal,
     require_roles,
     scoped_canteen_for_principal,
 )
@@ -51,7 +55,7 @@ from app.schemas.college import (
     PickupLocationOut,
 )
 from app.schemas.common import AuditLogOut
-from app.services import auth_service, college_service, order_service
+from app.services import auth_service, college_service, maintenance_service, order_service
 from app.services.audit_service import record_audit_log
 
 router = APIRouter(prefix="/admin", tags=["Administration"])
@@ -448,3 +452,40 @@ def system_health(
         "total_payments": total_payments,
         "total_users": total_users,
     }
+
+
+@router.post("/maintenance/run")
+def run_scheduled_maintenance_endpoint(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    """Run expired auth/slot cleanup and low-stock alert scan (via Vercel Schedule CRON_SECRET or Admin JWT)."""
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+
+    cron_secret = (settings.CRON_SECRET or "").strip()
+    if cron_secret and len(cron_secret) >= 16 and token and hmac.compare_digest(token, cron_secret):
+        return maintenance_service.run_scheduled_maintenance(db, trigger="vercel_schedule")
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Valid CRON_SECRET bearer token or Admin session required",
+        )
+
+    principal = get_optional_principal(
+        credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=token),
+        db=db,
+    )
+    if not principal or not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Super Admin or College Admin may trigger maintenance",
+        )
+
+    return maintenance_service.run_scheduled_maintenance(
+        db,
+        actor_user_id=principal.user.id,
+        trigger="admin_manual",
+    )

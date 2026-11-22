@@ -20,5 +20,13 @@
     { "source": "/docs(.*)", "destination": { "service": "backend" } },
     { "source": "/openapi.json", "destination": { "service": "backend" } },
     { "source": "/(.*)", "destination": { "service": "frontend" } }
-  ]
+  ],
+  "schedules": {
+    "collegebites-hourly-maintenance": {
+      "schedule": "0 * * * *",
+      "timezone": "Asia/Kolkata",
+      "path": "/api/v1/admin/maintenance/run",
+      "requestMethod": "POST"
+    }
+  }
 }

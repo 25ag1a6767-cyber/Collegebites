@@ -81,7 +81,7 @@ Authentication: Bearer JWT access token (`Authorization: Bearer <access_token>`)
 - `POST /api/v1/support/reviews`, `PATCH /api/v1/support/reviews/{id}/visibility`, `GET /api/v1/support/items/{id}/reviews`, `POST/GET /api/v1/support/tickets*`.
 - `GET /api/v1/reports/{dashboard,export/csv,export/pdf}`.
 - `GET /api/v1/kiosk/status`, `POST /api/v1/kiosk/devices`, `PATCH /api/v1/kiosk/devices/{device_id}`, `POST /api/v1/kiosk/devices/{device_id}/heartbeat`, `POST /api/v1/kiosk/orders`, `GET /api/v1/kiosk/recommendations/{canteen_id}`.
-- `PUT /api/v1/admin/college`, `POST/PATCH /api/v1/admin/canteens*`, `POST/PATCH /api/v1/admin/{counters,kitchens,tables,holidays,kitchen-stations,pickup-locations}*`, `GET/POST/PATCH /api/v1/admin/users*`, `GET /api/v1/admin/{orders,audit-logs,system-events,health}`.
+- `PUT /api/v1/admin/college`, `POST/PATCH /api/v1/admin/canteens*`, `POST/PATCH /api/v1/admin/{counters,kitchens,tables,holidays,kitchen-stations,pickup-locations}*`, `GET/POST/PATCH /api/v1/admin/users*`, `GET /api/v1/admin/{orders,audit-logs,system-events,health}`, `POST /api/v1/admin/maintenance/run` (authenticated via `CRON_SECRET` Bearer token or `super_admin`/`college_admin` JWT; runs expired OTP/refresh token/slot cleanup & inventory low-stock/expiry scan).
 
 ## 9. Real-time WebSockets (`/api/v1/ws`)
 All rooms support `"ping"` keepalive messages (server replies `{"event": "pong"}`).

@@ -97,6 +97,34 @@ def test_celery_maintenance_tasks(clean_db_and_seed, monkeypatch):
     assert scan2["alerts_created"] == 0
 
 
+def test_scheduled_maintenance_http_cron_and_rbac(client, monkeypatch):
+    from app.core.config import settings
+
+    # Unauthenticated and short secrets must be rejected cleanly
+    assert client.post("/api/v1/admin/maintenance/run").status_code == 401
+    monkeypatch.setattr(settings, "CRON_SECRET", "too-short")
+    assert client.post("/api/v1/admin/maintenance/run", headers={"Authorization": "Bearer too-short"}).status_code == 401
+
+    # Non-admin student JWT forbidden
+    student_hdrs = login_as(client, "student@collegebites.edu", "Student@12345")["headers"]
+    assert client.post("/api/v1/admin/maintenance/run", headers=student_hdrs).status_code == 403
+
+    # Valid CRON_SECRET (Vercel Schedule) succeeds
+    valid_secret = "cb_prod_cron_secret_at_least_32_characters"
+    monkeypatch.setattr(settings, "CRON_SECRET", valid_secret)
+    bad = client.post("/api/v1/admin/maintenance/run", headers={"Authorization": "Bearer wrong-secret"})
+    assert bad.status_code == 401
+    cron_ok = client.post("/api/v1/admin/maintenance/run", headers={"Authorization": f"Bearer {valid_secret}"})
+    assert cron_ok.status_code == 200
+    assert cron_ok.json()["trigger"] == "vercel_schedule"
+
+    # Admin JWT manual trigger also succeeds
+    admin_hdrs = login_as(client, "admin@collegebites.edu", "Admin@12345")["headers"]
+    adm_ok = client.post("/api/v1/admin/maintenance/run", headers=admin_hdrs)
+    assert adm_ok.status_code == 200
+    assert adm_ok.json()["trigger"] == "admin_manual"
+
+
 def test_expo_push_kitchen_ingredient_unavailable_and_favourites_list(client):
     # Expo push dispatch via respx
     with respx.mock:

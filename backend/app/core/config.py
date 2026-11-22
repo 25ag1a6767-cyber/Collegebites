@@ -57,6 +57,7 @@ class Settings(BaseSettings):
 
     SECRET_KEY: str = "dev-only-change-me-collegebites-secret-key-at-least-64-characters-long"
     QR_SIGNING_SECRET: str = "dev-only-change-me-collegebites-qr-hmac-secret-at-least-64-characters"
+    CRON_SECRET: str = ""
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
