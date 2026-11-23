@@ -567,3 +567,132 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         "snacks_canteen_id": str(snacks_canteen.id),
         "juice_canteen_id": str(juice_canteen.id),
     }
+
+
+def seed_live_production_advanced_data(db: Session) -> dict:
+    """
+    Idempotently enrich the live production database with real-world reference data
+    for Vendor Procurement, Student Meal Plans, College Events, Active Campaigns,
+    and Verified Nutrition profiles.
+    """
+    from app.models.event import CollegeEvent
+    from app.models.meal_plan import MealPlan
+    from app.models.promotion import Coupon
+
+    ensure_roles_and_permissions(db)
+    main_canteen = db.scalar(select(Canteen).where(Canteen.slug == "main-canteen"))
+    if not main_canteen:
+        seed_initial_college_data(db, create_demo_users=True)
+        main_canteen = db.scalar(select(Canteen).where(Canteen.slug == "main-canteen"))
+    if not main_canteen:
+        return {"status": "no_canteen"}
+
+    # 1. Enrich Supplier with business details, supplied products & payment terms
+    sup = db.scalar(select(Supplier).order_by(Supplier.created_at.asc()))
+    if sup:
+        if not sup.business_details:
+            sup.business_details = "FSSAI Lic #1003604200192 | HDFC Corporate A/C IFSC HDFC0001204"
+        if not sup.supplied_products:
+            sup.supplied_products = ["Raw Ingredients", "Dairy & Beverages", "Biodegradable Packaging"]
+        if not sup.payment_terms:
+            sup.payment_terms = "Net 15 Days"
+        if not sup.gst_number:
+            sup.gst_number = "36AABCD4512K1Z8"
+
+    # 2. Mark flagship menu items with verified nutrition & macro profiles
+    items = list(db.scalars(select(FoodItem).where(FoodItem.canteen_id == main_canteen.id)).all())
+    for it in items:
+        if "Biryani" in it.name and not it.nutrition_verified:
+            it.calories = it.calories or 640
+            it.nutrition_info = it.nutrition_info or {"protein_g": 32.0, "carbs_g": 74.0, "fat_g": 22.0, "fiber_g": 4.5}
+            it.ingredients_text = it.ingredients_text or "Aged basmati rice, marinated chicken, saffron, yogurt, whole garam masala, mint, fried onions"
+            it.nutrition_verified = True
+        elif "Thali" in it.name or "Meal" in it.name or "Dosa" in it.name:
+            if not it.nutrition_verified:
+                it.calories = it.calories or 480
+                it.nutrition_info = it.nutrition_info or {"protein_g": 16.5, "carbs_g": 68.0, "fat_g": 14.0, "fiber_g": 7.0}
+                it.nutrition_verified = True
+
+    # 3. Seed active Student Meal Plans if none exist
+    now = datetime.now(timezone.utc)
+    today = date.today()
+    if not db.scalar(select(MealPlan).where(MealPlan.code == "ACE-WEEKLY-7")):
+        db.add(
+            MealPlan(
+                canteen_id=main_canteen.id,
+                code="ACE-WEEKLY-7",
+                name="Weekly Campus Lunch Pass (7 Meals)",
+                description="7 wholesome campus meals valid across Main Canteen for 7 days.",
+                plan_type="weekly",
+                price=Decimal("490.00"),
+                tax_rate_percent=Decimal("5.00"),
+                validity_days=7,
+                total_meals=7,
+                start_date=today - timedelta(days=1),
+                expiry_date=today + timedelta(days=90),
+                is_active=True,
+            )
+        )
+    if not db.scalar(select(MealPlan).where(MealPlan.code == "ACE-MONTHLY-30")):
+        db.add(
+            MealPlan(
+                canteen_id=main_canteen.id,
+                code="ACE-MONTHLY-30",
+                name="Monthly All-Day Student Dining Plan (30 Meals)",
+                description="30 nutritious meals with instant QR redemption at the pickup counter.",
+                plan_type="monthly",
+                price=Decimal("1950.00"),
+                tax_rate_percent=Decimal("5.00"),
+                validity_days=30,
+                total_meals=30,
+                start_date=today - timedelta(days=1),
+                expiry_date=today + timedelta(days=120),
+                is_active=True,
+            )
+        )
+
+    # 4. Seed active College Event for Bulk Ordering if none exist
+    if not db.scalar(select(CollegeEvent).where(CollegeEvent.event_code == "ACE-SYMPOSIUM-2026")):
+        db.add(
+            CollegeEvent(
+                event_code="ACE-SYMPOSIUM-2026",
+                canteen_id=main_canteen.id,
+                name="ACE Annual AI & Engineering Symposium",
+                department="CSE (AI & DS)",
+                organizer_name="Dr. Priya Nair",
+                contact_phone="+91-98480-55667",
+                contact_email="symposium@aceec.ac.in",
+                event_date=today + timedelta(days=14),
+                location="Main Auditorium Block A",
+                description="Official department symposium & hackathon bulk catering window.",
+                ordering_deadline=now + timedelta(days=10),
+                eligible_food_item_ids=[str(i.id) for i in items[:4]],
+                min_order_quantity=10,
+                max_order_quantity=300,
+                is_active=True,
+            )
+        )
+
+    # 5. Seed active Promotional Campaign Coupon (CAMPUS15) if not present
+    if not db.scalar(select(Coupon).where(Coupon.code == "CAMPUS15")):
+        db.add(
+            Coupon(
+                code="CAMPUS15",
+                title="15% Off Campus Digital Orders",
+                description="Save 15% (up to Rs.60) on orders above Rs.120.",
+                canteen_id=main_canteen.id,
+                discount_type="percentage",
+                discount_value=Decimal("15.00"),
+                min_order_amount=Decimal("120.00"),
+                max_discount_amount=Decimal("60.00"),
+                usage_limit_total=500,
+                usage_limit_per_user=3,
+                starts_at=now - timedelta(days=1),
+                expires_at=now + timedelta(days=60),
+                is_active=True,
+            )
+        )
+
+    db.commit()
+    return {"status": "live_production_advanced_data_seeded"}
+

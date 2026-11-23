@@ -128,3 +128,57 @@ export async function openRazorpayModal(opts: RazorpayModalOptions): Promise<boo
   rzp.open();
   return true;
 }
+
+export interface RazorpayCustomPaymentOptions {
+  razorpayOrderId?: string | null;
+  razorpayKeyId?: string | null;
+  amountInr: string | number;
+  description: string;
+  prefill?: { name?: string; email?: string; contact?: string };
+  verifyEndpoint: string;
+  onVerified: (data: any) => void;
+  onError: (err: unknown) => void;
+}
+
+export async function openRazorpayCustomCheckout(opts: RazorpayCustomPaymentOptions): Promise<boolean> {
+  const publicKey = opts.razorpayKeyId || import.meta.env.VITE_RAZORPAY_KEY_ID || null;
+  if (!opts.razorpayOrderId || !publicKey) {
+    return false;
+  }
+  const loaded = await loadRazorpayCheckoutScript();
+  if (!loaded || !window.Razorpay) {
+    return false;
+  }
+  const rzp = new window.Razorpay({
+    key: publicKey,
+    amount: Math.round(Number(opts.amountInr) * 100),
+    currency: "INR",
+    name: "CollegeBites",
+    description: opts.description,
+    order_id: opts.razorpayOrderId,
+    prefill: opts.prefill,
+    theme: { color: "#76010d" },
+    handler: async (response: {
+      razorpay_order_id: string;
+      razorpay_payment_id: string;
+      razorpay_signature: string;
+    }) => {
+      try {
+        const res = await api.post(opts.verifyEndpoint, {
+          razorpay_order_id: response.razorpay_order_id,
+          razorpay_payment_id: response.razorpay_payment_id,
+          razorpay_signature: response.razorpay_signature,
+        });
+        opts.onVerified(res.data);
+      } catch (err) {
+        opts.onError(err);
+      }
+    },
+  });
+  rzp.on?.("payment.failed", (resp) => {
+    const reason = resp?.error?.description || resp?.error?.reason || "Payment failed on Razorpay";
+    opts.onError(new Error(reason));
+  });
+  rzp.open();
+  return true;
+}

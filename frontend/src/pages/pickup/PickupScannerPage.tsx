@@ -58,14 +58,70 @@ export const PickupScannerPage: React.FC = () => {
 
   const [counterId, setCounterId] = useState("");
   const [manualInput, setManualInput] = useState("");
-  const [verifyMode, setVerifyMode] = useState<"qr" | "token" | "order">("token");
+  const [verifyMode, setVerifyMode] = useState<"qr" | "token" | "order" | "meal_plan">("token");
   const [result, setResult] = useState<any>(null);
+  const [mealPlanResult, setMealPlanResult] = useState<any>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
 
-  const runVerification = async (payload: { qr_payload?: string; pickup_token?: string; order_number?: string }) => {
+  const runMealPlanEligibilityCheck = async (rawCode: string) => {
     setBusy(true);
+    setResult(null);
+    try {
+      const res = await api.post("/meal-plans/verify-eligibility", {
+        canteen_id: activeCanteenId,
+        qr_payload: rawCode.trim(),
+        redemption_code: rawCode.trim(),
+        meals_to_deduct: 1,
+      });
+      setMealPlanResult(res.data);
+    } catch (err) {
+      setMealPlanResult(null);
+      pushToast(getApiError(err, "Meal plan verification failed"), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmMealPlanRedemption = async () => {
+    if (!mealPlanResult?.subscription) return;
+    setBusy(true);
+    try {
+      const sub = mealPlanResult.subscription;
+      const res = await api.post("/meal-plans/redeem", {
+        canteen_id: activeCanteenId,
+        subscription_id: sub.id,
+        redemption_code: sub.redemption_code,
+        meals_to_deduct: 1,
+      });
+      pushToast(`Meal redeemed! ${res.data.remaining_meals_after} meals remaining for ${sub.student_name}.`, "success");
+      setMealPlanResult({
+        ...mealPlanResult,
+        redeemed: true,
+        redemption_number: res.data.redemption_number,
+        subscription: res.data.subscription,
+      });
+    } catch (err) {
+      pushToast(getApiError(err, "Meal plan redemption failed"), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runVerification = async (payload: { qr_payload?: string; pickup_token?: string; order_number?: string }) => {
+    const rawQr = (payload.qr_payload || payload.pickup_token || "").trim();
+    if (
+      verifyMode === "meal_plan" ||
+      rawQr.startsWith("COLLEGEBITES:MEALPLAN:") ||
+      rawQr.toUpperCase().startsWith("CBMP-") ||
+      rawQr.toUpperCase().startsWith("MPS-")
+    ) {
+      await runMealPlanEligibilityCheck(rawQr);
+      return;
+    }
+    setBusy(true);
+    setMealPlanResult(null);
     try {
       const res = await api.post("/pickup/verify", {
         ...payload,
@@ -137,9 +193,10 @@ export const PickupScannerPage: React.FC = () => {
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!manualInput.trim()) return;
-    if (verifyMode === "qr") runVerification({ qr_payload: manualInput.trim() });
-    else if (verifyMode === "token") runVerification({ pickup_token: manualInput.trim() });
-    else runVerification({ order_number: manualInput.trim() });
+    if (verifyMode === "meal_plan") void runMealPlanEligibilityCheck(manualInput.trim());
+    else if (verifyMode === "qr") void runVerification({ qr_payload: manualInput.trim() });
+    else if (verifyMode === "token") void runVerification({ pickup_token: manualInput.trim() });
+    else void runVerification({ order_number: manualInput.trim() });
   };
 
   const confirmHandover = async () => {
@@ -228,7 +285,8 @@ export const PickupScannerPage: React.FC = () => {
               {[
                 { k: "token", l: "Pickup Token" },
                 { k: "qr", l: "QR Payload" },
-                { k: "order", l: "Order Number" },
+                { k: "order", l: "Order No" },
+                { k: "meal_plan", l: "Meal Plan Pass" },
               ].map((m) => (
                 <button
                   key={m.k}
@@ -250,18 +308,51 @@ export const PickupScannerPage: React.FC = () => {
                   ? "e.g. A001"
                   : verifyMode === "order"
                   ? "e.g. CB-20261121-000001"
+                  : verifyMode === "meal_plan"
+                  ? "e.g. CBMP-1A2B3C4D or scan Meal Plan QR"
                   : "Paste QR URL or CBQR...."
               }
             />
-            <Button type="submit" className="w-full">
-              Verify Order
+            <Button type="submit" className="w-full" disabled={busy}>
+              {verifyMode === "meal_plan" ? "Verify Student Meal Plan Pass" : "Verify Order"}
             </Button>
           </form>
         </Card>
 
         <Card className="p-5 space-y-4">
           <h2 className="font-bold text-slate-900">2. Verification & Handover</h2>
-          {!result ? (
+          {mealPlanResult ? (
+            <div className="space-y-3 text-xs">
+              <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-3.5 text-emerald-950 space-y-1">
+                <div className="font-extrabold text-sm flex items-center gap-1.5">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                  {mealPlanResult.redeemed ? "MEAL REDEEMED & DEDUCTED" : "ELIGIBLE STUDENT MEAL PLAN PASS"}
+                </div>
+                <div>Student: <strong>{mealPlanResult.subscription?.student_name}</strong></div>
+                <div>Plan: <strong>{mealPlanResult.subscription?.meal_plan_name}</strong> ({mealPlanResult.subscription?.subscription_number})</div>
+                <div>
+                  Remaining Balance:{" "}
+                  <strong className="text-base text-emerald-800">
+                    {mealPlanResult.subscription?.remaining_meals} / {mealPlanResult.subscription?.total_meals} Meals
+                  </strong>
+                </div>
+                {mealPlanResult.redemption_number && (
+                  <div className="font-mono font-bold text-emerald-900">Redemption Receipt: {mealPlanResult.redemption_number}</div>
+                )}
+              </div>
+              {!mealPlanResult.redeemed && (
+                <Button
+                  variant="success"
+                  size="lg"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={confirmMealPlanRedemption}
+                >
+                  <CheckCircle2 className="h-4 w-4" /> Confirm Meal Redemption (-1 Meal)
+                </Button>
+              )}
+            </div>
+          ) : !result ? (
             <div className="py-12 text-center text-xs text-slate-400">
               Scan customer QR code or enter pickup token to inspect items & payment status.
             </div>

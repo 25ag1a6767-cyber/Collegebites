@@ -1,12 +1,15 @@
 import React, { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Award, Bell, Check, Gift, Heart, KeyRound, Laptop, ShieldOff } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
+import { Award, Bell, Calendar, Check, CreditCard, Download, Gift, Heart, KeyRound, Laptop, Plus, ShieldOff, Utensils } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import type { FoodItem } from "../../types";
+import { enableBrowserPushNotifications } from "../../utils/notifications";
+import { openRazorpayCustomCheckout } from "../../utils/razorpay";
 import { BrandLogo } from "../../components/branding/BrandLogo";
-import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../components/ui/Primitives";
+import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 
 export const ProfilePage: React.FC = () => {
   const { user, logout, setSelectedCanteen } = useAppStore();
@@ -68,11 +71,77 @@ export const ProfilePage: React.FC = () => {
     queryFn: async () => (await api.get("/events")).data,
   });
 
-  const { data: myBulkOrders = [] } = useQuery<any[]>({
+  const { data: myBulkOrders = [], refetch: refetchMyBulkOrders } = useQuery<any[]>({
     queryKey: ["my-bulk-orders"],
     enabled: Boolean(user),
     queryFn: async () => (await api.get("/events/bulk-orders/my")).data,
   });
+
+  const [bulkEventTarget, setBulkEventTarget] = useState<any | null>(null);
+  const [bulkPrepTime, setBulkPrepTime] = useState("");
+  const [bulkPickupTime, setBulkPickupTime] = useState("");
+  const [bulkArrangement, setBulkArrangement] = useState<"grouped_token" | "individual_tokens">("grouped_token");
+  const [bulkNotes, setBulkNotes] = useState("");
+  const [bulkFoodId, setBulkFoodId] = useState("");
+  const [bulkQty, setBulkQty] = useState("20");
+
+  const { data: bulkEventMenu = [] } = useQuery<FoodItem[]>({
+    queryKey: ["bulk-event-menu", bulkEventTarget?.canteen_id],
+    enabled: Boolean(bulkEventTarget?.canteen_id),
+    queryFn: async () => (await api.get(`/menus/canteens/${bulkEventTarget.canteen_id}/items`)).data,
+  });
+
+  const downloadInvoicePdf = async (refNumber: string) => {
+    try {
+      const res = await api.get(`/invoices/${refNumber}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Invoice-${refNumber}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      pushToast(getApiError(err, "Failed to download tax invoice"), "error");
+    }
+  };
+
+  const launchMealPlanPayment = async (sub: any) => {
+    const opened = await openRazorpayCustomCheckout({
+      razorpayOrderId: sub.razorpay_order_id || sub.provider_order_id,
+      razorpayKeyId: sub.razorpay_key_id,
+      amountInr: sub.total_amount,
+      description: `Meal Plan ${sub.meal_plan_name} (${sub.subscription_number})`,
+      prefill: { name: user?.full_name, email: user?.email || undefined, contact: user?.phone || undefined },
+      verifyEndpoint: `/meal-plans/subscriptions/${sub.id}/verify-payment`,
+      onVerified: () => {
+        pushToast("Meal Plan payment verified! Your QR Meal Pass is now active.", "success");
+        refetchMySubs();
+      },
+      onError: (err) => pushToast(getApiError(err, "Meal plan payment failed"), "error"),
+    });
+    if (!opened) {
+      pushToast("Subscription created. Complete Razorpay checkout to activate your QR Meal Pass.", "info");
+    }
+  };
+
+  const launchBulkOrderPayment = async (bo: any) => {
+    const opened = await openRazorpayCustomCheckout({
+      razorpayOrderId: bo.razorpay_order_id || bo.provider_order_id,
+      razorpayKeyId: bo.razorpay_key_id,
+      amountInr: bo.total_amount,
+      description: `Event Bulk Order ${bo.bulk_order_number}`,
+      prefill: { name: user?.full_name, email: user?.email || undefined, contact: user?.phone || undefined },
+      verifyEndpoint: `/events/bulk-orders/${bo.id}/verify-payment`,
+      onVerified: () => {
+        pushToast("Bulk order payment verified! Dispatched to canteen kitchen.", "success");
+        refetchMyBulkOrders();
+      },
+      onError: (err) => pushToast(getApiError(err, "Bulk order payment failed"), "error"),
+    });
+    if (!opened) {
+      pushToast("Bulk order awaiting live Razorpay gateway credentials.", "info");
+    }
+  };
 
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
@@ -295,7 +364,6 @@ export const ProfilePage: React.FC = () => {
               size="sm"
               variant="outline"
               onClick={async () => {
-                const { enableBrowserPushNotifications } = await import("../../utils/notifications");
                 const r = await enableBrowserPushNotifications();
                 if (r.granted) pushToast("Browser notifications enabled!", "success");
               }}
@@ -426,21 +494,52 @@ export const ProfilePage: React.FC = () => {
       {/* Student Meal Plans & College Events Bulk Orders */}
       <div className="grid gap-6 md:grid-cols-2">
         <Card className="p-5 space-y-3">
-          <div className="font-bold text-slate-900">Student Meal Plans ({mySubscriptions.length} Subscribed)</div>
+          <div className="font-bold text-slate-900 flex items-center gap-2">
+            <Utensils className="h-4 w-4 text-emerald-700" /> Student Meal Plans ({mySubscriptions.length} Subscribed)
+          </div>
           {mySubscriptions.length > 0 && (
-            <div className="space-y-2 text-xs">
+            <div className="space-y-2.5 text-xs">
               {mySubscriptions.map((sub: any) => (
-                <div key={sub.id} className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-1">
-                  <div className="flex justify-between font-bold text-slate-900">
+                <div key={sub.id} className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-2">
+                  <div className="flex justify-between items-center font-bold text-slate-900">
                     <span>{sub.meal_plan_name} ({sub.subscription_number})</span>
-                    <Badge tone={sub.status === "active" ? "green" : "amber"}>{sub.status.toUpperCase()}</Badge>
+                    <Badge tone={sub.status === "active" ? "green" : sub.status === "exhausted" ? "blue" : "amber"}>
+                      {sub.status.toUpperCase()}
+                    </Badge>
                   </div>
                   <div className="text-slate-700">
-                    Remaining Meals: <strong>{sub.remaining_meals} / {sub.total_meals}</strong> • Expires: {(sub.expires_at || "").slice(0, 10) || "Pending"}
+                    Remaining Meals: <strong>{sub.remaining_meals} / {sub.total_meals}</strong> ({sub.used_meals || 0} used) •{" "}
+                    {sub.expires_at ? `Valid until ${sub.expires_at.slice(0, 10)}` : "Awaiting Payment Verification"}
                   </div>
-                  {sub.redemption_code && (
-                    <div className="font-mono text-[11px] bg-white border border-emerald-200 rounded px-2 py-1 text-emerald-900">
-                      Redemption Code: <strong>{sub.redemption_code}</strong> • QR: {sub.redemption_qr_payload}
+                  {sub.payment_status === "CONFIRMED" && sub.redemption_qr_payload ? (
+                    <div className="flex flex-wrap items-center gap-3 rounded-xl bg-white border border-emerald-200 p-2.5">
+                      <QRCodeSVG value={sub.redemption_qr_payload} size={84} />
+                      <div className="space-y-1 flex-1">
+                        <div className="text-[11px] text-slate-500">Present at Canteen Pickup Counter:</div>
+                        <div className="font-mono text-sm font-black text-emerald-900">{sub.redemption_code}</div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => downloadInvoicePdf(sub.subscription_number)}
+                        >
+                          <Download className="h-3 w-3" /> Tax Invoice PDF
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Button size="sm" variant="primary" onClick={() => launchMealPlanPayment(sub)}>
+                      <CreditCard className="h-3.5 w-3.5" /> Pay ₹{sub.total_amount} to Activate Pass
+                    </Button>
+                  )}
+                  {(sub.redemptions || []).length > 0 && (
+                    <div className="border-t border-emerald-200/70 pt-1.5 space-y-1 text-[11px] text-slate-600">
+                      <div className="font-bold text-slate-700">Recent Meal Redemptions:</div>
+                      {sub.redemptions.slice(0, 4).map((r: any) => (
+                        <div key={r.id} className="flex justify-between">
+                          <span>{r.meal_item_name} (-{r.meals_deducted})</span>
+                          <span>{(r.redeemed_at || "").slice(0, 16).replace("T", " ")} • {r.remaining_meals_after} left</span>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -457,22 +556,22 @@ export const ProfilePage: React.FC = () => {
                   <div>
                     <div className="font-bold text-slate-900">{mp.name}</div>
                     <div className="text-[11px] text-slate-500">
-                      {mp.total_meals} Meals • {mp.validity_days} Days • ₹{mp.total_price}
+                      {mp.plan_type.toUpperCase()} • {mp.total_meals} Meals • {mp.validity_days} Days • <strong>₹{mp.total_price}</strong>
                     </div>
                   </div>
                   <Button
                     size="sm"
                     onClick={async () => {
                       try {
-                        await api.post(`/meal-plans/${mp.id}/subscribe`, { payment_method: "razorpay" });
-                        pushToast("Subscription created! Complete payment to activate.", "info");
-                        refetchMySubs();
+                        const res = await api.post(`/meal-plans/${mp.id}/subscribe`, { payment_method: "razorpay" });
+                        await refetchMySubs();
+                        await launchMealPlanPayment(res.data);
                       } catch (err) {
                         pushToast(getApiError(err), "error");
                       }
                     }}
                   >
-                    Subscribe
+                    Subscribe &amp; Pay
                   </Button>
                 </div>
               ))
@@ -481,17 +580,33 @@ export const ProfilePage: React.FC = () => {
         </Card>
 
         <Card className="p-5 space-y-3">
-          <div className="font-bold text-slate-900">College Events &amp; Bulk Orders ({myBulkOrders.length})</div>
-          <div className="space-y-2 text-xs max-h-60 overflow-y-auto">
+          <div className="font-bold text-slate-900 flex items-center gap-2">
+            <Calendar className="h-4 w-4 text-blue-700" /> College Events &amp; Bulk Orders ({myBulkOrders.length})
+          </div>
+          <div className="space-y-2 text-xs max-h-80 overflow-y-auto">
             {myBulkOrders.map((bo: any) => (
-              <div key={bo.id} className="rounded-xl border border-slate-200 p-2.5 space-y-1">
+              <div key={bo.id} className="rounded-xl border border-slate-200 p-3 space-y-1.5">
                 <div className="flex justify-between font-bold">
                   <span>{bo.bulk_order_number} — {bo.event_name}</span>
-                  <Badge tone={bo.status === "completed" ? "green" : "amber"}>{bo.status}</Badge>
+                  <Badge tone={bo.status === "completed" ? "green" : bo.status === "rejected" ? "red" : "amber"}>
+                    {bo.status.toUpperCase()}
+                  </Badge>
                 </div>
                 <div className="text-slate-600">
-                  {bo.total_quantity} portions • ₹{bo.total_amount} • Payment: {bo.payment_status}
+                  {bo.total_quantity} portions • <strong>₹{bo.total_amount}</strong> • Payment: {bo.payment_status}
                   {bo.group_pickup_token ? ` • Token: ${bo.group_pickup_token}` : ""}
+                </div>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {bo.payment_status !== "CONFIRMED" && bo.status !== "rejected" && bo.status !== "cancelled" && (
+                    <Button size="sm" variant="primary" onClick={() => launchBulkOrderPayment(bo)}>
+                      <CreditCard className="h-3 w-3" /> Pay ₹{bo.total_amount}
+                    </Button>
+                  )}
+                  {bo.payment_status === "CONFIRMED" && (
+                    <Button size="sm" variant="outline" onClick={() => downloadInvoicePdf(bo.bulk_order_number)}>
+                      <Download className="h-3 w-3" /> Event Tax Invoice PDF
+                    </Button>
+                  )}
                 </div>
               </div>
             ))}
@@ -499,17 +614,126 @@ export const ProfilePage: React.FC = () => {
               <div className="text-slate-500">No active college events open for bulk ordering right now.</div>
             ) : (
               collegeEvents.map((ev: any) => (
-                <div key={ev.id} className="rounded-xl border border-blue-200 bg-blue-50/40 p-2.5">
-                  <div className="font-bold text-slate-900">{ev.name} ({ev.department})</div>
-                  <div className="text-[11px] text-slate-600">
-                    Event Date: {ev.event_date} • Venue: {ev.location} • Min/Max Qty: {ev.min_order_quantity}–{ev.max_order_quantity}
+                <div key={ev.id} className="rounded-xl border border-blue-200 bg-blue-50/40 p-3 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-bold text-slate-900">{ev.name} ({ev.department})</div>
+                    <div className="text-[11px] text-slate-600">
+                      Date: {ev.event_date} • Venue: {ev.location} • Qty: {ev.min_order_quantity}–{ev.max_order_quantity}
+                    </div>
                   </div>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={Boolean(ev.deadline_passed)}
+                    onClick={() => {
+                      setBulkEventTarget(ev);
+                      setBulkQty(String(ev.min_order_quantity || 10));
+                    }}
+                  >
+                    <Plus className="h-3 w-3" /> {ev.deadline_passed ? "Closed" : "Bulk Order"}
+                  </Button>
                 </div>
               ))
             )}
           </div>
         </Card>
       </div>
+
+      {/* Place College Event Bulk Order Modal */}
+      <Modal
+        open={Boolean(bulkEventTarget)}
+        onClose={() => setBulkEventTarget(null)}
+        title={`Event Bulk Order — ${bulkEventTarget?.name || ""}`}
+        maxWidth="max-w-lg"
+      >
+        {bulkEventTarget && (
+          <div className="space-y-3 text-xs">
+            <div className="rounded-lg bg-blue-50 border border-blue-200 p-2.5 text-blue-950">
+              Department: <strong>{bulkEventTarget.department}</strong> • Venue: <strong>{bulkEventTarget.location}</strong> • Allowed Quantity:{" "}
+              <strong>{bulkEventTarget.min_order_quantity} – {bulkEventTarget.max_order_quantity} portions</strong>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="font-bold text-slate-600 block mb-1">Menu Dish *</label>
+                <Select
+                  value={bulkFoodId || bulkEventMenu[0]?.id || ""}
+                  onChange={(e) => setBulkFoodId(e.target.value)}
+                >
+                  {bulkEventMenu.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} (₹{m.base_price})
+                    </option>
+                  ))}
+                </Select>
+              </div>
+              <div>
+                <label className="font-bold text-slate-600 block mb-1">Portion Quantity *</label>
+                <Input
+                  type="number"
+                  min={bulkEventTarget.min_order_quantity}
+                  max={bulkEventTarget.max_order_quantity}
+                  value={bulkQty}
+                  onChange={(e) => setBulkQty(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="font-bold text-slate-600 block mb-1">Scheduled Preparation Time *</label>
+                <Input type="datetime-local" value={bulkPrepTime} onChange={(e) => setBulkPrepTime(e.target.value)} />
+              </div>
+              <div>
+                <label className="font-bold text-slate-600 block mb-1">Scheduled Pickup Time *</label>
+                <Input type="datetime-local" value={bulkPickupTime} onChange={(e) => setBulkPickupTime(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <label className="font-bold text-slate-600 block mb-1">Token Arrangement</label>
+              <Select value={bulkArrangement} onChange={(e) => setBulkArrangement(e.target.value as any)}>
+                <option value="grouped_token">Single Grouped Event Pickup Token</option>
+                <option value="individual_tokens">Individual Attendee Meal Tokens</option>
+              </Select>
+            </div>
+            <Input
+              value={bulkNotes}
+              onChange={(e) => setBulkNotes(e.target.value)}
+              placeholder="Packaging or event delivery instructions..."
+            />
+            <div className="flex justify-end gap-2 pt-2">
+              <Button size="sm" variant="outline" onClick={() => setBulkEventTarget(null)}>
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={!bulkPrepTime || !bulkPickupTime || bulkEventMenu.length === 0}
+                onClick={async () => {
+                  const chosenFoodId = bulkFoodId || bulkEventMenu[0]?.id;
+                  if (!chosenFoodId) return;
+                  try {
+                    const res = await api.post(`/events/${bulkEventTarget.id}/bulk-orders`, {
+                      scheduled_prep_at: new Date(bulkPrepTime).toISOString(),
+                      scheduled_pickup_at: new Date(bulkPickupTime).toISOString(),
+                      pickup_arrangement: bulkArrangement,
+                      payment_method: "razorpay",
+                      notes: bulkNotes.trim() || null,
+                      items: [{ food_item_id: chosenFoodId, quantity: Number(bulkQty) || bulkEventTarget.min_order_quantity }],
+                    });
+                    setBulkEventTarget(null);
+                    pushToast(`Bulk order ${res.data.bulk_order_number} submitted!`, "success");
+                    await refetchMyBulkOrders();
+                    await launchBulkOrderPayment(res.data);
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                Submit Bulk Order &amp; Pay
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* Password, Sessions & Account Closure */}
       <div className="grid gap-6 md:grid-cols-2">

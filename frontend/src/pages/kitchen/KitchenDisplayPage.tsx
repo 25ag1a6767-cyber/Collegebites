@@ -388,8 +388,11 @@ export const KitchenDisplayPage: React.FC = () => {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <span className="text-2xl font-black text-slate-900">{o.pickup_token_code || o.order_number}</span>
+                          {o.order_type === "event_bulk" && (
+                            <Badge tone="blue">EVENT BULK</Badge>
+                          )}
                           {o.is_priority && (
                             <Badge tone="red">
                               <Star className="h-3 w-3 inline fill-current mr-0.5" /> RUSH

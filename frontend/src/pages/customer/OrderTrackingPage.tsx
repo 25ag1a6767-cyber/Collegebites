@@ -542,6 +542,33 @@ export const OrderTrackingPage: React.FC = () => {
                 </Button>
               </>
             )}
+            {order.payment_status === "CONFIRMED" && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={async () => {
+                  try {
+                    const invSuffix = effectiveToken
+                      ? `?guest_access_token=${encodeURIComponent(effectiveToken)}`
+                      : "";
+                    const res = await api.get(`/invoices/${order.id}/pdf${invSuffix}`, {
+                      responseType: "blob",
+                    });
+                    const url = URL.createObjectURL(res.data);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `Invoice-${order.order_number}.pdf`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (err) {
+                    pushToast(getApiError(err, "Failed to download tax invoice PDF"), "error");
+                  }
+                }}
+              >
+                <PackageCheck className="h-3.5 w-3.5" /> Tax Invoice PDF
+              </Button>
+            )}
             {order.items.length > 0 && (
               <Button size="sm" variant="outline" disabled={busy} onClick={() => void handleReorderOrder()}>
                 <RotateCcw className="h-3.5 w-3.5" /> Reorder
