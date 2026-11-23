@@ -305,9 +305,13 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
     };
   }, [enabled, ssePath, accessToken, wsToken, wsGuestToken, guestSessionId, reconnectTick]);
 
-  // Low-latency WebSocket push channel with ping keepalive & auto-reconnect
+  // Low-latency WebSocket push channel with ping keepalive & auto-reconnect (skipped on serverless vercel.app unless explicitly enabled)
   useEffect(() => {
-    if (!enabled || !wsPath) return;
+    const isVercelServerless =
+      typeof window !== "undefined" &&
+      window.location.hostname.endsWith(".vercel.app") &&
+      import.meta.env.VITE_WS_ENABLED !== "true";
+    if (!enabled || !wsPath || isVercelServerless) return;
     let cancelled = false;
     let ws: WebSocket | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;

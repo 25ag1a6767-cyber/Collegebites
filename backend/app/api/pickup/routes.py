@@ -74,20 +74,28 @@ def get_digital_board_all_or_filtered(
     db: Session = Depends(get_db),
 ):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return pickup_service.get_digital_token_board(db, canteen_id)
 
 
 @router.get("/board/{canteen_id}", response_model=DigitalBoardResponse)
 def get_digital_board(canteen_id: UUID, response: Response, db: Session = Depends(get_db)):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return pickup_service.get_digital_token_board(db, canteen_id)
 
 
 @router.get("/token-board", response_model=OperationalTokenBoardResponse)
 def get_operational_token_board(
+    response: Response,
     canteen_id: Optional[UUID] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(*TOKEN_BOARD_STAFF_ROLES)),
     db: Session = Depends(get_db),
 ):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     scoped_canteen = scoped_canteen_for_principal(principal, canteen_id)
     return pickup_service.get_operational_token_board(db, scoped_canteen)

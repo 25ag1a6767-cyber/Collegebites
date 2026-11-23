@@ -4,9 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Maximize2, Minimize2, Volume2, VolumeX } from "lucide-react";
 import { api } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
-import { useAppStore } from "../../store/useAppStore";
-import { useOfflineStore } from "../../store/useOfflineStore";
-import { fetchWithOfflineCache, saveOfflineCache } from "../../utils/offlineSync";
+import { isNetworkOfflineError, readOfflineCache, saveOfflineCache } from "../../utils/offlineSync";
 import type { Canteen, DigitalBoardResponse } from "../../types";
 import { playOrderAlertChime } from "../../utils/notifications";
 import { BrandLogo } from "../../components/branding/BrandLogo";
@@ -15,29 +13,33 @@ import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 
 export const TokenBoardPage: React.FC = () => {
   const { canteenId: routeCanteenId } = useParams<{ canteenId?: string }>();
-  const { selectedCanteenId } = useAppStore();
   const qc = useQueryClient();
-  const [selectedId, setSelectedId] = useState(routeCanteenId || "");
+  const [selectedId, setSelectedId] = useState(routeCanteenId || "all");
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [latestReadyBanner, setLatestReadyBanner] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const announcedTokens = useRef<Set<string>>(new Set());
   const seededReadyRef = useRef(false);
+  const lastCachedVerRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (routeCanteenId) {
+      setSelectedId(routeCanteenId);
+    }
+  }, [routeCanteenId]);
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
-  const activeScope = selectedId || routeCanteenId || selectedCanteenId || "all";
+  const activeScope = selectedId || routeCanteenId || "all";
 
   const boardEndpoint = activeScope === "all" ? "/pickup/board" : `/pickup/board/${activeScope}`;
   const ssePath =
     activeScope === "all" ? "/realtime/board/stream" : `/realtime/board/stream?canteen_id=${activeScope}`;
   const wsPath = activeScope === "all" ? "/ws/board/all" : `/ws/board/${activeScope}`;
-
-  const isOnline = useOfflineStore((s) => s.isOnline);
 
   const { status: syncStatus, lastSyncedAt } = useRealtimeSync<DigitalBoardResponse>({
     enabled: Boolean(activeScope),
@@ -45,20 +47,52 @@ export const TokenBoardPage: React.FC = () => {
     wsPath,
     queryKeys: [["digital-board", activeScope]],
     onSnapshot: (snapshot) => {
-      saveOfflineCache(`digital-board:${activeScope}`, snapshot);
+      if (snapshot?.version && snapshot.version !== lastCachedVerRef.current) {
+        lastCachedVerRef.current = snapshot.version;
+        saveOfflineCache(`digital-board:${activeScope}`, snapshot);
+      }
       qc.setQueryData(["digital-board", activeScope], snapshot);
     },
   });
 
-  const { data: board } = useQuery<DigitalBoardResponse>({
+  const { data: board, dataUpdatedAt } = useQuery<DigitalBoardResponse>({
     queryKey: ["digital-board", activeScope],
     enabled: Boolean(activeScope),
-    queryFn: () =>
-      fetchWithOfflineCache(`digital-board:${activeScope}`, async () => (await api.get(boardEndpoint)).data),
+    queryFn: async () => {
+      try {
+        const res = await api.get<DigitalBoardResponse>(boardEndpoint, {
+          headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+        });
+        const live = res.data;
+        if (live?.version && live.version !== lastCachedVerRef.current) {
+          lastCachedVerRef.current = live.version;
+          saveOfflineCache(`digital-board:${activeScope}`, live);
+        }
+        return live;
+      } catch (err) {
+        if (isNetworkOfflineError(err)) {
+          const cached = readOfflineCache<DigitalBoardResponse>(`digital-board:${activeScope}`);
+          if (cached) return cached.data;
+        }
+        throw err;
+      }
+    },
     staleTime: 0,
-    refetchInterval: isOnline ? 1000 : false,
+    retry: false,
+    refetchInterval: () => (typeof navigator !== "undefined" && navigator.onLine === false ? false : 1000),
     refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
+
+  const effectiveSyncedAt =
+    dataUpdatedAt && (!lastSyncedAt || dataUpdatedAt > lastSyncedAt.getTime())
+      ? new Date(dataUpdatedAt)
+      : lastSyncedAt;
+  const displaySyncStatus =
+    syncStatus !== "offline" && dataUpdatedAt > 0 && Date.now() - dataUpdatedAt < 4000
+      ? "live"
+      : syncStatus;
 
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
@@ -133,7 +167,7 @@ export const TokenBoardPage: React.FC = () => {
               <span className="text-xs font-bold uppercase tracking-widest text-[#fdedce]">
                 COLLEGEBITES PICKUP DISPLAY
               </span>
-              <RealtimeStatusBadge status={syncStatus} lastSyncedAt={lastSyncedAt} darkSurface />
+              <RealtimeStatusBadge status={displaySyncStatus} lastSyncedAt={effectiveSyncedAt} darkSurface />
               <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold text-emerald-300">
                 Auto-refresh: 1s
               </span>

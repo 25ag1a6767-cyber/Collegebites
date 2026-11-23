@@ -17,7 +17,7 @@ import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import { useOfflineStore } from "../../store/useOfflineStore";
-import { executeOrQueueSafeMutation, fetchWithOfflineCache, saveOfflineCache } from "../../utils/offlineSync";
+import { executeOrQueueSafeMutation, isNetworkOfflineError, readOfflineCache, saveOfflineCache } from "../../utils/offlineSync";
 import type { Canteen, OperationalTokenBoardResponse, OperationalTokenCard } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
@@ -237,6 +237,7 @@ export const OperationalTokenBoardPage: React.FC = () => {
   const wsPath = activeScope === "all" ? "/ws/board/all" : `/ws/kitchen/${activeScope}`;
 
   const isOnline = useOfflineStore((s) => s.isOnline);
+  const lastOpCachedVerRef = React.useRef<string | null>(null);
 
   const { status: syncStatus, lastSyncedAt, triggerSync } = useRealtimeSync<OperationalTokenBoardResponse>({
     enabled: Boolean(accessToken),
@@ -244,22 +245,49 @@ export const OperationalTokenBoardPage: React.FC = () => {
     wsPath,
     queryKeys: [["operational-token-board", activeScope]],
     onSnapshot: (snap) => {
-      saveOfflineCache(`op-board:${activeScope}`, snap);
+      if (snap?.version && snap.version !== lastOpCachedVerRef.current) {
+        lastOpCachedVerRef.current = snap.version;
+        saveOfflineCache(`op-board:${activeScope}`, snap);
+      }
       qc.setQueryData(["operational-token-board", activeScope], snap);
     },
   });
 
-  const { data: board, isLoading } = useQuery<OperationalTokenBoardResponse>({
+  const { data: board, dataUpdatedAt: opUpdatedAt, isLoading } = useQuery<OperationalTokenBoardResponse>({
     queryKey: ["operational-token-board", activeScope],
     enabled: Boolean(accessToken),
-    queryFn: () =>
-      fetchWithOfflineCache(`op-board:${activeScope}`, async () => {
-        const qs = activeScope === "all" ? "" : `?canteen_id=${encodeURIComponent(activeScope)}`;
-        return (await api.get(`/pickup/token-board${qs}`)).data;
-      }),
-    refetchInterval: !isOnline ? false : syncStatus === "live" ? 30000 : 4000,
+    queryFn: async () => {
+      const qs = activeScope === "all" ? "" : `?canteen_id=${encodeURIComponent(activeScope)}`;
+      try {
+        const res = await api.get<OperationalTokenBoardResponse>(`/pickup/token-board${qs}`, {
+          headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
+        });
+        const live = res.data;
+        if (live?.version && live.version !== lastOpCachedVerRef.current) {
+          lastOpCachedVerRef.current = live.version;
+          saveOfflineCache(`op-board:${activeScope}`, live);
+        }
+        return live;
+      } catch (err) {
+        if (isNetworkOfflineError(err)) {
+          const cached = readOfflineCache<OperationalTokenBoardResponse>(`op-board:${activeScope}`);
+          if (cached) return cached.data;
+        }
+        throw err;
+      }
+    },
+    staleTime: 0,
+    retry: false,
+    refetchInterval: () => (typeof navigator !== "undefined" && navigator.onLine === false ? false : 1000),
     refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
+
+  const effectiveOpSyncedAt =
+    opUpdatedAt && (!lastSyncedAt || opUpdatedAt > lastSyncedAt.getTime())
+      ? new Date(opUpdatedAt)
+      : lastSyncedAt;
 
   const handleAction = async (
     card: OperationalTokenCard,
@@ -351,9 +379,9 @@ export const OperationalTokenBoardPage: React.FC = () => {
               <h1 className="text-xl font-extrabold">Live Token Board — Order Management</h1>
               <RealtimeStatusBadge
                 status={syncStatus}
-                lastSyncedAt={lastSyncedAt}
+                lastSyncedAt={effectiveOpSyncedAt}
                 darkSurface
-                connectedLabel="Connected"
+                connectedLabel="Connected • 1s Auto"
               />
             </div>
             <p className="text-xs text-[#fdedce]/80">

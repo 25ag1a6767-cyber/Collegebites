@@ -38,16 +38,23 @@ export const PickupScannerPage: React.FC = () => {
     },
   });
 
-  const { data: boardData, refetch: refetchBoard } = useQuery<{
+  const { data: boardData, dataUpdatedAt: boardUpdatedAt, refetch: refetchBoard } = useQuery<{
     ready_for_pickup: { token_code: string; counter_name: string; order_status: string; ready_at?: string }[];
     now_preparing: { token_code: string; counter_name: string; order_status: string }[];
   }>({
     queryKey: ["pickup-scanner-board", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    refetchInterval: boardSyncStatus === "live" ? 30000 : 4000,
+    staleTime: 0,
+    retry: false,
+    refetchInterval: () => (typeof navigator !== "undefined" && navigator.onLine === false ? false : 1000),
     refetchIntervalInBackground: true,
-    queryFn: async () => (await api.get(`/pickup/board/${activeCanteenId}`)).data,
+    queryFn: async () =>
+      (await api.get(`/pickup/board/${activeCanteenId}`, { headers: { "Cache-Control": "no-cache", Pragma: "no-cache" } })).data,
   });
+  const effectiveBoardSyncedAt =
+    boardUpdatedAt && (!boardSyncedAt || boardUpdatedAt > boardSyncedAt.getTime())
+      ? new Date(boardUpdatedAt)
+      : boardSyncedAt;
 
   const [counterId, setCounterId] = useState("");
   const [manualInput, setManualInput] = useState("");
@@ -162,7 +169,7 @@ export const PickupScannerPage: React.FC = () => {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-extrabold">QR Pickup Verification & Handover</h1>
-              <RealtimeStatusBadge status={boardSyncStatus} lastSyncedAt={boardSyncedAt} darkSurface />
+              <RealtimeStatusBadge status={boardSyncStatus} lastSyncedAt={effectiveBoardSyncedAt} darkSurface connectedLabel="Live • 1s" />
             </div>
             <p className="text-xs text-[#fdedce]/80">
               Scanning verifies authenticity separately — staff must explicitly confirm food handover.
