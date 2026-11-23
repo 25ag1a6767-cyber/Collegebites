@@ -109,6 +109,7 @@ export const HomePage: React.FC = () => {
       if (activeTag === "popular") params.set("popular", "true");
       if (activeTag === "special") params.set("todays_special", "true");
       if (activeTag === "recommended") params.set("recommended", "true");
+      params.set("available_only", "true");
       params.set("sort_by", sortBy);
       return (await api.get(`/menus/canteens/${activeCanteen!.id}/items?${params.toString()}`)).data;
     },
@@ -255,6 +256,9 @@ export const HomePage: React.FC = () => {
               Live Order {activeOrder.order_number} • Token{" "}
               <span className="text-[#fdedce] font-mono text-base">{activeOrder.pickup_token_code}</span> is{" "}
               <span className="underline">{activeOrder.status}</span>
+              {activeOrder.queue_position && activeOrder.queue_position > 0
+                ? ` • Queue #${activeOrder.queue_position} (~${activeOrder.dynamic_wait_minutes ?? activeOrder.estimated_prep_minutes}m wait)`
+                : ""}
             </div>
           </div>
           <span className="text-xs font-extrabold text-emerald-300">Track Live →</span>
@@ -340,14 +344,17 @@ export const HomePage: React.FC = () => {
       </div>
 
       {/* Smart Recommendations Strip */}
-      {recommended.length > 0 && (
+      {recommended.filter((r) => r.is_available && !r.insufficient_ingredients && r.is_schedule_active_now !== false).length > 0 && (
         <div>
           <div className="mb-3 flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-[#76010d]" />
             <h2 className="text-lg font-extrabold text-slate-900">Recommended Right Now</h2>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {recommended.slice(0, 3).map((item) => (
+            {recommended
+              .filter((r) => r.is_available && !r.insufficient_ingredients && r.is_schedule_active_now !== false)
+              .slice(0, 3)
+              .map((item) => (
               <Card
                 key={item.id}
                 onClick={() => openItemModal(item)}
@@ -367,8 +374,8 @@ export const HomePage: React.FC = () => {
                     ₹{item.base_price} • {item.prep_time_minutes}m • ★ {item.average_rating}
                   </div>
                 </div>
-                <Button size="sm" variant="primary">
-                  Add
+                <Button size="sm" variant="primary" disabled={!activeCanteen?.is_open_now}>
+                  {activeCanteen?.is_open_now ? "Add" : "Closed"}
                 </Button>
               </Card>
             ))}
@@ -761,10 +768,22 @@ export const HomePage: React.FC = () => {
               variant="primary"
               className="w-full"
               size="lg"
-              disabled={addToCartMut.isPending}
+              disabled={
+                addToCartMut.isPending ||
+                !activeCanteen?.is_open_now ||
+                !activeItem.is_available ||
+                activeItem.insufficient_ingredients ||
+                activeItem.is_schedule_active_now === false
+              }
               onClick={() => addToCartMut.mutate()}
             >
-              Add to Cart • ₹{computeModalPrice().toFixed(2)}
+              {!activeCanteen?.is_open_now
+                ? "Canteen Currently Closed"
+                : !activeItem.is_available || activeItem.insufficient_ingredients
+                ? "Item Currently Unavailable"
+                : activeItem.is_schedule_active_now === false
+                ? "Outside Serving Hours"
+                : `Add to Cart • ₹${computeModalPrice().toFixed(2)}`}
             </Button>
 
             {/* Reviews Section */}

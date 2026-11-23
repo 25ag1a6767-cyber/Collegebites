@@ -22,6 +22,7 @@ import { InventoryPage } from "./pages/inventory/InventoryPage";
 import { OperationalTokenBoardPage } from "./pages/board/OperationalTokenBoardPage";
 import { AdminConsolePage } from "./pages/admin/AdminConsolePage";
 import { KioskPage } from "./pages/kiosk/KioskPage";
+import { StaffPortalPage } from "./pages/staff/StaffPortalPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -156,6 +157,23 @@ export function App() {
                 element={
                   <RequireRole allowed={["canteen_manager", "college_admin"]}>
                     <AdminConsolePage />
+                  </RequireRole>
+                }
+              />
+              <Route
+                path="/staff"
+                element={
+                  <RequireRole
+                    allowed={[
+                      "kitchen_staff",
+                      "cashier",
+                      "pickup_staff",
+                      "inventory_manager",
+                      "canteen_manager",
+                      "college_admin",
+                    ]}
+                  >
+                    <StaffPortalPage />
                   </RequireRole>
                 }
               />

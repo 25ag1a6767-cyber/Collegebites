@@ -28,7 +28,7 @@ from app.models.inventory import (
     Supplier,
     WastageRecord,
 )
-from app.models.menu import FoodItem, Ingredient, Recipe, RecipeIngredient
+from app.models.menu import FoodItem, Ingredient, MenuRestoreApproval, Recipe, RecipeIngredient
 from app.models.order import Order, OrderItem
 from app.services.audit_service import record_audit_log
 from app.websockets import emit_order_event_sync
@@ -237,8 +237,14 @@ def _trigger_low_stock_alert_if_needed(
         pass
 
 
-def refresh_food_item_ingredient_sufficiency(db: Session, canteen_id: UUID) -> list[str]:
-    """Recompute FoodItem.insufficient_ingredients using unexpired, unreserved ingredient stock."""
+def refresh_food_item_ingredient_sufficiency(
+    db: Session,
+    canteen_id: UUID,
+    *,
+    require_restore_approval: bool = True,
+) -> list[str]:
+    """Recompute FoodItem.insufficient_ingredients using unexpired, unreserved ingredient stock.
+    Auto-disables depleted items and queues Manager Approval before re-enabling upon restock."""
     invs = db.scalars(select(InventoryItem).where(InventoryItem.canteen_id == canteen_id)).all()
     expired_map = _expired_batch_totals_map(db, [inv.id for inv in invs])
     inv_map = {
@@ -264,17 +270,54 @@ def refresh_food_item_ingredient_sufficiency(db: Session, canteen_id: UUID) -> l
             if avail < per_portion:
                 short = True
                 break
-        if food.insufficient_ingredients != short:
+        was_short = bool(food.insufficient_ingredients)
+        if short:
+            if not was_short or food.is_available:
+                changed_foods.append(
+                    {
+                        "food_item_id": str(food.id),
+                        "name": food.name,
+                        "insufficient_ingredients": True,
+                        "is_available": False,
+                    }
+                )
+            food.insufficient_ingredients = True
+            food.is_available = False
+            food.pending_restore_approval = False
+            blocked_names.append(food.name)
+        elif was_short:
+            # Ingredients replenished above threshold
+            food.insufficient_ingredients = False
+            if require_restore_approval:
+                food.is_available = False
+                food.pending_restore_approval = True
+                existing_req = db.scalar(
+                    select(MenuRestoreApproval).where(
+                        MenuRestoreApproval.food_item_id == food.id,
+                        MenuRestoreApproval.status == "pending_approval",
+                    )
+                )
+                if not existing_req:
+                    db.add(
+                        MenuRestoreApproval(
+                            canteen_id=canteen_id,
+                            food_item_id=food.id,
+                            status="pending_approval",
+                            reason="Stock replenished above recipe minimum; awaiting manager approval to restore menu visibility",
+                        )
+                    )
+            else:
+                if not food.pending_restore_approval:
+                    food.is_available = True
             changed_foods.append(
                 {
                     "food_item_id": str(food.id),
                     "name": food.name,
-                    "insufficient_ingredients": short,
+                    "insufficient_ingredients": False,
+                    "is_available": food.is_available,
+                    "pending_restore_approval": food.pending_restore_approval,
                 }
             )
-        food.insufficient_ingredients = short
-        if short:
-            blocked_names.append(food.name)
     _queue_inv_ws_event(
         db,
         canteen_id,
@@ -345,7 +388,7 @@ def release_inventory_reservation_for_order(db: Session, order: Order) -> None:
         if rel_qty > Decimal("0.000"):
             inv.reserved_quantity = max(Decimal("0.000"), inv.reserved_quantity - rel_qty)
     db.flush()
-    refresh_food_item_ingredient_sufficiency(db, order.canteen_id)
+    refresh_food_item_ingredient_sufficiency(db, order.canteen_id, require_restore_approval=False)
 
 
 def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optional[UUID] = None) -> None:
@@ -958,6 +1001,8 @@ def adjust_or_waste_stock(
     batch_id: Optional[UUID] = None,
     operation_type: Optional[str] = None,
     expiry_date: Optional[date] = None,
+    waste_date: Optional[date] = None,
+    responsible_staff_id: Optional[UUID] = None,
 ) -> dict:
     inv = db.scalar(select(InventoryItem).where(InventoryItem.id == inventory_item_id).with_for_update())
     if not inv:
@@ -1005,12 +1050,16 @@ def adjust_or_waste_stock(
         loss = (batch_loss + (uncovered_qty * inv.unit_cost)).quantize(Decimal("0.01"))
         db.add(
             WastageRecord(
+                canteen_id=inv.canteen_id,
                 inventory_item_id=inv.id,
                 batch_id=used_batch_id,
+                source_type="ingredient",
                 quantity=qty,
                 loss_type=loss_type,
                 reason=reason,
+                waste_date=waste_date or today_college(),
                 estimated_loss=loss,
+                responsible_staff_id=responsible_staff_id,
                 recorded_by_user_id=actor_user_id,
             )
         )
@@ -1400,13 +1449,14 @@ def get_inventory_dashboard(db: Session, canteen_id: UUID) -> dict:
 
     wastage_rows = db.scalars(
         select(WastageRecord)
-        .join(InventoryItem, InventoryItem.id == WastageRecord.inventory_item_id)
-        .where(InventoryItem.canteen_id == canteen_id)
+        .outerjoin(InventoryItem, InventoryItem.id == WastageRecord.inventory_item_id)
+        .where(or_(WastageRecord.canteen_id == canteen_id, InventoryItem.canteen_id == canteen_id))
     ).all()
     loss_breakdown: dict[str, dict[str, Decimal]] = {
         "damaged": {"qty": Decimal("0.000"), "loss": Decimal("0.00")},
         "expired": {"qty": Decimal("0.000"), "loss": Decimal("0.00")},
         "wastage": {"qty": Decimal("0.000"), "loss": Decimal("0.00")},
+        "unsold": {"qty": Decimal("0.000"), "loss": Decimal("0.00")},
     }
     for wr in wastage_rows:
         lt = wr.loss_type if wr.loss_type in loss_breakdown else _classify_loss_type(None, wr.reason)
@@ -1967,36 +2017,85 @@ def cancel_purchase_order(
     return {"id": str(po.id), "po_number": po.po_number, "status": po.status}
 
 
-def list_wastage_records(db: Session, canteen_id: UUID, limit: int = 100) -> list[dict]:
-    rows = db.execute(
-        select(WastageRecord, InventoryItem, Ingredient.name)
-        .join(InventoryItem, InventoryItem.id == WastageRecord.inventory_item_id)
-        .join(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
-        .where(InventoryItem.canteen_id == canteen_id)
-        .order_by(desc(WastageRecord.created_at))
-        .limit(limit)
-    ).all()
-    user_ids = {wr.recorded_by_user_id for wr, _, _ in rows if wr.recorded_by_user_id}
+def list_wastage_records(
+    db: Session,
+    canteen_id: UUID,
+    limit: int = 100,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    loss_type: Optional[str] = None,
+    source_type: Optional[str] = None,
+    responsible_staff_id: Optional[UUID] = None,
+) -> list[dict]:
+    stmt = (
+        select(WastageRecord, InventoryItem, Ingredient.name, FoodItem.name)
+        .outerjoin(InventoryItem, InventoryItem.id == WastageRecord.inventory_item_id)
+        .outerjoin(Ingredient, Ingredient.id == InventoryItem.ingredient_id)
+        .outerjoin(FoodItem, FoodItem.id == WastageRecord.food_item_id)
+        .where(or_(WastageRecord.canteen_id == canteen_id, InventoryItem.canteen_id == canteen_id))
+    )
+    if loss_type and loss_type != "all":
+        stmt = stmt.where(WastageRecord.loss_type == loss_type)
+    if source_type and source_type != "all":
+        stmt = stmt.where(WastageRecord.source_type == source_type)
+    if responsible_staff_id:
+        stmt = stmt.where(WastageRecord.responsible_staff_id == responsible_staff_id)
+    if start_date:
+        stmt = stmt.where(
+            or_(
+                WastageRecord.waste_date >= start_date,
+                WastageRecord.waste_date.is_(None),
+            )
+        )
+    if end_date:
+        stmt = stmt.where(
+            or_(
+                WastageRecord.waste_date <= end_date,
+                WastageRecord.waste_date.is_(None),
+            )
+        )
+    rows = db.execute(stmt.order_by(desc(WastageRecord.created_at)).limit(limit)).all()
+    user_ids = {
+        uid
+        for wr, _, _, _ in rows
+        for uid in (wr.recorded_by_user_id, wr.responsible_staff_id)
+        if uid
+    }
     user_map = (
         {u.id: (u.full_name or u.email or str(u.id)) for u in db.scalars(select(User).where(User.id.in_(user_ids))).all()}
         if user_ids
         else {}
     )
-    return [
-        {
-            "id": str(wr.id),
-            "inventory_item_id": str(wr.inventory_item_id),
-            "ingredient_name": ing_name,
-            "unit": inv.unit,
-            "quantity": str(wr.quantity),
-            "loss_type": wr.loss_type,
-            "reason": wr.reason,
-            "estimated_loss": str(wr.estimated_loss),
-            "recorded_by_name": user_map.get(wr.recorded_by_user_id) if wr.recorded_by_user_id else None,
-            "created_at": wr.created_at.isoformat() if wr.created_at else None,
-        }
-        for wr, inv, ing_name in rows
-    ]
+    out = []
+    for wr, inv, ing_name, food_name in rows:
+        eff_date = wr.waste_date or (wr.created_at.date() if wr.created_at else None)
+        if start_date and eff_date and eff_date < start_date:
+            continue
+        if end_date and eff_date and eff_date > end_date:
+            continue
+        out.append(
+            {
+                "id": str(wr.id),
+                "inventory_item_id": str(wr.inventory_item_id) if wr.inventory_item_id else None,
+                "food_item_id": str(wr.food_item_id) if wr.food_item_id else None,
+                "source_type": wr.source_type or "ingredient",
+                "ingredient_name": ing_name,
+                "food_item_name": food_name,
+                "item_name": food_name or ing_name or "Item",
+                "unit": inv.unit if inv else "portions",
+                "quantity": str(wr.quantity),
+                "loss_type": wr.loss_type,
+                "reason": wr.reason,
+                "waste_date": eff_date.isoformat() if eff_date else None,
+                "batch_id": str(wr.batch_id) if wr.batch_id else None,
+                "estimated_loss": str(wr.estimated_loss),
+                "responsible_staff_id": str(wr.responsible_staff_id) if wr.responsible_staff_id else None,
+                "responsible_staff_name": user_map.get(wr.responsible_staff_id) if wr.responsible_staff_id else None,
+                "recorded_by_name": user_map.get(wr.recorded_by_user_id) if wr.recorded_by_user_id else None,
+                "created_at": wr.created_at.isoformat() if wr.created_at else None,
+            }
+        )
+    return out
 
 
 def list_stock_adjustments(db: Session, canteen_id: UUID, limit: int = 100) -> list[dict]:
@@ -2030,6 +2129,8 @@ def list_stock_adjustments(db: Session, canteen_id: UUID, limit: int = 100) -> l
 
 
 def get_inventory_report_data(db: Session, canteen_id: UUID) -> dict:
+    from app.services import waste_service
+
     canteen = db.get(Canteen, canteen_id)
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")
@@ -2037,6 +2138,9 @@ def get_inventory_report_data(db: Session, canteen_id: UUID) -> dict:
     items = list_canteen_inventory(db, canteen_id, include_archived=True)
     alerts = get_inventory_alerts(db, canteen_id)
     price_changes = list_price_changes(db, canteen_id, limit=50)
+    waste_analytics = waste_service.get_waste_analytics(db, canteen_id=canteen_id, period="daily")
+    consumption = waste_service.get_consumption_report(db, canteen_id=canteen_id)
+    recommendations = waste_service.get_waste_recommendations(db, canteen_id=canteen_id)
     return {
         "canteen_name": canteen.name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -2044,6 +2148,9 @@ def get_inventory_report_data(db: Session, canteen_id: UUID) -> dict:
         "items": items,
         "alerts": alerts,
         "price_changes": price_changes,
+        "waste_analytics": waste_analytics,
+        "consumption": consumption,
+        "waste_recommendations": recommendations,
     }
 
 
@@ -2086,11 +2193,28 @@ def export_inventory_csv(report: dict) -> str:
             it["preferred_supplier_name"] or "",
             "Yes" if it["is_archived"] else "No",
         ])
+    w.writerow(["Unsold/Wastage Loss", d["loss_breakdown"].get("unsold", {}).get("loss_amount", "0.00")])
+    wa = report.get("waste_analytics") or {}
+    ws = wa.get("summary") or {}
+    if ws:
+        w.writerow([])
+        w.writerow(["FOOD WASTE MANAGEMENT"])
+        w.writerow(["Total Food Prepared (portions)", ws.get("total_food_prepared", 0)])
+        w.writerow(["Total Food Sold (portions)", ws.get("total_food_sold", 0)])
+        w.writerow(["Total Food Wasted (portions)", ws.get("total_food_wasted", 0)])
+        w.writerow(["Food Wastage %", f"{ws.get('food_wastage_percent', 0)}%"])
+        w.writerow(["Estimated Total Wastage Cost (INR)", ws.get("estimated_wastage_cost", "0.00")])
     w.writerow([])
     w.writerow(["PRICE CHANGES", "Kind", "Target", "Old Price", "New Price", "Status", "Reason", "Requested By", "Reviewed By"])
     for p in report["price_changes"]:
         target = p["food_item_name"] or p["ingredient_name"] or ""
         w.writerow([p["created_at"], p["price_kind"], target, p["old_price"], p["new_price"], p["status"], p["reason"], p["requested_by_name"] or "", p["reviewed_by_name"] or ""])
+    cons = (report.get("consumption") or {}).get("items") or []
+    if cons:
+        w.writerow([])
+        w.writerow(["CONSUMPTION REPORT", "Unit", "Stocked In", "Order Deducted", "Wasted", "Theoretical Recipe", "Actual Consumed", "Variance"])
+        for c in cons:
+            w.writerow([c["ingredient_name"], c["unit"], c["stocked_in"], c["order_deducted"], c["wasted"], c["theoretical_recipe_consumption"], c["actual_consumed"], c["variance_quantity"]])
     return buf.getvalue()
 
 
@@ -2135,8 +2259,17 @@ def export_inventory_pdf(report: dict) -> bytes:
         ("Damaged Loss", f"Rs.{d['loss_breakdown']['damaged']['loss_amount']} ({d['loss_breakdown']['damaged']['quantity']})"),
         ("Expired Loss", f"Rs.{d['loss_breakdown']['expired']['loss_amount']} ({d['loss_breakdown']['expired']['quantity']})"),
         ("Wastage Loss", f"Rs.{d['loss_breakdown']['wastage']['loss_amount']} ({d['loss_breakdown']['wastage']['quantity']})"),
+        ("Unsold Food Loss", f"Rs.{d['loss_breakdown'].get('unsold', {}).get('loss_amount', '0.00')} ({d['loss_breakdown'].get('unsold', {}).get('quantity', '0')})"),
         ("Pending Selling Price Approvals", d["pending_price_requests_count"]),
     ])
+
+    ws = (report.get("waste_analytics") or {}).get("summary") or {}
+    if ws:
+        section("Food Waste Management (Last 14 Days)", [
+            ("Prepared / Sold / Wasted (Portions)", f"{ws.get('total_food_prepared', 0)} / {ws.get('total_food_sold', 0)} / {ws.get('total_food_wasted', 0)}"),
+            ("Food Wastage Percentage", f"{ws.get('food_wastage_percent', 0)}%"),
+            ("Estimated Wastage Cost", f"Rs.{ws.get('estimated_wastage_cost', '0.00')}"),
+        ])
 
     section("Inventory Stock Ledger", [
         (f"{it['name']} ({it['sku']})", f"{it['current_quantity']} {it['unit']} @ Rs.{it['unit_cost']} [{it['stock_status']}]")

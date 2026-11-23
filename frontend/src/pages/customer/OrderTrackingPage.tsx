@@ -231,6 +231,30 @@ export const OrderTrackingPage: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (!order) return;
+    const prev = prevTrackStateRef.current;
+    if (!prev) {
+      prevTrackStateRef.current = { status: order.status, delayed: order.delayed_minutes };
+      return;
+    }
+    if (prev.status !== order.status) {
+      playOrderAlertChime(order.status === "READY");
+      const msg =
+        order.status === "READY"
+          ? `Token ${order.pickup_token_code || order.order_number} is READY at ${order.counter_name}!`
+          : `Order ${order.order_number} is now ${order.status}`;
+      pushToast(msg, order.status === "READY" ? "success" : "info");
+      void showBrowserNotification(`Order ${order.status}`, msg, `/orders/${order.order_number}`);
+    } else if (order.delayed_minutes > prev.delayed) {
+      playOrderAlertChime(true);
+      const msg = `Order ${order.order_number} delayed (+${order.delayed_minutes}m): ${order.delay_reason || ""}`;
+      pushToast(msg, "info");
+      void showBrowserNotification("Order Delayed", msg, `/orders/${order.order_number}`);
+    }
+    prevTrackStateRef.current = { status: order.status, delayed: order.delayed_minutes };
+  }, [order, pushToast]);
+
   if (error) {
     return (
       <div className="mx-auto max-w-md px-4 py-12">
@@ -261,29 +285,6 @@ export const OrderTrackingPage: React.FC = () => {
 
   const currentStepIdx = STEPS.findIndex((s) => s.key === order.status);
   const isTerminalFail = ["CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(order.status);
-
-  useEffect(() => {
-    const prev = prevTrackStateRef.current;
-    if (!prev) {
-      prevTrackStateRef.current = { status: order.status, delayed: order.delayed_minutes };
-      return;
-    }
-    if (prev.status !== order.status) {
-      playOrderAlertChime(order.status === "READY");
-      const msg =
-        order.status === "READY"
-          ? `Token ${order.pickup_token_code || order.order_number} is READY at ${order.counter_name}!`
-          : `Order ${order.order_number} is now ${order.status}`;
-      pushToast(msg, order.status === "READY" ? "success" : "info");
-      void showBrowserNotification(`Order ${order.status}`, msg, `/orders/${order.order_number}`);
-    } else if (order.delayed_minutes > prev.delayed) {
-      playOrderAlertChime(true);
-      const msg = `Order ${order.order_number} delayed (+${order.delayed_minutes}m): ${order.delay_reason || ""}`;
-      pushToast(msg, "info");
-      void showBrowserNotification("Order Delayed", msg, `/orders/${order.order_number}`);
-    }
-    prevTrackStateRef.current = { status: order.status, delayed: order.delayed_minutes };
-  }, [order.status, order.delayed_minutes, order.delay_reason, order.order_number, order.pickup_token_code, order.counter_name, pushToast]);
 
   const handleReorderOrder = async () => {
     setBusy(true);
@@ -411,22 +412,56 @@ export const OrderTrackingPage: React.FC = () => {
               })}
             </div>
             {order.payment_status === "CONFIRMED" && order.status !== "COMPLETED" && (
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-xs font-semibold text-slate-600">
-                  <span>
-                    {order.status === "READY"
-                      ? `Order ready at ${order.counter_name}! Present your QR token.`
-                      : remainingSecs > 0
-                      ? `Estimated ready in ${formatCountdown(remainingSecs)} (Target ${new Date(targetMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})`
-                      : "Finishing preparation shortly — kitchen is finalizing your order."}
-                  </span>
-                  <span className="font-mono">{progressPct}%</span>
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 rounded-2xl border border-[#76010d]/15 bg-[#fdf8f0] p-3">
+                  <div>
+                    <div className="text-[10px] font-bold uppercase text-slate-500">Live Queue Position</div>
+                    <div className="text-lg font-black text-[#5d010a]">
+                      {order.status === "READY" ? "READY NOW" : order.queue_position ? `#${order.queue_position}` : "In Queue"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-bold uppercase text-slate-500">Orders Ahead</div>
+                    <div className="text-lg font-black text-slate-900">
+                      {order.orders_ahead_count ?? 0} {order.orders_ahead_count === 1 ? "order" : "orders"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-bold uppercase text-slate-500">Assigned Counter</div>
+                    <div className="text-sm font-bold text-slate-900 truncate">
+                      {order.counter_name || "Main Counter"}
+                      {order.counter_queue_position && order.counter_queue_position > 0 ? ` (#${order.counter_queue_position})` : ""}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-bold uppercase text-slate-500">Dynamic Wait ETA</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-lg font-black text-emerald-700">
+                        {order.status === "READY"
+                          ? "0 min"
+                          : `~${order.dynamic_wait_minutes ?? order.estimated_prep_minutes + order.delayed_minutes} min`}
+                      </span>
+                      {order.is_priority && <Badge tone="red">PRIORITY</Badge>}
+                    </div>
+                  </div>
                 </div>
-                <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
-                  <div
-                    className={`h-full transition-all duration-500 ${order.status === "READY" ? "bg-emerald-500" : "bg-[#76010d]"}`}
-                    style={{ width: `${progressPct}%` }}
-                  />
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-600">
+                    <span>
+                      {order.status === "READY"
+                        ? `Order ready at ${order.counter_name}! Present your QR token.`
+                        : remainingSecs > 0
+                        ? `Estimated ready in ${formatCountdown(remainingSecs)} (Target ${new Date(targetMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})`
+                        : "Finishing preparation shortly — kitchen is finalizing your order."}
+                    </span>
+                    <span className="font-mono">{progressPct}%</span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-500 ${order.status === "READY" ? "bg-emerald-500" : "bg-[#76010d]"}`}
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
                 </div>
               </div>
             )}

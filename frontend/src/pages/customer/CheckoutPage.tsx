@@ -42,6 +42,7 @@ export const CheckoutPage: React.FC = () => {
     queryKey: ["cart", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
     queryFn: async () => (await api.get(`/carts?canteen_id=${activeCanteen!.id}`)).data,
+    refetchInterval: 8000,
   });
 
   const { data: slots = [] } = useQuery<any[]>({

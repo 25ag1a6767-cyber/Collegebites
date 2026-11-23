@@ -1,11 +1,12 @@
 import uuid
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -72,6 +73,11 @@ class FoodItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     insufficient_ingredients: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    pending_restore_approval: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    available_from_time: Mapped[Optional[time]] = mapped_column(Time)
+    available_until_time: Mapped[Optional[time]] = mapped_column(Time)
+    valid_from: Mapped[Optional[date]] = mapped_column(Date)
+    valid_until: Mapped[Optional[date]] = mapped_column(Date)
 
     category: Mapped["FoodCategory"] = relationship(back_populates="items")
     images: Mapped[list["FoodImage"]] = relationship(back_populates="food_item", cascade="all, delete-orphan")
@@ -199,11 +205,16 @@ class MenuSchedule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "menu_schedules"
 
     canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)  # Breakfast, Lunch, Snacks, Specials
+    name: Mapped[str] = mapped_column(String(120), nullable=False)  # Breakfast, Lunch, Evening, Event, Specials
     schedule_type: Mapped[str] = mapped_column(String(32), nullable=False, default="all_day")
     start_time: Mapped[time] = mapped_column(Time, nullable=False)
     end_time: Mapped[time] = mapped_column(Time, nullable=False)
     days_of_week: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: [0, 1, 2, 3, 4, 5, 6])
+    valid_from: Mapped[Optional[date]] = mapped_column(Date)
+    valid_until: Mapped[Optional[date]] = mapped_column(Date)
+    special_dates: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    is_special_event: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    event_name: Mapped[Optional[str]] = mapped_column(String(160))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
@@ -219,3 +230,15 @@ class MenuAvailability(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     is_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     override_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class MenuRestoreApproval(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "menu_restore_approvals"
+
+    canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
+    food_item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("food_items.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending_approval", index=True)
+    reason: Mapped[Optional[str]] = mapped_column(String(255))
+    reviewed_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    review_notes: Mapped[Optional[str]] = mapped_column(String(255))

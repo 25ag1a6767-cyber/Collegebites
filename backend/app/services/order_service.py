@@ -11,12 +11,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.redis_client import safe_redis
 from app.core.security import generate_guest_access_token, mask_mobile, sha256_hex
-from app.core.time_utils import now_college, today_college
+from app.core.time_utils import get_college_tz, now_college, today_college
 from app.integrations.razorpay_client import razorpay_gateway
 from app.integrations.stripe_client import stripe_gateway
 from app.models.college import Canteen, Counter, DiningTable, Kitchen, LocationQRCode
 from app.models.inventory import InventoryItem
-from app.models.menu import FoodAddon, FoodItem, FoodItemAddon, FoodVariant, Recipe, RecipeIngredient
+from app.models.menu import FoodAddon, FoodCategory, FoodItem, FoodItemAddon, FoodVariant, Recipe, RecipeIngredient
 from app.models.order import (
     Cart,
     Order,
@@ -164,6 +164,7 @@ def _serialize_order_with_maps(
     pay_row: Optional[Payment],
     policy_text: str,
     raw_guest_token: Optional[str] = None,
+    queue_metrics: Optional[dict] = None,
 ) -> OrderOut:
     items_out = [OrderItemOut.model_validate(item) for item in order.items]
     meta = pay_row.gateway_metadata if (pay_row and isinstance(pay_row.gateway_metadata, dict)) else {}
@@ -208,6 +209,10 @@ def _serialize_order_with_maps(
         delayed_minutes=order.delayed_minutes,
         delay_reason=order.delay_reason,
         is_priority=order.is_priority,
+        queue_position=(queue_metrics or {}).get("queue_position"),
+        orders_ahead_count=(queue_metrics or {}).get("orders_ahead_count"),
+        counter_queue_position=(queue_metrics or {}).get("counter_queue_position"),
+        dynamic_wait_minutes=(queue_metrics or {}).get("dynamic_wait_minutes"),
         pickup_token_code=token_row.token_code if token_row else None,
         qr_verification_path=qr_row.verification_path if qr_row else None,
         qr_token_raw=qr_row.qr_payload_encoded if qr_row else None,
@@ -246,6 +251,9 @@ def serialize_orders_batch(db: Session, orders: list[Order]) -> list[OrderOut]:
         if p.order_id not in pays:
             pays[p.order_id] = p
     college = get_or_create_college_settings(db)
+    from app.services.queue_service import compute_order_queue_metrics_map
+
+    q_metrics_map = compute_order_queue_metrics_map(db, orders)
     return [
         _serialize_order_with_maps(
             o,
@@ -255,6 +263,7 @@ def serialize_orders_batch(db: Session, orders: list[Order]) -> list[OrderOut]:
             qr_row=qrs.get(o.id),
             pay_row=pays.get(o.id),
             policy_text=college.cancellation_policy_text,
+            queue_metrics=q_metrics_map.get(o.id),
         )
         for o in orders
     ]
@@ -267,6 +276,9 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
     qr_row = db.scalar(select(OrderQRCode).where(OrderQRCode.order_id == order.id))
     pay_row = db.scalar(select(Payment).where(Payment.order_id == order.id).order_by(Payment.created_at.desc()))
     college = get_or_create_college_settings(db)
+    from app.services.queue_service import compute_order_queue_metrics_map
+
+    q_metrics = compute_order_queue_metrics_map(db, [order]).get(order.id)
     return _serialize_order_with_maps(
         order,
         canteen=canteen,
@@ -276,6 +288,7 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
         pay_row=pay_row,
         policy_text=college.cancellation_policy_text,
         raw_guest_token=raw_guest_token,
+        queue_metrics=q_metrics,
     )
 
 
@@ -423,21 +436,22 @@ def checkout_order(
     if not line_specs:
         raise HTTPException(status_code=400, detail="Cart is empty; add items before checkout")
 
-    # Resolve counter & kitchen
+    # Resolve counter & kitchen dynamically (express routing & multi-counter load balancing)
     first_food = db.get(FoodItem, line_specs[0].food_item_id)
-    if not counter_id and first_food and first_food.counter_id:
-        counter_id = first_food.counter_id
-    if not counter_id:
-        default_counter = db.scalar(
-            select(Counter).where(Counter.canteen_id == canteen.id, Counter.is_active.is_(True)).order_by(Counter.code)
-        )
-        if not default_counter:
-            raise HTTPException(status_code=400, detail="No active pickup counter configured for this canteen")
-        counter_id = default_counter.id
-    else:
-        cnt = db.get(Counter, counter_id)
-        if not cnt or cnt.canteen_id != canteen.id or not cnt.is_active:
-            raise HTTPException(status_code=400, detail="Invalid pickup counter")
+    spec_foods = db.scalars(select(FoodItem).where(FoodItem.id.in_([s.food_item_id for s in line_specs]))).all()
+    total_qty = sum(int(s.quantity or 1) for s in line_specs)
+    fastest_prep = max((int(f.prep_time_minutes or 10) for f in spec_foods), default=10)
+    is_express_eligible = total_qty <= 3 and fastest_prep <= 6
+
+    from app.services.queue_service import select_optimal_counter
+
+    counter_id, _routing_mode = select_optimal_counter(
+        db,
+        canteen_id=canteen.id,
+        explicit_counter_id=counter_id,
+        food_preferred_counter_id=first_food.counter_id if first_food else None,
+        is_express_eligible=is_express_eligible,
+    )
 
     kitchen_id = first_food.kitchen_id if (first_food and first_food.kitchen_id) else None
     if not kitchen_id:
@@ -480,17 +494,25 @@ def checkout_order(
         line_tax_specs: list[tuple[Decimal, Decimal]] = []
         prepared_items: list[tuple[FoodItem, Optional[FoodVariant], int, Decimal, Decimal, Decimal, Optional[str], list[dict]]] = []
 
-        sched_map = compute_schedule_availability_map(db, [s.food_item_id for s in line_specs])
+        sched_target_dt = (
+            datetime.combine(pickup_slot.slot_date, pickup_slot.start_time, tzinfo=get_college_tz())
+            if pickup_slot
+            else None
+        )
+        sched_map = compute_schedule_availability_map(db, [s.food_item_id for s in line_specs], target_dt=sched_target_dt)
         needed_ingredients: dict[UUID, Decimal] = {}
 
         for spec in line_specs:
             food = db.get(FoodItem, spec.food_item_id)
             if not food or food.canteen_id != canteen.id or not food.is_active:
                 raise HTTPException(status_code=400, detail="Food item not found in canteen")
+            cat = db.get(FoodCategory, food.category_id)
+            if not cat or not cat.is_active:
+                raise HTTPException(status_code=400, detail=f"{food.name}'s category is currently inactive")
             if not food.is_available or food.insufficient_ingredients:
                 raise HTTPException(status_code=400, detail=f"{food.name} is currently out of stock or unavailable")
             if not sched_map.get(food.id, True):
-                raise HTTPException(status_code=400, detail=f"{food.name} is outside its scheduled serving hours")
+                raise HTTPException(status_code=400, detail=f"{food.name} is outside its scheduled serving hours or validity period")
 
             recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == food.id))
             if recipe:

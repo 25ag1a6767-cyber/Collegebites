@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, Money, QuantityNumeric, TimestampMixin, UUIDPrimaryKeyMixin
@@ -122,15 +122,51 @@ class StockAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class WastageRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "wastage_records"
 
-    inventory_item_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("inventory_items.id", ondelete="CASCADE"), nullable=False, index=True
+    canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("canteens.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    inventory_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("inventory_items.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    food_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("food_items.id", ondelete="SET NULL"), nullable=True, index=True
     )
     batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("stock_batches.id", ondelete="SET NULL"))
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="ingredient")  # ingredient | prepared_food
     quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False)
-    loss_type: Mapped[str] = mapped_column(String(32), nullable=False, default="wastage")  # damaged | expired | wastage
-    reason: Mapped[str] = mapped_column(String(255), nullable=False)  # expired | spoiled | spilled | prep_waste | damaged
+    loss_type: Mapped[str] = mapped_column(String(32), nullable=False, default="wastage")  # damaged | expired | wastage | unsold
+    reason: Mapped[str] = mapped_column(String(255), nullable=False)  # expired | spoiled | spilled | prep_waste | damaged | unsold_food
+    waste_date: Mapped[Optional[date]] = mapped_column(Date, index=True)
     estimated_loss: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    responsible_staff_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     recorded_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class DailyFoodPrepLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "daily_food_prep_logs"
+    __table_args__ = (
+        UniqueConstraint(
+            "canteen_id",
+            "food_item_id",
+            "prep_date",
+            "meal_session",
+            name="uq_daily_food_prep_item_session",
+        ),
+    )
+
+    canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
+    food_item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("food_items.id", ondelete="CASCADE"), nullable=False, index=True)
+    prep_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    meal_session: Mapped[str] = mapped_column(String(32), nullable=False, default="all_day")  # breakfast | lunch | evening | dinner | all_day
+    prepared_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unsold_wasted_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unit_cost: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    waste_reason: Mapped[Optional[str]] = mapped_column(String(255))
+    responsible_staff_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    recorded_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    notes: Mapped[Optional[str]] = mapped_column(String(255))
 
 
 class StockTransfer(Base, UUIDPrimaryKeyMixin, TimestampMixin):

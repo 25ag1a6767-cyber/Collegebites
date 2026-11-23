@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.core.redis_client import safe_redis
 from app.core.security import sha256_hex
+from app.core.time_utils import get_college_tz
 from app.integrations.razorpay_client import razorpay_gateway
 from app.integrations.stripe_client import stripe_gateway
 from app.models.college import Canteen
+from app.models.menu import FoodCategory, FoodItem, Recipe, RecipeIngredient
 from app.models.order import Order, OrderItem, OrderStatusHistory, PickupSlot, SlotReservation
 from app.models.payment import (
     Payment,
@@ -689,7 +691,41 @@ def retry_online_payment(
     if not canteen or not canteen.allow_online_payment:
         raise HTTPException(status_code=400, detail="Online payment is disabled for this canteen")
 
+    # Validate current availability & schedule before retrying payment
+    from app.services.menu_service import compute_schedule_availability_map
+
+    food_ids = [oi.food_item_id for oi in order.items if oi.food_item_id]
+    food_map = {f.id: f for f in db.scalars(select(FoodItem).where(FoodItem.id.in_(food_ids))).all()} if food_ids else {}
+    slot_target_dt = None
+    if order.pickup_slot_id:
+        ps = db.get(PickupSlot, order.pickup_slot_id)
+        if ps:
+            slot_target_dt = datetime.combine(ps.slot_date, ps.start_time, tzinfo=get_college_tz())
+    sched_map = compute_schedule_availability_map(db, food_ids, target_dt=slot_target_dt, food_items_map=food_map)
+    needed_ingredients: dict[UUID, Decimal] = {}
+    for oi in order.items:
+        if not oi.food_item_id:
+            continue
+        food = food_map.get(oi.food_item_id)
+        if not food or not food.is_active:
+            raise HTTPException(status_code=400, detail=f"{oi.item_name} is no longer available")
+        cat = db.get(FoodCategory, food.category_id)
+        if not cat or not cat.is_active:
+            raise HTTPException(status_code=400, detail=f"{oi.item_name}'s category is currently inactive")
+        if not food.is_available or food.insufficient_ingredients:
+            raise HTTPException(status_code=400, detail=f"{food.name} is currently out of stock or unavailable")
+        if not sched_map.get(food.id, True):
+            raise HTTPException(status_code=400, detail=f"{food.name} is outside its scheduled serving hours or validity period")
+        recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == food.id))
+        if recipe:
+            for req in db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all():
+                per_unit = (req.quantity_required * Decimal(oi.quantity)) / Decimal(max(1, recipe.yield_portions))
+                needed_ingredients[req.ingredient_id] = needed_ingredients.get(req.ingredient_id, Decimal("0.000")) + per_unit
+
     if order.status == "PAYMENT_FAILED":
+        if needed_ingredients:
+            from app.services.inventory_service import reserve_inventory_for_order
+            reserve_inventory_for_order(db, order.canteen_id, needed_ingredients)
         order.status = "PAYMENT_PENDING"
         order.payment_status = "PENDING"
         db.add(OrderStatusHistory(order_id=order.id, from_status="PAYMENT_FAILED", to_status="PAYMENT_PENDING", changed_by_user_id=user_id, reason="Customer initiated online payment retry"))

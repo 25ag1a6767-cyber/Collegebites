@@ -13,6 +13,7 @@ const HIDDEN_PREFIXES = [
   "/pickup",
   "/inventory",
   "/admin",
+  "/staff",
   "/token-board",
   "/login",
   "/register",

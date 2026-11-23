@@ -22,7 +22,7 @@ from app.core.permissions import (
     scoped_canteen_for_principal,
 )
 from app.core.redis_client import get_redis
-from app.models.auth import StaffProfile, User
+from app.models.auth import Permission, Role, RolePermission, StaffProfile, User, UserPermission
 from app.models.college import CollegeHoliday, Counter, DiningTable, Kitchen, KitchenStation, PickupLocation
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment, PickupToken
@@ -348,6 +348,103 @@ def update_user_status(
         actor_user_id=principal.user.id,
         ip_address=client_ip_from_request(request),
         details={"is_active": payload.is_active},
+    )
+    db.commit()
+    db.refresh(target)
+    return auth_service.build_user_out(db, target)
+
+
+class UserPermissionsUpdateIn(BaseModel):
+    grant: list[str] = []
+    revoke: list[str] = []
+
+
+@router.get("/permissions")
+def list_all_permissions(
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    from app.core.permissions import ROLE_PERMISSIONS_MAP
+
+    rows = db.scalars(select(Permission).order_by(Permission.code)).all()
+    code_map = {p.code: {"id": str(p.id), "code": p.code, "resource": p.resource, "action": p.action, "description": p.description} for p in rows}
+    for plist in ROLE_PERMISSIONS_MAP.values():
+        for code in plist:
+            if code != "*" and code not in code_map:
+                res, act = code.split(":", 1) if ":" in code else (code, "all")
+                code_map[code] = {"id": code, "code": code, "resource": res, "action": act, "description": code}
+    return sorted(code_map.values(), key=lambda x: x["code"])
+
+
+@router.get("/roles")
+def list_roles_with_permissions(
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    from app.core.permissions import ROLE_PERMISSIONS_MAP
+
+    roles = db.scalars(select(Role).order_by(Role.name)).all()
+    out = []
+    for r in roles:
+        db_codes = set(
+            db.scalars(
+                select(Permission.code)
+                .join(RolePermission, RolePermission.permission_id == Permission.id)
+                .where(RolePermission.role_id == r.id)
+            ).all()
+        )
+        default_codes = set(ROLE_PERMISSIONS_MAP.get(r.name, []))
+        out.append({
+            "id": str(r.id),
+            "name": r.name,
+            "display_name": r.display_name,
+            "permissions": sorted(db_codes | default_codes),
+        })
+    return out
+
+
+@router.put("/users/{user_id}/permissions", response_model=UserOut)
+def update_user_custom_permissions(
+    user_id: UUID,
+    payload: UserPermissionsUpdateIn,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    old_rows = db.scalars(select(UserPermission).where(UserPermission.user_id == target.id)).all()
+    for row in old_rows:
+        db.delete(row)
+    db.flush()
+
+    def _get_or_create_perm(code: str) -> Permission:
+        clean = code.strip()
+        p = db.scalar(select(Permission).where(Permission.code == clean))
+        if not p:
+            res, act = clean.split(":", 1) if ":" in clean else (clean, "all")
+            p = Permission(code=clean, resource=res[:64], action=act[:64], description=clean)
+            db.add(p)
+            db.flush()
+        return p
+
+    for code in sorted({c.strip() for c in payload.grant if c.strip()}):
+        perm = _get_or_create_perm(code)
+        db.add(UserPermission(user_id=target.id, permission_id=perm.id, granted=True))
+    for code in sorted({c.strip() for c in payload.revoke if c.strip() and c.strip() not in set(payload.grant)}):
+        perm = _get_or_create_perm(code)
+        db.add(UserPermission(user_id=target.id, permission_id=perm.id, granted=False))
+
+    record_audit_log(
+        db,
+        action="user.permissions_updated",
+        entity_type="user",
+        entity_id=str(target.id),
+        actor_user_id=principal.user.id,
+        ip_address=client_ip_from_request(request),
+        details={"grant": payload.grant, "revoke": payload.revoke},
     )
     db.commit()
     db.refresh(target)

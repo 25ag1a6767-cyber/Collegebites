@@ -22,6 +22,7 @@ from app.models.auth import (
     SessionRecord,
     StaffProfile,
     User,
+    UserPermission,
     UserRole,
 )
 from app.models.menu import (
@@ -35,6 +36,7 @@ from app.models.menu import (
     FoodVariant,
     Ingredient,
     MenuAvailability,
+    MenuRestoreApproval,
     MenuSchedule,
     Recipe,
     RecipeIngredient,
@@ -67,6 +69,7 @@ from app.models.payment import (
     ReceiptPrintJob,
 )
 from app.models.inventory import (
+    DailyFoodPrepLog,
     InventoryAuditLog,
     InventoryItem,
     PriceChangeRequest,
@@ -79,7 +82,7 @@ from app.models.inventory import (
     Supplier,
     WastageRecord,
 )
-from app.models.staff import StaffAttendance, StaffShift, StaffTask
+from app.models.staff import StaffAttendance, StaffShift, StaffTask, StaffWeeklySchedule
 from app.models.promotion import (
     Coupon,
     CouponRedemption,
@@ -117,6 +120,7 @@ __all__ = [
     "RolePermission",
     "User",
     "UserRole",
+    "UserPermission",
     "CustomerProfile",
     "StaffProfile",
     "SessionRecord",
@@ -135,6 +139,7 @@ __all__ = [
     "FoodItemAllergen",
     "MenuSchedule",
     "MenuAvailability",
+    "MenuRestoreApproval",
     "Cart",
     "CartItem",
     "CartItemCustomization",
@@ -168,8 +173,10 @@ __all__ = [
     "PurchaseOrderItem",
     "StockAdjustment",
     "WastageRecord",
+    "DailyFoodPrepLog",
     "StockTransfer",
     "StaffShift",
+    "StaffWeeklySchedule",
     "StaffAttendance",
     "StaffTask",
     "Coupon",

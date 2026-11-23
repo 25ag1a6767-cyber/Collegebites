@@ -379,7 +379,7 @@ def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> D
             PickupToken.service_date == today,
             Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
         )
-        .order_by(PickupToken.sequence_number.asc(), Order.created_at.asc())
+        .order_by(Order.is_priority.desc(), PickupToken.sequence_number.asc(), Order.created_at.asc())
         .limit(120)
     )
     completed_stmt = (

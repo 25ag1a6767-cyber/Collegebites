@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
@@ -134,6 +134,11 @@ class FoodItemCreate(BaseModel):
     removable_ingredients: list[str] = []
     ingredients_text: Optional[str] = None
     image_url: Optional[str] = None
+    available_from_time: Optional[time] = None
+    available_until_time: Optional[time] = None
+    valid_from: Optional[date] = None
+    valid_until: Optional[date] = None
+    is_available: bool = True
     variants: list[FoodVariantIn] = []
     addon_ids: list[UUID] = []
     allergen_names: list[str] = []
@@ -164,6 +169,10 @@ class FoodItemUpdate(BaseModel):
     image_url: Optional[str] = None
     is_available: Optional[bool] = None
     is_active: Optional[bool] = None
+    available_from_time: Optional[time] = None
+    available_until_time: Optional[time] = None
+    valid_from: Optional[date] = None
+    valid_until: Optional[date] = None
     addon_ids: Optional[list[UUID]] = None
     allergen_names: Optional[list[str]] = None
 
@@ -201,7 +210,14 @@ class FoodItemOut(ORMModel):
     is_available: bool
     is_active: bool
     insufficient_ingredients: bool
+    pending_restore_approval: bool = False
+    category_is_active: bool = True
     is_schedule_active_now: bool = True
+    is_available_to_order: bool = True
+    available_from_time: Optional[time] = None
+    available_until_time: Optional[time] = None
+    valid_from: Optional[date] = None
+    valid_until: Optional[date] = None
     images: list[FoodImageOut] = []
     variants: list[FoodVariantOut] = []
     addons: list[FoodAddonOut] = []
@@ -211,18 +227,28 @@ class FoodItemOut(ORMModel):
 class MenuScheduleCreate(BaseModel):
     canteen_id: UUID
     name: str = Field(min_length=2, max_length=120)
-    schedule_type: str = Field(default="all_day", pattern="^(breakfast|lunch|snacks|special|all_day)$")
+    schedule_type: str = Field(default="all_day", pattern="^(breakfast|lunch|evening|dinner|snacks|special|event|all_day)$")
     start_time: time
     end_time: time
     days_of_week: list[int] = [0, 1, 2, 3, 4, 5, 6]
+    valid_from: Optional[date] = None
+    valid_until: Optional[date] = None
+    special_dates: list[str] = []
+    is_special_event: bool = False
+    event_name: Optional[str] = Field(default=None, max_length=160)
 
 
 class MenuScheduleUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=120)
-    schedule_type: Optional[str] = Field(default=None, pattern="^(breakfast|lunch|snacks|special|all_day)$")
+    schedule_type: Optional[str] = Field(default=None, pattern="^(breakfast|lunch|evening|dinner|snacks|special|event|all_day)$")
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     days_of_week: Optional[list[int]] = None
+    valid_from: Optional[date] = None
+    valid_until: Optional[date] = None
+    special_dates: Optional[list[str]] = None
+    is_special_event: Optional[bool] = None
+    event_name: Optional[str] = Field(default=None, max_length=160)
     is_active: Optional[bool] = None
 
 
@@ -238,8 +264,18 @@ class MenuScheduleOut(ORMModel):
     start_time: time
     end_time: time
     days_of_week: list[int]
+    valid_from: Optional[date] = None
+    valid_until: Optional[date] = None
+    special_dates: list[str] = []
+    is_special_event: bool = False
+    event_name: Optional[str] = None
     is_active: bool
     scheduled_item_ids: list[UUID] = []
+
+
+class MenuRestoreReviewIn(BaseModel):
+    decision: str = Field(pattern="^(approve|reject)$")
+    review_notes: Optional[str] = Field(default=None, max_length=255)
 
 
 class CustomerProfileUpdate(BaseModel):

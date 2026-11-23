@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.college import Canteen
-from app.models.menu import FoodAddon, FoodItem, FoodItemAddon, FoodVariant
+from app.models.menu import FoodAddon, FoodCategory, FoodItem, FoodItemAddon, FoodVariant
 from app.models.order import Cart, CartItem, CartItemCustomization
 from app.schemas.order import (
     CartCustomizationOut,
@@ -101,19 +101,24 @@ def calculate_cart_summary(
     variant_ids = list({ci.variant_id for ci in cart.items if ci.variant_id})
     addon_ids = list({c.addon_id for ci in cart.items for c in ci.customizations if c.customization_type == "addon" and c.addon_id})
     food_map = {f.id: f for f in db.scalars(select(FoodItem).where(FoodItem.id.in_(food_ids))).all()} if food_ids else {}
+    cat_ids = list({f.category_id for f in food_map.values()})
+    cat_map = {c.id: c for c in db.scalars(select(FoodCategory).where(FoodCategory.id.in_(cat_ids))).all()} if cat_ids else {}
     variant_map = {v.id: v for v in db.scalars(select(FoodVariant).where(FoodVariant.id.in_(variant_ids))).all()} if variant_ids else {}
     addon_map = {a.id: a for a in db.scalars(select(FoodAddon).where(FoodAddon.id.in_(addon_ids))).all()} if addon_ids else {}
-    sched_map = compute_schedule_availability_map(db, food_ids)
+    sched_map = compute_schedule_availability_map(db, food_ids, food_items_map=food_map)
 
     for ci in cart.items:
         food = food_map.get(ci.food_item_id)
         if not food or not food.is_active or food.canteen_id != canteen.id:
             validation_errors.append("One or more items in your cart are no longer active.")
             continue
+        cat = cat_map.get(food.category_id)
+        if not cat or not cat.is_active:
+            validation_errors.append(f"{food.name} belongs to an inactive category.")
         if not food.is_available or food.insufficient_ingredients:
             validation_errors.append(f"{food.name} is currently unavailable.")
         if not sched_map.get(food.id, True):
-            validation_errors.append(f"{food.name} is outside its scheduled serving hours.")
+            validation_errors.append(f"{food.name} is outside its scheduled serving hours or validity period.")
 
         unit_price = food.base_price
         variant_name = None
@@ -220,10 +225,13 @@ def add_item_to_cart(
     food = db.get(FoodItem, payload.food_item_id)
     if not food or food.canteen_id != payload.canteen_id or not food.is_active:
         raise HTTPException(status_code=404, detail="Food item not found in selected canteen")
+    cat = db.get(FoodCategory, food.category_id)
+    if not cat or not cat.is_active:
+        raise HTTPException(status_code=400, detail=f"{food.name}'s category is currently unavailable")
     if not food.is_available or food.insufficient_ingredients:
         raise HTTPException(status_code=400, detail=f"{food.name} is currently unavailable")
-    if not compute_schedule_availability_map(db, [food.id]).get(food.id, True):
-        raise HTTPException(status_code=400, detail=f"{food.name} is not available in the current menu schedule")
+    if not compute_schedule_availability_map(db, [food.id], food_items_map={food.id: food}).get(food.id, True):
+        raise HTTPException(status_code=400, detail=f"{food.name} is not available in the current menu schedule or validity window")
 
     if payload.variant_id:
         var = db.get(FoodVariant, payload.variant_id)
@@ -291,6 +299,17 @@ def update_cart_item(
         db.commit()
         db.expire_all()
         return calculate_cart_summary(db, canteen_id, user_id=user_id, guest_session_id=guest_session_id)
+
+    food = db.get(FoodItem, ci.food_item_id)
+    if not food or food.canteen_id != cart.canteen_id or not food.is_active:
+        raise HTTPException(status_code=400, detail="Food item is no longer active")
+    cat = db.get(FoodCategory, food.category_id)
+    if not cat or not cat.is_active:
+        raise HTTPException(status_code=400, detail=f"{food.name}'s category is currently unavailable")
+    if not food.is_available or food.insufficient_ingredients:
+        raise HTTPException(status_code=400, detail=f"{food.name} is currently unavailable")
+    if not compute_schedule_availability_map(db, [food.id], food_items_map={food.id: food}).get(food.id, True):
+        raise HTTPException(status_code=400, detail=f"{food.name} is outside its scheduled serving hours or validity period")
 
     if payload.quantity is not None:
         ci.quantity = payload.quantity

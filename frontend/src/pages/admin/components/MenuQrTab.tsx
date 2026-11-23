@@ -69,6 +69,12 @@ export const MenuTab: React.FC<{
     enabled: Boolean(activeCanteenId),
     queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/stations`)).data,
   });
+  const { data: restoreApprovals = [], refetch: refetchRestoreApprovals } = useQuery<any[]>({
+    queryKey: ["menu-restore-approvals", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () =>
+      (await api.get(`/menus/canteens/${activeCanteenId}/restore-approvals?status=pending_approval`)).data,
+  });
 
   const [catName, setCatName] = useState("");
   const [newDishName, setNewDishName] = useState("");
@@ -105,6 +111,16 @@ export const MenuTab: React.FC<{
   const [schedType, setSchedType] = useState("breakfast");
   const [schedStart, setSchedStart] = useState("07:30");
   const [schedEnd, setSchedEnd] = useState("11:00");
+  const [schedDays, setSchedDays] = useState<number[]>([0, 1, 2, 3, 4, 5, 6]);
+  const [schedValidFrom, setSchedValidFrom] = useState("");
+  const [schedValidUntil, setSchedValidUntil] = useState("");
+  const [schedIsEvent, setSchedIsEvent] = useState(false);
+  const [schedEventName, setSchedEventName] = useState("");
+  const [schedSpecialDates, setSchedSpecialDates] = useState("");
+  const [editAvailFrom, setEditAvailFrom] = useState("");
+  const [editAvailUntil, setEditAvailUntil] = useState("");
+  const [editValidFrom, setEditValidFrom] = useState("");
+  const [editValidUntil, setEditValidUntil] = useState("");
   const [assignSched, setAssignSched] = useState<any | null>(null);
   const [assignIds, setAssignIds] = useState<string[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<FoodItem | null>(null);
@@ -136,6 +152,10 @@ export const MenuTab: React.FC<{
     setEditActive(Boolean(it.is_active));
     setEditFeatured(Boolean(it.is_featured));
     setEditSpecial(Boolean(it.is_todays_special));
+    setEditAvailFrom(it.available_from_time ? it.available_from_time.slice(0, 5) : "");
+    setEditAvailUntil(it.available_until_time ? it.available_until_time.slice(0, 5) : "");
+    setEditValidFrom(it.valid_from || "");
+    setEditValidUntil(it.valid_until || "");
     setNewVarName("");
     setNewVarPrice("");
     setNewAddonName("");
@@ -205,8 +225,28 @@ export const MenuTab: React.FC<{
 
         <div className="flex flex-wrap gap-1.5 border-t border-slate-100 pt-3">
           {categories.map((c) => (
-            <div key={c.id} className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs">
-              <span className="font-semibold text-slate-800">{c.name}</span>
+            <div
+              key={c.id}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs ${
+                c.is_active ? "border-slate-200 bg-slate-50" : "border-red-200 bg-red-50/60"
+              }`}
+            >
+              <span className={`font-semibold ${c.is_active ? "text-slate-800" : "text-red-700 line-through"}`}>{c.name}</span>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await api.patch(`/menus/categories/${c.id}`, { is_active: !c.is_active });
+                    syncAllMenus();
+                    pushToast(`${c.name} ${c.is_active ? "disabled" : "activated"}`, "info");
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+                className="text-[10px] font-bold text-[#76010d] hover:underline"
+              >
+                {c.is_active ? "Pause" : "Enable"}
+              </button>
               <button
                 type="button"
                 aria-label={`Delete category ${c.name}`}
@@ -386,6 +426,7 @@ export const MenuTab: React.FC<{
                   <span className="text-slate-400">• {it.prep_time_minutes}m</span>
                   <Badge tone={it.is_veg ? "green" : "red"}>{it.is_veg ? "Veg" : "Non-Veg"}</Badge>
                   {!it.is_active && <Badge tone="red">Inactive</Badge>}
+                  {it.pending_restore_approval && <Badge tone="amber">Pending Restore Approval</Badge>}
                   {it.is_featured && <Badge tone="amber">Featured</Badge>}
                   {it.is_todays_special && <Badge tone="blue">Special</Badge>}
                 </div>
@@ -507,50 +548,163 @@ export const MenuTab: React.FC<{
         )}
       </Card>
 
+      {/* Pending Stock Replenishment Availability Restore Approvals */}
+      <Card className="p-4 space-y-2.5 border-amber-200 bg-amber-50/40">
+        <div className="font-bold text-slate-900 flex items-center justify-between">
+          <span>Replenished Menu Availability Approvals ({restoreApprovals.length})</span>
+          <Badge tone={restoreApprovals.length > 0 ? "amber" : "green"}>
+            {restoreApprovals.length > 0 ? "Manager Approval Needed" : "All Reviewed"}
+          </Badge>
+        </div>
+        {restoreApprovals.length === 0 ? (
+          <div className="text-xs text-slate-500">
+            No stock-replenished dishes waiting for manager sign-off to restore ordering visibility.
+          </div>
+        ) : (
+          <div className="space-y-2 text-xs">
+            {restoreApprovals.map((req: any) => (
+              <div key={req.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-white p-3">
+                <div>
+                  <div className="font-bold text-slate-900">{req.food_item_name}</div>
+                  <div className="text-slate-600">{req.reason}</div>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="success"
+                    onClick={async () => {
+                      try {
+                        await api.post(`/menus/restore-approvals/${req.id}/review`, { decision: "approve" });
+                        pushToast(`${req.food_item_name} restored to live customer menu`, "success");
+                        refetchRestoreApprovals();
+                        syncAllMenus();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Approve &amp; Restore
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={async () => {
+                      try {
+                        await api.post(`/menus/restore-approvals/${req.id}/review`, {
+                          decision: "reject",
+                          review_notes: "Kept paused by manager",
+                        });
+                        pushToast(`${req.food_item_name} kept disabled`, "info");
+                        refetchRestoreApprovals();
+                        syncAllMenus();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Keep Disabled
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
       {/* Menu Schedules Management */}
       <Card className="p-4 space-y-3">
         <div className="font-bold text-slate-900 flex items-center gap-2">
-          <CalendarClock className="h-4 w-4 text-[#76010d]" /> Time-Based Menu Schedules ({schedules.length})
+          <CalendarClock className="h-4 w-4 text-[#76010d]" /> Smart Menu &amp; Special Event Schedules ({schedules.length})
         </div>
-        <div className="flex flex-wrap gap-2 items-center">
-          <Input value={schedName} onChange={(e) => setSchedName(e.target.value)} placeholder="Breakfast Menu (7:30-11:00)" className="w-52" />
-          <Select value={schedType} onChange={(e) => setSchedType(e.target.value)} className="w-32">
-            <option value="breakfast">Breakfast</option>
-            <option value="lunch">Lunch</option>
-            <option value="snacks">Snacks</option>
-            <option value="special">Special</option>
-            <option value="all_day">All Day</option>
-          </Select>
-          <Input type="time" value={schedStart} onChange={(e) => setSchedStart(e.target.value)} className="w-28" />
-          <Input type="time" value={schedEnd} onChange={(e) => setSchedEnd(e.target.value)} className="w-28" />
-          <Button
-            size="sm"
-            onClick={async () => {
-              try {
-                await api.post("/menus/schedules", {
-                  canteen_id: activeCanteenId,
-                  name: schedName,
-                  schedule_type: schedType,
-                  start_time: `${schedStart}:00`,
-                  end_time: `${schedEnd}:00`,
-                  days_of_week: [0, 1, 2, 3, 4, 5, 6],
-                });
-                setSchedName("");
-                refetchSchedules();
-                pushToast("Menu schedule created", "success");
-              } catch (err) {
-                pushToast(getApiError(err), "error");
-              }
-            }}
-          >
-            Add Schedule
-          </Button>
+        <div className="space-y-2 text-xs">
+          <div className="flex flex-wrap gap-2 items-center">
+            <Input value={schedName} onChange={(e) => setSchedName(e.target.value)} placeholder="Breakfast / Evening / Event Menu" className="w-52" />
+            <Select value={schedType} onChange={(e) => setSchedType(e.target.value)} className="w-32">
+              <option value="breakfast">Breakfast</option>
+              <option value="lunch">Lunch</option>
+              <option value="evening">Evening</option>
+              <option value="dinner">Dinner</option>
+              <option value="snacks">Snacks</option>
+              <option value="special">Special</option>
+              <option value="event">College Event</option>
+              <option value="all_day">All Day</option>
+            </Select>
+            <Input type="time" value={schedStart} onChange={(e) => setSchedStart(e.target.value)} className="w-28" />
+            <Input type="time" value={schedEnd} onChange={(e) => setSchedEnd(e.target.value)} className="w-28" />
+            <Input type="date" value={schedValidFrom} onChange={(e) => setSchedValidFrom(e.target.value)} title="Valid From Date (optional)" className="w-36" />
+            <Input type="date" value={schedValidUntil} onChange={(e) => setSchedValidUntil(e.target.value)} title="Valid Until Date (optional)" className="w-36" />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-slate-600">Days:</span>
+            {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((lbl, idx) => {
+              const active = schedDays.includes(idx);
+              return (
+                <button
+                  key={lbl}
+                  type="button"
+                  onClick={() =>
+                    setSchedDays((prev) => (active ? prev.filter((d) => d !== idx) : [...prev, idx].sort()))
+                  }
+                  className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                    active ? "bg-[#76010d] text-white" : "bg-slate-100 text-slate-600"
+                  }`}
+                >
+                  {lbl}
+                </button>
+              );
+            })}
+            <label className="inline-flex items-center gap-1 font-semibold ml-2">
+              <input type="checkbox" checked={schedIsEvent} onChange={(e) => setSchedIsEvent(e.target.checked)} />
+              College Event Menu
+            </label>
+            {schedIsEvent && (
+              <>
+                <Input value={schedEventName} onChange={(e) => setSchedEventName(e.target.value)} placeholder="Event Name (e.g. TechFest)" className="w-44" />
+                <Input value={schedSpecialDates} onChange={(e) => setSchedSpecialDates(e.target.value)} placeholder="Special Dates YYYY-MM-DD, ..." className="w-48" />
+              </>
+            )}
+            <Button
+              size="sm"
+              onClick={async () => {
+                try {
+                  const specialDates = schedSpecialDates
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+                  await api.post("/menus/schedules", {
+                    canteen_id: activeCanteenId,
+                    name: schedName,
+                    schedule_type: schedType,
+                    start_time: `${schedStart}:00`,
+                    end_time: `${schedEnd}:00`,
+                    days_of_week: schedDays.length > 0 ? schedDays : [0, 1, 2, 3, 4, 5, 6],
+                    valid_from: schedValidFrom || null,
+                    valid_until: schedValidUntil || null,
+                    is_special_event: schedIsEvent,
+                    event_name: schedEventName.trim() || null,
+                    special_dates: specialDates,
+                  });
+                  setSchedName("");
+                  setSchedEventName("");
+                  setSchedSpecialDates("");
+                  refetchSchedules();
+                  pushToast("Smart menu schedule created", "success");
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
+              }}
+            >
+              Add Schedule
+            </Button>
+          </div>
         </div>
         <div className="space-y-1.5 text-xs">
           {schedules.map((s) => (
             <div key={s.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 p-2.5">
               <div>
                 <span className="font-bold">{s.name}</span> ({s.schedule_type}) • {s.start_time.slice(0, 5)}–{s.end_time.slice(0, 5)} •{" "}
+                {s.valid_from || s.valid_until ? `Dates: ${s.valid_from || "Start"}→${s.valid_until || "∞"} • ` : ""}
+                {s.is_special_event && s.event_name ? <Badge tone="amber">{s.event_name}</Badge> : null}{" "}
                 <Badge tone="slate">{s.scheduled_item_ids?.length || 0} dishes</Badge>
               </div>
               <div className="flex gap-2">
@@ -726,6 +880,24 @@ export const MenuTab: React.FC<{
               <label className="mb-1 block font-bold text-slate-600">Allergens (comma-separated)</label>
               <Input value={editAllergens} onChange={(e) => setEditAllergens(e.target.value)} placeholder="Dairy, Gluten, Nuts" />
             </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Daily From</label>
+                <Input type="time" value={editAvailFrom} onChange={(e) => setEditAvailFrom(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Daily Until</label>
+                <Input type="time" value={editAvailUntil} onChange={(e) => setEditAvailUntil(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Valid From</label>
+                <Input type="date" value={editValidFrom} onChange={(e) => setEditValidFrom(e.target.value)} />
+              </div>
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Valid Until</label>
+                <Input type="date" value={editValidUntil} onChange={(e) => setEditValidUntil(e.target.value)} />
+              </div>
+            </div>
             <div className="flex flex-wrap items-center gap-4 pt-1">
               <label className="flex items-center gap-1.5 font-semibold">
                 <input type="checkbox" checked={editAvailable} onChange={(e) => setEditAvailable(e.target.checked)} />
@@ -774,6 +946,10 @@ export const MenuTab: React.FC<{
                     is_active: editActive,
                     is_featured: editFeatured,
                     is_todays_special: editSpecial,
+                    available_from_time: editAvailFrom ? `${editAvailFrom}:00` : null,
+                    available_until_time: editAvailUntil ? `${editAvailUntil}:00` : null,
+                    valid_from: editValidFrom || null,
+                    valid_until: editValidUntil || null,
                   });
                   pushToast("Dish updated!", "success");
                   setEditItem(null);

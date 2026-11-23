@@ -1,6 +1,7 @@
 import csv
 import io
 import re
+from datetime import datetime, time, timezone
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
@@ -9,7 +10,8 @@ from fastapi import HTTPException
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.time_utils import now_college
+from app.core.time_utils import get_college_tz, now_college
+from app.models.auth import User
 from app.models.college import Canteen, CollegeSettings, Kitchen, KitchenStation
 from app.models.order import CartItem, OrderItem
 from app.models.menu import (
@@ -22,6 +24,7 @@ from app.models.menu import (
     FoodItemAllergen,
     FoodVariant,
     MenuAvailability,
+    MenuRestoreApproval,
     MenuSchedule,
 )
 from app.schemas.menu import (
@@ -44,24 +47,71 @@ from app.schemas.menu import (
 from app.services.audit_service import record_audit_log
 
 
-def compute_schedule_availability_map(db: Session, food_item_ids: list[UUID]) -> dict[UUID, bool]:
-    """Return {food_item_id: is_schedule_active_now}. Items with no schedule links default to True."""
+def _time_in_window(cur_time: time, start_time: time, end_time: time) -> bool:
+    if start_time <= end_time:
+        return start_time <= cur_time <= end_time
+    # Overnight window (e.g. 22:00 to 02:00)
+    return cur_time >= start_time or cur_time <= end_time
+
+
+def _item_date_time_ok(item: Optional[FoodItem], check_dt: datetime) -> bool:
+    if item is None:
+        return True
+    cur_date = check_dt.date()
+    cur_time = check_dt.time()
+    if getattr(item, "valid_from", None) and cur_date < item.valid_from:
+        return False
+    if getattr(item, "valid_until", None) and cur_date > item.valid_until:
+        return False
+    avail_from = getattr(item, "available_from_time", None)
+    avail_until = getattr(item, "available_until_time", None)
+    if avail_from and avail_until:
+        if not _time_in_window(cur_time, avail_from, avail_until):
+            return False
+    elif avail_from and cur_time < avail_from:
+        return False
+    elif avail_until and cur_time > avail_until:
+        return False
+    return True
+
+
+def compute_schedule_availability_map(
+    db: Session,
+    food_item_ids: list[UUID],
+    *,
+    target_dt: Optional[datetime] = None,
+    food_items_map: Optional[dict[UUID, FoodItem]] = None,
+) -> dict[UUID, bool]:
+    """Return {food_item_id: is_schedule_and_window_active}. Evaluates item windows and MenuSchedule rules."""
     if not food_item_ids:
         return {}
+
+    college_row = db.scalar(select(CollegeSettings))
+    tz_name = college_row.college_timezone if college_row else None
+    if target_dt is not None:
+        tz = get_college_tz(tz_name)
+        now_dt = target_dt.astimezone(tz) if target_dt.tzinfo else target_dt.replace(tzinfo=tz)
+    else:
+        now_dt = now_college(tz_name)
+    cur_time = now_dt.time()
+    cur_date = now_dt.date()
+    cur_date_iso = cur_date.isoformat()
+    weekday = now_dt.weekday()
+
+    if food_items_map is None:
+        food_items_map = {
+            f.id: f for f in db.scalars(select(FoodItem).where(FoodItem.id.in_(food_item_ids))).all()
+        }
+
     links = db.scalars(
         select(MenuAvailability).where(MenuAvailability.food_item_id.in_(food_item_ids))
     ).all()
-    if not links:
-        return {fid: True for fid in food_item_ids}
-
-    sched_ids = {l.menu_schedule_id for l in links}
-    scheds = {
-        s.id: s for s in db.scalars(select(MenuSchedule).where(MenuSchedule.id.in_(list(sched_ids)))).all()
-    }
-    college_row = db.scalar(select(CollegeSettings))
-    now_dt = now_college(college_row.college_timezone if college_row else None)
-    cur_time = now_dt.time()
-    weekday = now_dt.weekday()
+    scheds: dict[UUID, MenuSchedule] = {}
+    if links:
+        sched_ids = {l.menu_schedule_id for l in links}
+        scheds = {
+            s.id: s for s in db.scalars(select(MenuSchedule).where(MenuSchedule.id.in_(list(sched_ids)))).all()
+        }
 
     links_by_item: dict[UUID, list[MenuAvailability]] = {}
     for l in links:
@@ -69,6 +119,10 @@ def compute_schedule_availability_map(db: Session, food_item_ids: list[UUID]) ->
 
     out: dict[UUID, bool] = {}
     for fid in food_item_ids:
+        if not _item_date_time_ok(food_items_map.get(fid), now_dt):
+            out[fid] = False
+            continue
+
         item_links = links_by_item.get(fid)
         if not item_links:
             out[fid] = True
@@ -80,10 +134,21 @@ def compute_schedule_availability_map(db: Session, food_item_ids: list[UUID]) ->
             if l.override_until and l.override_until <= now_dt:
                 continue
             sched = scheds.get(l.menu_schedule_id)
-            if sched and sched.is_active and weekday in (sched.days_of_week or []):
-                if sched.start_time <= cur_time <= sched.end_time:
-                    active_now = True
-                    break
+            if not sched or not sched.is_active:
+                continue
+            if getattr(sched, "valid_from", None) and cur_date < sched.valid_from:
+                continue
+            if getattr(sched, "valid_until", None) and cur_date > sched.valid_until:
+                continue
+            sp_dates = getattr(sched, "special_dates", None) or []
+            if sp_dates:
+                if cur_date_iso not in sp_dates:
+                    continue
+            elif weekday not in (sched.days_of_week or []):
+                continue
+            if _time_in_window(cur_time, sched.start_time, sched.end_time):
+                active_now = True
+                break
         out[fid] = active_now
     return out
 
@@ -126,6 +191,9 @@ def serialize_food_item(
         sched_ok = compute_schedule_availability_map(db, [item.id]).get(item.id, True)
 
     station = db.get(KitchenStation, item.station_id) if item.station_id else None
+    cat_active = bool(category.is_active) if category else True
+    pending_restore = bool(getattr(item, "pending_restore_approval", False))
+    avail_to_order = bool(item.is_active and cat_active and item.is_available and not item.insufficient_ingredients and sched_ok)
 
     return FoodItemOut(
         id=item.id,
@@ -160,7 +228,14 @@ def serialize_food_item(
         is_available=item.is_available,
         is_active=item.is_active,
         insufficient_ingredients=item.insufficient_ingredients,
+        pending_restore_approval=pending_restore,
+        category_is_active=cat_active,
         is_schedule_active_now=sched_ok,
+        is_available_to_order=avail_to_order,
+        available_from_time=getattr(item, "available_from_time", None),
+        available_until_time=getattr(item, "available_until_time", None),
+        valid_from=getattr(item, "valid_from", None),
+        valid_until=getattr(item, "valid_until", None),
         images=sorted(item.images, key=lambda x: (not x.is_primary, x.display_order)),
         variants=item.variants,
         addons=addons,
@@ -222,6 +297,7 @@ def list_food_items(
 ) -> list[FoodItemOut]:
     stmt = (
         select(FoodItem)
+        .join(FoodCategory, FoodCategory.id == FoodItem.category_id)
         .options(
             selectinload(FoodItem.images),
             selectinload(FoodItem.variants),
@@ -231,7 +307,7 @@ def list_food_items(
         .where(FoodItem.canteen_id == canteen_id)
     )
     if not include_inactive:
-        stmt = stmt.where(FoodItem.is_active.is_(True))
+        stmt = stmt.where(FoodItem.is_active.is_(True), FoodCategory.is_active.is_(True))
     if available_only:
         stmt = stmt.where(FoodItem.is_available.is_(True), FoodItem.insufficient_ingredients.is_(False))
     if q:
@@ -388,6 +464,20 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
     updates = payload.model_dump(exclude_unset=True, exclude={"image_url", "addon_ids", "allergen_names"})
     for k, v in updates.items():
         setattr(item, k, v)
+    if payload.is_available is True and not item.insufficient_ingredients:
+        item.pending_restore_approval = False
+        pending_reqs = db.scalars(
+            select(MenuRestoreApproval).where(
+                MenuRestoreApproval.food_item_id == item.id,
+                MenuRestoreApproval.status == "pending_approval",
+            )
+        ).all()
+        now_utc = datetime.now(timezone.utc)
+        for req in pending_reqs:
+            req.status = "approved"
+            req.reviewed_by_user_id = actor_user_id
+            req.reviewed_at = now_utc
+            req.review_notes = "Approved via menu item update"
 
     if payload.image_url is not None:
         existing_primary = db.scalar(
@@ -616,9 +706,118 @@ def _serialize_schedule(db: Session, sched: MenuSchedule) -> MenuScheduleOut:
         start_time=sched.start_time,
         end_time=sched.end_time,
         days_of_week=sched.days_of_week or [],
+        valid_from=getattr(sched, "valid_from", None),
+        valid_until=getattr(sched, "valid_until", None),
+        special_dates=getattr(sched, "special_dates", None) or [],
+        is_special_event=bool(getattr(sched, "is_special_event", False)),
+        event_name=getattr(sched, "event_name", None),
         is_active=sched.is_active,
         scheduled_item_ids=item_ids,
     )
+
+
+def list_restore_approvals(
+    db: Session,
+    canteen_id: UUID,
+    *,
+    status_filter: Optional[str] = None,
+) -> list[dict]:
+    stmt = (
+        select(MenuRestoreApproval, FoodItem.name, FoodItem.insufficient_ingredients, FoodItem.is_available)
+        .join(FoodItem, FoodItem.id == MenuRestoreApproval.food_item_id)
+        .where(MenuRestoreApproval.canteen_id == canteen_id)
+        .order_by(MenuRestoreApproval.created_at.desc())
+    )
+    if status_filter and status_filter != "all":
+        stmt = stmt.where(MenuRestoreApproval.status == status_filter)
+    rows = db.execute(stmt.limit(100)).all()
+    reviewer_ids = {req.reviewed_by_user_id for req, _, _, _ in rows if req.reviewed_by_user_id}
+    user_map = (
+        {u.id: (u.full_name or u.email or str(u.id)) for u in db.scalars(select(User).where(User.id.in_(reviewer_ids))).all()}
+        if reviewer_ids
+        else {}
+    )
+    return [
+        {
+            "id": str(req.id),
+            "canteen_id": str(req.canteen_id),
+            "food_item_id": str(req.food_item_id),
+            "food_item_name": food_name,
+            "insufficient_ingredients": bool(insufficient),
+            "item_is_available": bool(is_avail),
+            "status": req.status,
+            "reason": req.reason,
+            "review_notes": req.review_notes,
+            "reviewed_by_name": user_map.get(req.reviewed_by_user_id) if req.reviewed_by_user_id else None,
+            "reviewed_at": req.reviewed_at.isoformat() if req.reviewed_at else None,
+            "created_at": req.created_at.isoformat() if req.created_at else None,
+        }
+        for req, food_name, insufficient, is_avail in rows
+    ]
+
+
+def review_restore_approval(
+    db: Session,
+    request_id: UUID,
+    *,
+    decision: str,
+    review_notes: Optional[str],
+    actor_user_id: UUID,
+) -> dict:
+    from datetime import timezone
+    from app.websockets import emit_order_event_sync
+
+    req = db.get(MenuRestoreApproval, request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Menu restore approval request not found")
+    if req.status != "pending_approval":
+        raise HTTPException(status_code=409, detail=f"Request has already been {req.status}")
+
+    food = db.get(FoodItem, req.food_item_id)
+    if not food:
+        raise HTTPException(status_code=404, detail="Food item not found")
+
+    if decision == "approve":
+        if food.insufficient_ingredients:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot restore {food.name}: linked recipe ingredients are still insufficient",
+            )
+        food.is_available = True
+        food.pending_restore_approval = False
+        req.status = "approved"
+    else:
+        food.is_available = False
+        food.pending_restore_approval = False
+        req.status = "rejected"
+
+    req.reviewed_by_user_id = actor_user_id
+    req.reviewed_at = datetime.now(timezone.utc)
+    req.review_notes = review_notes
+
+    record_audit_log(
+        db,
+        action=f"menu.restore_{req.status}",
+        entity_type="food_item",
+        entity_id=str(food.id),
+        actor_user_id=actor_user_id,
+        details={"request_id": str(req.id), "decision": decision, "review_notes": review_notes},
+    )
+    db.commit()
+    emit_order_event_sync(
+        str(food.canteen_id),
+        "inventory",
+        "menu.availability_changed",
+        {"canteen_id": str(food.canteen_id), "food_item_id": str(food.id), "is_available": food.is_available},
+    )
+    return {
+        "id": str(req.id),
+        "food_item_id": str(food.id),
+        "food_item_name": food.name,
+        "status": req.status,
+        "is_available": food.is_available,
+        "pending_restore_approval": food.pending_restore_approval,
+    }
 
 
 def list_schedules(db: Session, canteen_id: UUID) -> list[MenuScheduleOut]:

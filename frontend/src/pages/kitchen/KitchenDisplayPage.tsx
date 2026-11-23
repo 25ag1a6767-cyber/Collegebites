@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, BellRing, Check, Clock, Flame, Printer, Search, Star, Volume2, VolumeX } from "lucide-react";
+import { AlertTriangle, BellRing, Check, Clock, Flame, Printer, Search, Star, Trash2, Volume2, VolumeX } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
@@ -46,6 +46,14 @@ export const KitchenDisplayPage: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [showAvailabilityModal, setShowAvailabilityModal] = useState(false);
   const [availModalTab, setAvailModalTab] = useState<"dishes" | "ingredients">("dishes");
+  const [showWasteModal, setShowWasteModal] = useState(false);
+  const [kdsWasteMode, setKdsWasteMode] = useState<"prep" | "food_waste" | "ingredient_waste">("prep");
+  const [kdsFoodId, setKdsFoodId] = useState("");
+  const [kdsInvId, setKdsInvId] = useState("");
+  const [kdsPrepSession, setKdsPrepSession] = useState("all_day");
+  const [kdsWasteQty, setKdsWasteQty] = useState("10");
+  const [kdsWasteReason, setKdsWasteReason] = useState("Unsold end of session");
+  const [kdsStaffId, setKdsStaffId] = useState("");
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const prevPlacedIds = useRef<Set<string>>(new Set());
@@ -317,6 +325,9 @@ export const KitchenDisplayPage: React.FC = () => {
           )}
           <Button size="sm" variant="outline" onClick={() => setShowAvailabilityModal(true)}>
             <AlertTriangle className="h-4 w-4 text-amber-600" /> Ingredient / Item Availability
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setShowWasteModal(true)}>
+            <Trash2 className="h-4 w-4 text-red-500" /> Food Prep &amp; Waste
           </Button>
           <Button
             size="sm"
@@ -708,6 +719,141 @@ export const KitchenDisplayPage: React.FC = () => {
                   </div>
                 ))}
           </div>
+        </div>
+      </Modal>
+
+      {/* Kitchen Food Prep & Waste Quick Modal */}
+      <Modal
+        open={showWasteModal}
+        onClose={() => setShowWasteModal(false)}
+        title="Kitchen Food Prep & Wastage Logging"
+      >
+        <div className="space-y-3 text-xs">
+          <div className="flex flex-wrap gap-1.5">
+            <Button
+              size="sm"
+              variant={kdsWasteMode === "prep" ? "primary" : "outline"}
+              onClick={() => setKdsWasteMode("prep")}
+            >
+              Log Prepared Batch
+            </Button>
+            <Button
+              size="sm"
+              variant={kdsWasteMode === "food_waste" ? "danger" : "outline"}
+              onClick={() => setKdsWasteMode("food_waste")}
+            >
+              Cooked Food Waste
+            </Button>
+            <Button
+              size="sm"
+              variant={kdsWasteMode === "ingredient_waste" ? "danger" : "outline"}
+              onClick={() => setKdsWasteMode("ingredient_waste")}
+            >
+              Ingredient Waste
+            </Button>
+          </div>
+          {kdsWasteMode === "ingredient_waste" ? (
+            <Select value={kdsInvId || ingredients[0]?.inventory_item_id || ""} onChange={(e) => setKdsInvId(e.target.value)}>
+              {ingredients.map((ing) => (
+                <option key={ing.inventory_item_id} value={ing.inventory_item_id}>
+                  {ing.name} ({ing.current_quantity} {ing.unit})
+                </option>
+              ))}
+            </Select>
+          ) : (
+            <Select value={kdsFoodId || menuItems[0]?.id || ""} onChange={(e) => setKdsFoodId(e.target.value)}>
+              {menuItems.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </Select>
+          )}
+          {kdsWasteMode === "prep" && (
+            <Select value={kdsPrepSession} onChange={(e) => setKdsPrepSession(e.target.value)}>
+              <option value="all_day">All Day Batch</option>
+              <option value="breakfast">Breakfast</option>
+              <option value="lunch">Lunch</option>
+              <option value="evening">Evening</option>
+              <option value="dinner">Dinner</option>
+            </Select>
+          )}
+          <Input
+            type="number"
+            min="0.1"
+            step={kdsWasteMode === "ingredient_waste" ? "0.01" : "1"}
+            value={kdsWasteQty}
+            onChange={(e) => setKdsWasteQty(e.target.value)}
+            placeholder={kdsWasteMode === "ingredient_waste" ? "Quantity wasted" : "Portions"}
+          />
+          {kitchenStaff.length > 0 && (
+            <Select value={kdsStaffId} onChange={(e) => setKdsStaffId(e.target.value)}>
+              <option value="">Responsible Staff (Optional)</option>
+              {kitchenStaff.map((st: any) => (
+                <option key={st.user_id} value={st.user_id}>
+                  {st.full_name} ({st.designation})
+                </option>
+              ))}
+            </Select>
+          )}
+          {kdsWasteMode !== "prep" && (
+            <Input
+              value={kdsWasteReason}
+              onChange={(e) => setKdsWasteReason(e.target.value)}
+              placeholder="Waste reason (unsold, burnt, spilled, expired)"
+            />
+          )}
+          <Button
+            variant={kdsWasteMode === "prep" ? "primary" : "danger"}
+            className="w-full"
+            onClick={async () => {
+              if (!activeCanteenId) return;
+              try {
+                if (kdsWasteMode === "prep") {
+                  const targetFood = kdsFoodId || menuItems[0]?.id;
+                  if (!targetFood) return;
+                  await api.post("/inventory/food-prep", {
+                    canteen_id: activeCanteenId,
+                    food_item_id: targetFood,
+                    meal_session: kdsPrepSession,
+                    prepared_quantity: Math.max(0, Math.round(Number(kdsWasteQty || 0))),
+                    responsible_staff_id: kdsStaffId || null,
+                  });
+                  pushToast("Prepared batch quantity logged", "success");
+                } else if (kdsWasteMode === "food_waste") {
+                  const targetFood = kdsFoodId || menuItems[0]?.id;
+                  if (!targetFood) return;
+                  await api.post("/inventory/wastage", {
+                    canteen_id: activeCanteenId,
+                    food_item_id: targetFood,
+                    quantity: Math.max(1, Math.round(Number(kdsWasteQty || 1))),
+                    reason: kdsWasteReason,
+                    operation_type: "unsold",
+                    responsible_staff_id: kdsStaffId || null,
+                  });
+                  pushToast("Cooked food wastage recorded", "success");
+                } else {
+                  const targetInv = kdsInvId || ingredients[0]?.inventory_item_id;
+                  if (!targetInv) return;
+                  await api.post("/inventory/wastage", {
+                    inventory_item_id: targetInv,
+                    quantity: Math.abs(Number(kdsWasteQty || 1)),
+                    reason: kdsWasteReason,
+                    operation_type: "wastage",
+                    responsible_staff_id: kdsStaffId || null,
+                  });
+                  pushToast("Ingredient wastage recorded", "success");
+                  refetchIngredients();
+                  refetchMenu();
+                }
+                setShowWasteModal(false);
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          >
+            Submit Kitchen Log
+          </Button>
         </div>
       </Modal>
 

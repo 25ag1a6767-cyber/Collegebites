@@ -13,18 +13,20 @@ from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_COLLEGE_ADMIN,
     ROLE_INVENTORY_MANAGER,
+    ROLE_KITCHEN_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
     enforce_canteen_scope,
     require_roles,
 )
-from app.models.inventory import InventoryItem, PriceChangeRequest, PurchaseOrder, StockTransfer
+from app.models.inventory import DailyFoodPrepLog, InventoryItem, PriceChangeRequest, PurchaseOrder, StockTransfer
 from app.models.menu import FoodItem
-from app.services import inventory_service
+from app.services import inventory_service, waste_service
 
 router = APIRouter(prefix="/inventory", tags=["Inventory, Recipes & Suppliers"])
 
 INV_ROLES = (ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+WASTE_RECORD_ROLES = (*INV_ROLES, ROLE_KITCHEN_STAFF)
 
 
 class SupplierCreate(BaseModel):
@@ -126,11 +128,37 @@ class POReceiveIn(BaseModel):
 
 
 class WastageIn(BaseModel):
-    inventory_item_id: UUID
+    inventory_item_id: Optional[UUID] = None
+    food_item_id: Optional[UUID] = None
+    prep_log_id: Optional[UUID] = None
+    canteen_id: Optional[UUID] = None
     quantity: Decimal = Field(gt=0)
     reason: str = Field(min_length=2, max_length=255)
     batch_id: Optional[UUID] = None
-    operation_type: str = Field(default="wastage", pattern="^(damaged|expired|wastage)$")
+    operation_type: str = Field(default="wastage", pattern="^(damaged|expired|wastage|unsold)$")
+    waste_date: Optional[date] = None
+    responsible_staff_id: Optional[UUID] = None
+    unit_cost: Optional[Decimal] = Field(default=None, ge=0)
+
+
+class FoodPrepUpsertIn(BaseModel):
+    canteen_id: UUID
+    food_item_id: UUID
+    prep_date: Optional[date] = None
+    meal_session: str = Field(default="all_day", pattern="^(breakfast|lunch|evening|dinner|all_day)$")
+    prepared_quantity: int = Field(ge=0)
+    unit_cost: Optional[Decimal] = Field(default=None, ge=0)
+    responsible_staff_id: Optional[UUID] = None
+    notes: Optional[str] = Field(default=None, max_length=255)
+
+
+class PreparedFoodWasteIn(BaseModel):
+    quantity: Decimal = Field(gt=0)
+    reason: str = Field(min_length=2, max_length=255)
+    loss_type: str = Field(default="unsold", pattern="^(unsold|wastage|damaged|expired)$")
+    waste_date: Optional[date] = None
+    responsible_staff_id: Optional[UUID] = None
+    unit_cost: Optional[Decimal] = Field(default=None, ge=0)
 
 
 class ArchiveItemIn(BaseModel):
@@ -360,12 +388,193 @@ def cancel_po(
 @router.get("/canteens/{canteen_id}/wastage")
 def list_wastage(
     canteen_id: UUID,
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    loss_type: Optional[str] = Query(default=None),
+    source_type: Optional[str] = Query(default=None),
+    responsible_staff_id: Optional[UUID] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return inventory_service.list_wastage_records(
+        db,
+        canteen_id,
+        limit=limit,
+        start_date=start_date,
+        end_date=end_date,
+        loss_type=loss_type,
+        source_type=source_type,
+        responsible_staff_id=responsible_staff_id,
+    )
+
+
+@router.get("/canteens/{canteen_id}/staff-members")
+def list_inventory_staff_members(
+    canteen_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return waste_service.list_canteen_staff_for_select(db, canteen_id)
+
+
+@router.get("/canteens/{canteen_id}/food-prep")
+def list_food_prep_logs(
+    canteen_id: UUID,
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    meal_session: Optional[str] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return waste_service.list_daily_food_prep_logs(
+        db,
+        canteen_id=canteen_id,
+        start_date=start_date,
+        end_date=end_date,
+        meal_session=meal_session,
+    )
+
+
+@router.post("/food-prep", status_code=status.HTTP_201_CREATED)
+def upsert_food_prep_log(
+    payload: FoodPrepUpsertIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, payload.canteen_id)
+    from app.core.time_utils import today_college
+
+    return waste_service.upsert_daily_food_prep_log(
+        db,
+        canteen_id=payload.canteen_id,
+        food_item_id=payload.food_item_id,
+        prep_date=payload.prep_date or today_college(),
+        meal_session=payload.meal_session,
+        prepared_quantity=payload.prepared_quantity,
+        unit_cost=payload.unit_cost,
+        responsible_staff_id=payload.responsible_staff_id,
+        notes=payload.notes,
+        actor_user_id=principal.user.id,
+    )
+
+
+@router.post("/food-prep/{prep_log_id}/record-waste")
+def record_unsold_prep_waste(
+    prep_log_id: UUID,
+    payload: PreparedFoodWasteIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
+    db: Session = Depends(get_db),
+):
+    log_row = db.get(DailyFoodPrepLog, prep_log_id)
+    if not log_row:
+        raise HTTPException(status_code=404, detail="Daily food prep log not found")
+    enforce_canteen_scope(principal, log_row.canteen_id)
+    return waste_service.record_prepared_food_waste(
+        db,
+        canteen_id=log_row.canteen_id,
+        prep_log_id=prep_log_id,
+        waste_date=payload.waste_date,
+        quantity=payload.quantity,
+        reason=payload.reason,
+        loss_type=payload.loss_type,
+        responsible_staff_id=payload.responsible_staff_id,
+        actor_user_id=principal.user.id,
+        unit_cost=payload.unit_cost,
+    )
+
+
+@router.get("/canteens/{canteen_id}/waste-analytics")
+def get_canteen_waste_analytics(
+    canteen_id: UUID,
+    period: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return waste_service.get_waste_analytics(
+        db,
+        canteen_id=canteen_id,
+        period=period,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+@router.get("/canteens/{canteen_id}/consumption-report")
+def get_canteen_consumption_report(
+    canteen_id: UUID,
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    inventory_item_id: Optional[UUID] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, canteen_id)
-    return inventory_service.list_wastage_records(db, canteen_id, limit=limit)
+    return waste_service.get_consumption_report(
+        db,
+        canteen_id=canteen_id,
+        start_date=start_date,
+        end_date=end_date,
+        inventory_item_id=inventory_item_id,
+    )
+
+
+@router.get("/canteens/{canteen_id}/waste-recommendations")
+def get_canteen_waste_recommendations(
+    canteen_id: UUID,
+    lookback_days: int = Query(default=30, ge=7, le=180),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return waste_service.get_waste_recommendations(
+        db,
+        canteen_id=canteen_id,
+        lookback_days=lookback_days,
+    )
+
+
+@router.get("/canteens/{canteen_id}/wastage/csv")
+def export_canteen_wastage_csv(
+    canteen_id: UUID,
+    period: str = Query(default="daily", pattern="^(daily|weekly|monthly)$"),
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    analytics = waste_service.get_waste_analytics(
+        db,
+        canteen_id=canteen_id,
+        period=period,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    records = inventory_service.list_wastage_records(
+        db,
+        canteen_id,
+        limit=500,
+        start_date=date.fromisoformat(analytics["start_date"]),
+        end_date=date.fromisoformat(analytics["end_date"]),
+    )
+    csv_text = waste_service.export_wastage_csv(
+        db,
+        canteen_id=canteen_id,
+        analytics=analytics,
+        wastage_records=records,
+    )
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=collegebites-food-waste-report.csv"},
+    )
 
 
 @router.get("/canteens/{canteen_id}/adjustments")
@@ -405,9 +614,40 @@ def adjust_stock(
 @router.post("/wastage")
 def record_wastage(
     payload: WastageIn,
-    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*WASTE_RECORD_ROLES)),
     db: Session = Depends(get_db),
 ):
+    if payload.prep_log_id or payload.food_item_id:
+        resolved_canteen_id = payload.canteen_id
+        if payload.prep_log_id:
+            pl = db.get(DailyFoodPrepLog, payload.prep_log_id)
+            if not pl:
+                raise HTTPException(status_code=404, detail="Daily food prep log not found")
+            resolved_canteen_id = pl.canteen_id
+        elif payload.food_item_id:
+            fi = db.get(FoodItem, payload.food_item_id)
+            if not fi:
+                raise HTTPException(status_code=404, detail="Food item not found")
+            resolved_canteen_id = fi.canteen_id
+        if not resolved_canteen_id:
+            raise HTTPException(status_code=400, detail="canteen_id is required")
+        enforce_canteen_scope(principal, resolved_canteen_id)
+        return waste_service.record_prepared_food_waste(
+            db,
+            canteen_id=resolved_canteen_id,
+            food_item_id=payload.food_item_id,
+            prep_log_id=payload.prep_log_id,
+            waste_date=payload.waste_date,
+            quantity=payload.quantity,
+            reason=payload.reason,
+            loss_type=payload.operation_type if payload.operation_type in ("damaged", "expired", "wastage", "unsold") else "unsold",
+            responsible_staff_id=payload.responsible_staff_id,
+            actor_user_id=principal.user.id,
+            unit_cost=payload.unit_cost,
+        )
+
+    if not payload.inventory_item_id:
+        raise HTTPException(status_code=400, detail="Either inventory_item_id or food_item_id/prep_log_id is required")
     inv = db.get(InventoryItem, payload.inventory_item_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Inventory item not found")
@@ -420,7 +660,9 @@ def record_wastage(
         is_wastage=True,
         actor_user_id=principal.user.id,
         batch_id=payload.batch_id,
-        operation_type=payload.operation_type,
+        operation_type=payload.operation_type if payload.operation_type in ("damaged", "expired", "wastage") else "wastage",
+        waste_date=payload.waste_date,
+        responsible_staff_id=payload.responsible_staff_id,
     )
 
 

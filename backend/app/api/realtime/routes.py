@@ -216,6 +216,36 @@ async def stream_digital_board(
     )
 
 
+@router.get("/queue/{canteen_id}/stream")
+async def stream_queue_dashboard(
+    canteen_id: UUID,
+    request: Request,
+    last_version: Optional[str] = Query(default=None),
+    once: bool = Query(default=False),
+    max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_ROLES)),
+):
+    """Server-Sent Events stream for live Canteen Queue Management dashboard."""
+    enforce_canteen_scope(principal, canteen_id)
+
+    def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+        ver, snap = realtime_service.fetch_queue_snapshot(sess, canteen_id)
+        return ver, {"version": ver, "queue": snap}
+
+    return _stream_with_watermark(
+        request=request,
+        topic=f"queue:{canteen_id}",
+        event_name="queue.snapshot",
+        last_version=last_version,
+        last_event_id=last_event_id,
+        once=once,
+        max_seconds=max_seconds,
+        compute_version=lambda sess: realtime_service.compute_queue_version(sess, canteen_id),
+        fetch_payload=_fetch,
+    )
+
+
 @router.get("/token-board/stream")
 async def stream_operational_token_board(
     request: Request,

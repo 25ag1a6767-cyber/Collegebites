@@ -5,7 +5,7 @@ import { Check, ClipboardList, Flame, PackageCheck, Play, Search, ShieldCheck } 
 import { api, getApiError } from "../../../api/client";
 import { useRealtimeSync } from "../../../hooks/useRealtimeSync";
 import { useAppStore } from "../../../store/useAppStore";
-import { Badge, Button, Card, ConfirmModal, Input, Select, useToast } from "../../../components/ui/Primitives";
+import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../../components/ui/RealtimeStatusBadge";
 
 export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCanteenId }) => {
@@ -17,6 +17,9 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
   const [userKindFilter, setUserKindFilter] = useState("");
   const [scopeCanteenOnly, setScopeCanteenOnly] = useState(false);
   const [roleEdits, setRoleEdits] = useState<Record<string, string>>({});
+  const [permModalUser, setPermModalUser] = useState<any | null>(null);
+  const [grantCodes, setGrantCodes] = useState<string[]>([]);
+  const [revokeCodes, setRevokeCodes] = useState<string[]>([]);
   const [cancelOrderTarget, setCancelOrderTarget] = useState<any | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
@@ -90,6 +93,12 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
       setActionBusyId(null);
     }
   };
+
+  const { data: allPermissions = [] } = useQuery<any[]>({
+    queryKey: ["admin-all-permissions"],
+    enabled: Boolean(isCollegeAdmin),
+    queryFn: async () => (await api.get("/admin/permissions")).data,
+  });
 
   const { data: users = [], refetch: refetchUsers } = useQuery<any[]>({
     queryKey: ["admin-all-users", userKindFilter],
@@ -280,6 +289,19 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
                   >
                     Save Role
                   </Button>
+                  {isCollegeAdmin && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setPermModalUser(u);
+                        setGrantCodes(u.permissions || []);
+                        setRevokeCodes([]);
+                      }}
+                    >
+                      Permissions ({u.permissions?.length || 0})
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant={u.is_active ? "danger" : "success"}
@@ -301,6 +323,62 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
           })}
         </div>
       </Card>
+
+      <Modal
+        open={Boolean(permModalUser)}
+        onClose={() => setPermModalUser(null)}
+        title={`Granular Permissions • ${permModalUser?.full_name || ""}`}
+        maxWidth="max-w-xl"
+      >
+        {permModalUser && (
+          <div className="space-y-3 text-xs">
+            <p className="text-slate-500">
+              Toggle custom permission grants or revocations for <strong>{permModalUser.full_name}</strong> ({(permModalUser.roles || []).join(", ")}).
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-72 overflow-y-auto">
+              {allPermissions.map((p: any) => {
+                const isGranted = grantCodes.includes(p.code);
+                return (
+                  <label key={p.code} className="flex items-center gap-2 rounded-lg border border-slate-200 px-2.5 py-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isGranted}
+                      onChange={() => {
+                        if (isGranted) {
+                          setGrantCodes((prev) => prev.filter((c) => c !== p.code));
+                          setRevokeCodes((prev) => Array.from(new Set([...prev, p.code])));
+                        } else {
+                          setGrantCodes((prev) => Array.from(new Set([...prev, p.code])));
+                          setRevokeCodes((prev) => prev.filter((c) => c !== p.code));
+                        }
+                      }}
+                    />
+                    <span className="font-mono text-[11px] font-semibold text-slate-800">{p.code}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <Button
+              className="w-full"
+              onClick={async () => {
+                try {
+                  await api.put(`/admin/users/${permModalUser.id}/permissions`, {
+                    grant: grantCodes,
+                    revoke: revokeCodes,
+                  });
+                  pushToast("Custom permissions saved", "success");
+                  setPermModalUser(null);
+                  refetchUsers();
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
+              }}
+            >
+              Save Permission Overrides
+            </Button>
+          </div>
+        )}
+      </Modal>
 
       <ConfirmModal
         open={Boolean(cancelOrderTarget)}

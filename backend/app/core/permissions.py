@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import decode_token
-from app.models.auth import Role, RolePermission, Permission, SessionRecord, StaffProfile, User, UserRole
+from app.models.auth import Role, RolePermission, Permission, SessionRecord, StaffProfile, User, UserPermission, UserRole
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -42,6 +42,13 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "canteen:manage",
         "menu:manage",
         "staff:manage",
+        "staff:view",
+        "staff:shift_manage",
+        "staff:leave_review",
+        "staff:task_manage",
+        "staff:activity_view",
+        "staff:attendance_self",
+        "role:manage",
         "customer:manage",
         "order:view_all",
         "order:manage",
@@ -66,6 +73,12 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "order:manage",
         "kitchen:manage",
         "staff:manage_canteen",
+        "staff:view",
+        "staff:shift_manage",
+        "staff:leave_review",
+        "staff:task_manage",
+        "staff:activity_view",
+        "staff:attendance_self",
         "inventory:manage",
         "queue:manage",
         "report:view_canteen",
@@ -82,12 +95,15 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "pickup:verify",
         "pickup:handover",
         "shift:manage_own",
+        "staff:attendance_self",
     ],
     ROLE_KITCHEN_STAFF: [
         "kitchen:view",
         "kitchen:update_order",
         "kitchen:report_delay",
         "kitchen:report_unavailable",
+        "wastage:record",
+        "staff:attendance_self",
     ],
     ROLE_INVENTORY_MANAGER: [
         "inventory:manage",
@@ -95,11 +111,13 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "purchase_order:manage",
         "wastage:record",
         "menu:manage_inventory",
+        "staff:attendance_self",
     ],
     ROLE_PICKUP_STAFF: [
         "pickup:verify",
         "pickup:handover",
         "order:view_canteen",
+        "staff:attendance_self",
     ],
     ROLE_CUSTOMER: [
         "order:create",
@@ -158,6 +176,17 @@ def load_user_roles_and_permissions(db: Session, user_id: UUID) -> tuple[set[str
 
     for r in roles:
         perms.update(ROLE_PERMISSIONS_MAP.get(r, []))
+
+    user_perm_rows = db.execute(
+        select(Permission.code, UserPermission.granted)
+        .join(Permission, Permission.id == UserPermission.permission_id)
+        .where(UserPermission.user_id == user_id)
+    ).all()
+    for code, granted in user_perm_rows:
+        if granted:
+            perms.add(code)
+        else:
+            perms.discard(code)
     return roles, perms, assigned_canteen_id
 
 

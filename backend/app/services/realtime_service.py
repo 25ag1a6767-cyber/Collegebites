@@ -16,7 +16,7 @@ from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.models.payment import OrderQRCode, PickupToken
 from app.schemas.operations import DigitalBoardResponse, OperationalTokenBoardResponse
 from app.schemas.order import OrderOut
-from app.services import notification_service, order_service, pickup_service
+from app.services import notification_service, order_service, pickup_service, queue_service
 
 
 def resolve_db_session(request: Request) -> tuple[Any, Session]:
@@ -79,8 +79,11 @@ def compute_order_version(db: Session, order_id: UUID) -> Optional[str]:
     row = db.execute(
         select(
             Order.id,
+            Order.canteen_id,
+            Order.counter_id,
             Order.status,
             Order.payment_status,
+            Order.is_priority,
             Order.delayed_minutes,
             Order.ready_at,
             Order.completed_at,
@@ -92,18 +95,35 @@ def compute_order_version(db: Session, order_id: UUID) -> Optional[str]:
     token_code = db.scalar(select(PickupToken.token_code).where(PickupToken.order_id == order_id))
     qr_revoked = db.scalar(select(OrderQRCode.revoked_at).where(OrderQRCode.order_id == order_id))
     hist_count = db.scalar(select(func.count(OrderStatusHistory.id)).where(OrderStatusHistory.order_id == order_id)) or 0
+    queue_fp = ""
+    if row[3] in queue_service.ACTIVE_QUEUE_WAITING_STATUSES:
+        q_row = db.execute(
+            select(
+                func.count(Order.id),
+                func.max(Order.updated_at),
+                func.coalesce(func.sum(case((Order.is_priority.is_(True), 1), else_=0)), 0),
+                func.coalesce(func.sum(Order.delayed_minutes), 0),
+            ).where(
+                Order.canteen_id == row[1],
+                Order.status.in_(queue_service.ACTIVE_QUEUE_WAITING_STATUSES),
+            )
+        ).one()
+        queue_fp = f"{q_row[0] or 0}:{q_row[1].isoformat() if q_row[1] else ''}:{q_row[2] or 0}:{q_row[3] or 0}"
     raw = "|".join(
         [
             str(row[0]),
-            str(row[1]),
             str(row[2]),
-            str(row[3] or 0),
-            row[4].isoformat() if row[4] else "",
-            row[5].isoformat() if row[5] else "",
-            row[6].isoformat() if row[6] else "",
+            str(row[3]),
+            str(row[4]),
+            str(bool(row[5])),
+            str(row[6] or 0),
+            row[7].isoformat() if row[7] else "",
+            row[8].isoformat() if row[8] else "",
+            row[9].isoformat() if row[9] else "",
             str(token_code or ""),
             qr_revoked.isoformat() if qr_revoked else "",
             str(hist_count),
+            queue_fp,
         ]
     )
     return sha256_hex(raw)[:16]
@@ -173,6 +193,42 @@ def compute_staff_orders_version(
 
 def fetch_token_board_snapshot(db: Session, canteen_id: Optional[UUID] = None) -> OperationalTokenBoardResponse:
     return pickup_service.get_operational_token_board(db, canteen_id)
+
+
+def compute_queue_version(db: Session, canteen_id: UUID) -> str:
+    row = db.execute(
+        select(
+            func.count(Order.id),
+            func.max(Order.updated_at),
+            func.max(Order.completed_at),
+            func.coalesce(func.sum(case((Order.status == "PLACED", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Order.status == "ACCEPTED", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Order.status == "PREPARING", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Order.status == "READY", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Order.is_priority.is_(True), 1), else_=0)), 0),
+            func.coalesce(func.sum(Order.delayed_minutes), 0),
+        ).where(
+            Order.canteen_id == canteen_id,
+            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY", "COMPLETED")),
+        )
+    ).one()
+    raw = "|".join(
+        [
+            str(canteen_id),
+            str(row[0] or 0),
+            row[1].isoformat() if row[1] else "",
+            row[2].isoformat() if row[2] else "",
+            *(str(row[idx] or 0) for idx in range(3, 9)),
+        ]
+    )
+    return sha256_hex(raw)[:16]
+
+
+def fetch_queue_snapshot(db: Session, canteen_id: UUID) -> tuple[str, dict[str, Any]]:
+    version = compute_queue_version(db, canteen_id)
+    dash = queue_service.get_live_queue_dashboard(db, canteen_id)
+    dash["version"] = version
+    return version, dash
 
 
 def compute_user_notifications_version(

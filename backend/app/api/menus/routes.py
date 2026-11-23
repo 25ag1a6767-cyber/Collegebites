@@ -34,6 +34,7 @@ from app.schemas.menu import (
     FoodVariantIn,
     FoodVariantOut,
     FoodVariantUpdate,
+    MenuRestoreReviewIn,
     MenuScheduleAssignItemsIn,
     MenuScheduleCreate,
     MenuScheduleOut,
@@ -167,6 +168,11 @@ def update_item(
     enforce_canteen_scope(principal, item.canteen_id)
     is_manager_or_admin = principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
     if not is_manager_or_admin:
+        if getattr(item, "pending_restore_approval", False) and payload.is_available is True:
+            raise HTTPException(
+                status_code=403,
+                detail="Restoring availability of an auto-disabled item requires Canteen Manager or College Admin approval",
+            )
         if principal.has_role(ROLE_INVENTORY_MANAGER):
             if payload.base_price is not None and Decimal(str(payload.base_price)) != item.base_price:
                 raise HTTPException(
@@ -401,6 +407,41 @@ def delete_schedule(
     db.delete(sched)
     db.commit()
     return {"status": "deleted", "id": str(schedule_id)}
+
+
+@router.get("/canteens/{canteen_id}/restore-approvals")
+def list_menu_restore_approvals(
+    canteen_id: UUID,
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return menu_service.list_restore_approvals(db, canteen_id, status_filter=status_filter)
+
+
+@router.post("/restore-approvals/{request_id}/review")
+def review_menu_restore_approval(
+    request_id: UUID,
+    payload: MenuRestoreReviewIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    from app.models.menu import MenuRestoreApproval
+
+    req = db.get(MenuRestoreApproval, request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Menu restore approval request not found")
+    enforce_canteen_scope(principal, req.canteen_id)
+    return menu_service.review_restore_approval(
+        db,
+        request_id,
+        decision=payload.decision,
+        review_notes=payload.review_notes,
+        actor_user_id=principal.user.id,
+    )
 
 
 @router.get("/canteens/{canteen_id}/export-csv")

@@ -175,6 +175,10 @@ class OrderOut(ORMModel):
     delayed_minutes: int
     delay_reason: Optional[str]
     is_priority: bool = False
+    queue_position: Optional[int] = None
+    orders_ahead_count: Optional[int] = None
+    counter_queue_position: Optional[int] = None
+    dynamic_wait_minutes: Optional[int] = None
     pickup_token_code: Optional[str] = None
     qr_verification_path: Optional[str] = None
     qr_token_raw: Optional[str] = None

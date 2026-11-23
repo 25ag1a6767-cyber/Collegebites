@@ -206,7 +206,14 @@ export default function OrderDetailScreen() {
             )}
             <Text style={styles.counterSub}>
               Counter: {order.counter_name} • {order.status}
-              {order.estimated_prep_minutes ? ` • Est ${order.estimated_prep_minutes + (order.delayed_minutes || 0)}m` : ""}
+              {order.queue_position && order.queue_position > 0
+                ? ` • Queue #${order.queue_position} (${order.orders_ahead_count ?? 0} ahead)`
+                : ""}
+              {order.dynamic_wait_minutes !== null && order.dynamic_wait_minutes !== undefined
+                ? ` • Est ${order.dynamic_wait_minutes}m`
+                : order.estimated_prep_minutes
+                ? ` • Est ${order.estimated_prep_minutes + (order.delayed_minutes || 0)}m`
+                : ""}
             </Text>
             {order.delayed_minutes > 0 && (
               <Text style={{ color: "#fbbf24", fontSize: 12, fontWeight: "800", marginTop: 4 }}>

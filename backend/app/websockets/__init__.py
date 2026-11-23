@@ -94,6 +94,7 @@ def emit_order_event_sync(canteen_id: str, order_id: str, event_type: str, paylo
     message = {"event": event_type, "order_id": order_id, "canteen_id": canteen_id, "data": payload}
     ws_manager.schedule_broadcast(f"order:{order_id}", message)
     ws_manager.schedule_broadcast(f"kitchen:{canteen_id}", message)
+    ws_manager.schedule_broadcast(f"queue:{canteen_id}", message)
     ws_manager.schedule_broadcast(f"board:{canteen_id}", message)
     ws_manager.schedule_broadcast("board:all", message)
     ws_manager.schedule_broadcast("staff:orders", message)

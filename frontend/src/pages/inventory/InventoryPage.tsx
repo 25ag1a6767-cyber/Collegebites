@@ -24,8 +24,9 @@ import type { Canteen } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
+import { FoodWasteTab } from "./components/FoodWasteTab";
 
-type SectionTab = "all" | "items" | "menu" | "stock" | "pricing" | "suppliers" | "recipes" | "audit";
+type SectionTab = "all" | "items" | "menu" | "stock" | "waste" | "pricing" | "suppliers" | "recipes" | "audit";
 
 export const InventoryPage: React.FC = () => {
   const { user, selectedCanteenId } = useAppStore();
@@ -176,6 +177,11 @@ export const InventoryPage: React.FC = () => {
     qc.invalidateQueries({ queryKey: ["kitchen-menu"] });
     qc.invalidateQueries({ queryKey: ["admin-menu"] });
     qc.invalidateQueries({ queryKey: ["admin-cats"] });
+    qc.invalidateQueries({ queryKey: ["waste-analytics"] });
+    qc.invalidateQueries({ queryKey: ["food-prep-logs"] });
+    qc.invalidateQueries({ queryKey: ["waste-records-filtered"] });
+    qc.invalidateQueries({ queryKey: ["consumption-report"] });
+    qc.invalidateQueries({ queryKey: ["waste-recommendations"] });
   };
 
   // Add Item Form State (Section 3.3)
@@ -263,6 +269,8 @@ export const InventoryPage: React.FC = () => {
   const [adjQty, setAdjQty] = useState("");
   const [adjReason, setAdjReason] = useState("Physical stock count update");
   const [adjExpiry, setAdjExpiry] = useState("");
+  const [adjBatchId, setAdjBatchId] = useState("");
+  const [adjWasteDate, setAdjWasteDate] = useState(new Date().toISOString().slice(0, 10));
 
   // Transfer State
   const [trfIngId, setTrfIngId] = useState("");
@@ -428,6 +436,7 @@ export const InventoryPage: React.FC = () => {
             { k: "items", l: `All Inventory Items (${dashboard?.total_inventory_items ?? 0})` },
             { k: "menu", l: `Customer Menu (${menuItems.length})` },
             { k: "stock", l: "Stock Ops, Loss & Transfers" },
+            { k: "waste", l: "Food Waste & Prep" },
             {
               k: "pricing",
               l: `Price Management${
@@ -818,7 +827,13 @@ export const InventoryPage: React.FC = () => {
             <p className="text-[11px] text-slate-500">
               Add stock, reduce stock manually, or record damaged / expired / wastage losses. Negative stock is strictly blocked.
             </p>
-            <Select value={adjInvId || activeItems[0]?.inventory_item_id || ""} onChange={(e) => setAdjInvId(e.target.value)}>
+            <Select
+              value={adjInvId || activeItems[0]?.inventory_item_id || ""}
+              onChange={(e) => {
+                setAdjInvId(e.target.value);
+                setAdjBatchId("");
+              }}
+            >
               {activeItems.map((it) => (
                 <option key={it.inventory_item_id} value={it.inventory_item_id}>
                   {it.name} ({it.current_quantity} {it.unit})
@@ -832,6 +847,17 @@ export const InventoryPage: React.FC = () => {
               <option value="expired">Expired Batch Write-off (-)</option>
               <option value="wastage">Prep / Spillage Wastage (-)</option>
             </Select>
+            {(adjOpType === "damaged" || adjOpType === "expired" || adjOpType === "wastage") &&
+              selectedAdjItem?.batches?.length > 0 && (
+                <Select value={adjBatchId} onChange={(e) => setAdjBatchId(e.target.value)}>
+                  <option value="">FEFO Auto-Select Batch</option>
+                  {selectedAdjItem.batches.map((b: any) => (
+                    <option key={b.id} value={b.id}>
+                      {b.batch_number} ({b.remaining_quantity} {selectedAdjItem.unit} • exp {b.expiry_date || "None"})
+                    </option>
+                  ))}
+                </Select>
+              )}
             <Input
               type="number"
               min="0.001"
@@ -840,6 +866,9 @@ export const InventoryPage: React.FC = () => {
               onChange={(e) => setAdjQty(e.target.value)}
               placeholder={`Quantity (${selectedAdjItem?.unit || "units"})`}
             />
+            {(adjOpType === "damaged" || adjOpType === "expired" || adjOpType === "wastage") && (
+              <Input type="date" value={adjWasteDate} onChange={(e) => setAdjWasteDate(e.target.value)} title="Waste Date" />
+            )}
             {adjOpType === "add_stock" && (
               <Input type="date" value={adjExpiry} onChange={(e) => setAdjExpiry(e.target.value)} placeholder="Batch Expiry (optional)" />
             )}
@@ -855,9 +884,11 @@ export const InventoryPage: React.FC = () => {
                   if (adjOpType === "damaged" || adjOpType === "expired" || adjOpType === "wastage") {
                     await api.post("/inventory/wastage", {
                       inventory_item_id: selectedAdjItem.inventory_item_id,
+                      batch_id: adjBatchId || null,
                       quantity: qtyNum,
                       reason: adjReason,
                       operation_type: adjOpType,
+                      waste_date: adjWasteDate || null,
                     });
                   } else {
                     await api.post("/inventory/adjustments", {
@@ -869,6 +900,7 @@ export const InventoryPage: React.FC = () => {
                     });
                   }
                   setAdjQty("");
+                  setAdjBatchId("");
                   pushToast("Stock operation recorded", "success");
                   refreshAll();
                 } catch (err) {
@@ -1471,10 +1503,14 @@ export const InventoryPage: React.FC = () => {
                 {wastageRecords.map((w) => (
                   <div key={w.id} className="rounded-lg border border-red-100 bg-red-50/40 px-3 py-1.5">
                     <div className="flex justify-between font-semibold text-red-900">
-                      <span>{w.ingredient_name} • {w.loss_type.toUpperCase()}</span>
+                      <span>{w.food_item_name || w.ingredient_name || w.item_name} • {String(w.loss_type).toUpperCase()}</span>
                       <span>-₹{w.estimated_loss} ({w.quantity} {w.unit})</span>
                     </div>
-                    <div className="text-[11px] text-red-700">{w.reason}</div>
+                    <div className="text-[11px] text-red-700">
+                      {w.reason}
+                      {w.waste_date ? ` • ${w.waste_date}` : ""}
+                      {w.responsible_staff_name ? ` • Staff: ${w.responsible_staff_name}` : ""}
+                    </div>
                   </div>
                 ))}
                 {adjustmentRecords.map((adj) => (
@@ -1496,6 +1532,16 @@ export const InventoryPage: React.FC = () => {
           </Card>
         )}
       </div>
+
+      {/* Food Waste Management Dashboard, Prep Logs, Consumption Variance & Insights */}
+      {showBlock("waste") && activeId && (
+        <FoodWasteTab
+          activeCanteenId={activeId}
+          inventoryItems={items}
+          menuItems={menuItems}
+          onChanged={refreshAll}
+        />
+      )}
 
       {/* Customer-Facing Menu Management (Add Items, Categories, Images & Availability; Selling Prices Approval-Gated) */}
       {showBlock("menu") && (
@@ -1553,8 +1599,14 @@ export const InventoryPage: React.FC = () => {
                         <td className="p-2">{m.category_name || "—"}</td>
                         <td className="p-2 font-extrabold text-slate-900">₹{m.base_price}</td>
                         <td className="p-2">
-                          <Badge tone={m.is_active && m.is_available ? "green" : "red"}>
-                            {!m.is_active ? "Archived" : m.is_available ? "Available" : "Out of Stock"}
+                          <Badge tone={m.is_active && m.is_available ? "green" : m.pending_restore_approval ? "amber" : "red"}>
+                            {!m.is_active
+                              ? "Archived"
+                              : m.pending_restore_approval
+                              ? "Awaiting Mgr Approval"
+                              : m.is_available
+                              ? "Available"
+                              : "Out of Stock"}
                           </Badge>
                         </td>
                         <td className="p-2">
@@ -1608,6 +1660,7 @@ export const InventoryPage: React.FC = () => {
                             <Button
                               size="sm"
                               variant="ghost"
+                              disabled={!canApproveSellingPrice && Boolean(m.pending_restore_approval)}
                               onClick={async () => {
                                 try {
                                   await api.patch(`/menus/items/${m.id}`, { is_available: !m.is_available });

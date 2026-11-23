@@ -150,7 +150,14 @@ export interface FoodItem {
   is_available: boolean;
   is_active: boolean;
   insufficient_ingredients: boolean;
+  pending_restore_approval?: boolean;
+  category_is_active?: boolean;
   is_schedule_active_now?: boolean;
+  is_available_to_order?: boolean;
+  available_from_time?: string | null;
+  available_until_time?: string | null;
+  valid_from?: string | null;
+  valid_until?: string | null;
   images: { id: string; image_url: string; alt_text?: string | null; is_primary: boolean }[];
   variants: FoodVariant[];
   addons: FoodAddon[];
@@ -220,6 +227,10 @@ export interface Order {
   delayed_minutes: number;
   delay_reason?: string | null;
   is_priority?: boolean;
+  queue_position?: number | null;
+  orders_ahead_count?: number | null;
+  counter_queue_position?: number | null;
+  dynamic_wait_minutes?: number | null;
   pickup_token_code?: string | null;
   qr_verification_path?: string | null;
   qr_token_raw?: string | null;

@@ -1,20 +1,39 @@
 import React, { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Calendar, Users } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, Flame, Layers, RefreshCw, Timer, Zap } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
-import { Badge, Button, Card, Input, Select, useToast } from "../../../components/ui/Primitives";
+import { useRealtimeSync } from "../../../hooks/useRealtimeSync";
+import { RealtimeStatusBadge } from "../../../components/ui/RealtimeStatusBadge";
+import { Badge, Button, Card, Input, useToast } from "../../../components/ui/Primitives";
+export { StaffTab } from "./StaffManagementPanel";
 
 export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refetchQueue: () => void }> = ({
   activeCanteenId,
   queueDash,
   refetchQueue,
 }) => {
+  const qc = useQueryClient();
   const { pushToast } = useToast();
   const [maxConcurrent, setMaxConcurrent] = useState(String(queueDash?.max_concurrent_orders || 80));
+  const [defaultPrepMins, setDefaultPrepMins] = useState("10");
   const [slotDate, setSlotDate] = useState(new Date().toISOString().slice(0, 10));
   const [startTime, setStartTime] = useState("12:00");
   const [endTime, setEndTime] = useState("13:00");
   const [slotCap, setSlotCap] = useState("40");
+  const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+  const [escalating, setEscalating] = useState(false);
+
+  const { status: queueSyncStatus, lastSyncedAt: queueLastSyncedAt } = useRealtimeSync<{ queue?: any }>({
+    enabled: Boolean(activeCanteenId),
+    ssePath: activeCanteenId ? `/realtime/queue/${activeCanteenId}/stream` : null,
+    wsPath: activeCanteenId ? `/ws/kitchen/${activeCanteenId}` : null,
+    queryKeys: [["admin-queue", activeCanteenId]],
+    onSnapshot: (snap) => {
+      if (snap?.queue) {
+        qc.setQueryData(["admin-queue", activeCanteenId], snap.queue);
+      }
+    },
+  });
 
   const { data: pickupSlots = [], refetch: refetchSlots } = useQuery<any[]>({
     queryKey: ["admin-pickup-slots", activeCanteenId],
@@ -26,486 +45,437 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
     if (queueDash?.max_concurrent_orders) {
       setMaxConcurrent(String(queueDash.max_concurrent_orders));
     }
-  }, [queueDash?.max_concurrent_orders]);
+    if (queueDash?.estimated_wait_minutes) {
+      setDefaultPrepMins(String(Math.max(1, Math.min(60, Number(queueDash.estimated_wait_minutes) || 10))));
+    }
+  }, [queueDash?.max_concurrent_orders, queueDash?.estimated_wait_minutes]);
 
-  return (
-    <div className="grid gap-5 md:grid-cols-2">
-      <Card className="p-5 space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="font-bold text-slate-900">Live Queue & Crowd Control</h2>
-            <div className="text-xs text-slate-500">
-              Active: {queueDash?.active_order_count} • Crowd: {queueDash?.crowd_level} • Wait: {queueDash?.estimated_wait_minutes} min • Kitchen Workload: {queueDash?.kitchen_workload_percent}% • Staff On Duty: {queueDash?.on_duty_staff_count ?? 1}
-            </div>
-          </div>
-          <Button
-            size="sm"
-            variant={queueDash?.ordering_paused ? "success" : "danger"}
-            onClick={async () => {
-              try {
-                await api.patch(`/queue/canteens/${activeCanteenId}/controls`, {
-                  ordering_paused: !queueDash?.ordering_paused,
-                  pause_reason: !queueDash?.ordering_paused ? "Paused by manager due to peak crowd" : null,
-                });
-                refetchQueue();
-              } catch (err) {
-                pushToast(getApiError(err), "error");
-              }
-            }}
-          >
-            {queueDash?.ordering_paused ? "Resume Ordering" : "Pause Ordering"}
-          </Button>
-        </div>
+  const activeQueue: any[] = queueDash?.active_orders_queue || [];
+  const delayedOrders: any[] = queueDash?.delayed_orders || [];
+  const counters: any[] = queueDash?.counter_workloads || [];
 
-        <div className="flex items-center gap-2 border-t border-slate-100 pt-3">
-          <Input
-            type="number"
-            value={maxConcurrent}
-            onChange={(e) => setMaxConcurrent(e.target.value)}
-            placeholder="Max concurrent orders"
-          />
-          <Button
-            size="sm"
-            onClick={async () => {
-              try {
-                await api.patch(`/queue/canteens/${activeCanteenId}/controls`, {
-                  max_concurrent_orders: Number(maxConcurrent),
-                });
-                pushToast("Capacity updated", "success");
-                refetchQueue();
-              } catch (err) {
-                pushToast(getApiError(err), "error");
-              }
-            }}
-          >
-            Update Capacity
-          </Button>
-        </div>
-      </Card>
+  const handleReassignCounter = async (orderId: string, counterId: string) => {
+    setBusyOrderId(orderId);
+    try {
+      const res = await api.post(`/queue/orders/${orderId}/assign-counter`, { counter_id: counterId });
+      qc.setQueryData(["admin-queue", activeCanteenId], res.data);
+      pushToast("Order counter updated", "success");
+    } catch (err) {
+      pushToast(getApiError(err, "Counter reassignment failed"), "error");
+    } finally {
+      setBusyOrderId(null);
+    }
+  };
 
-      <Card className="p-5 space-y-3">
-        <h2 className="font-bold text-slate-900">Create / Update Pickup Slot</h2>
-        <div className="grid grid-cols-2 gap-2">
-          <Input type="date" value={slotDate} onChange={(e) => setSlotDate(e.target.value)} />
-          <Input type="number" value={slotCap} onChange={(e) => setSlotCap(e.target.value)} placeholder="Slot capacity" />
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
-          <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
-        </div>
-        <Button
-          size="sm"
-          onClick={async () => {
-            try {
-              await api.post(`/queue/canteens/${activeCanteenId}/slots`, {
-                slot_date: slotDate,
-                start_time: `${startTime}:00`,
-                end_time: `${endTime}:00`,
-                capacity: Number(slotCap),
-                is_active: true,
-              });
-              refetchSlots();
-              pushToast("Pickup slot configured", "success");
-            } catch (err) {
-              pushToast(getApiError(err), "error");
-            }
-          }}
-        >
-          Save Pickup Slot
-        </Button>
+  const handleTogglePriority = async (orderId: string, nextPriority: boolean) => {
+    setBusyOrderId(orderId);
+    try {
+      await api.post(`/kitchen/orders/${orderId}/priority`, { is_priority: nextPriority });
+      await refetchQueue();
+      pushToast(nextPriority ? "Order marked priority fast-track" : "Priority flag cleared", "success");
+    } catch (err) {
+      pushToast(getApiError(err, "Failed to update priority"), "error");
+    } finally {
+      setBusyOrderId(null);
+    }
+  };
 
-        {pickupSlots.length > 0 && (
-          <div className="border-t border-slate-100 pt-3 space-y-1.5">
-            <div className="text-[11px] font-bold uppercase text-slate-500">Configured Upcoming Slots ({pickupSlots.length})</div>
-            <div className="space-y-1.5 max-h-40 overflow-y-auto">
-              {pickupSlots.map((s) => (
-                <div key={s.id} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-1.5 text-xs">
-                  <span>
-                    <strong>{s.slot_date}</strong> • {String(s.start_time).slice(0, 5)}–{String(s.end_time).slice(0, 5)}{" "}
-                    <span className="text-slate-500">({s.reserved_count}/{s.capacity} reserved)</span>
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={async () => {
-                      try {
-                        await api.post(`/queue/canteens/${activeCanteenId}/slots`, {
-                          slot_date: s.slot_date,
-                          start_time: s.start_time,
-                          end_time: s.end_time,
-                          capacity: s.capacity,
-                          is_active: false,
-                        });
-                        refetchSlots();
-                        pushToast("Pickup slot disabled", "info");
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      }
-                    }}
-                  >
-                    Disable
-                  </Button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </Card>
-    </div>
-  );
-};
-
-export const StaffTab: React.FC<{ activeCanteenId: string; staffList: any[]; refetchStaff: () => void }> = ({
-  activeCanteenId,
-  staffList,
-  refetchStaff,
-}) => {
-  const { pushToast } = useToast();
-  const { data: tasks = [], refetch: refetchTasks } = useQuery<any[]>({
-    queryKey: ["admin-staff-tasks", activeCanteenId],
-    queryFn: async () => (await api.get(`/staff/tasks?canteen_id=${activeCanteenId}`)).data,
-  });
-  const { data: shifts = [], refetch: refetchShifts } = useQuery<any[]>({
-    queryKey: ["admin-staff-shifts", activeCanteenId],
-    queryFn: async () => (await api.get(`/staff/shifts?canteen_id=${activeCanteenId}`)).data,
-  });
-  const { data: attendance = [], refetch: refetchAttendance } = useQuery<any[]>({
-    queryKey: ["admin-staff-attendance", activeCanteenId],
-    queryFn: async () => (await api.get(`/staff/attendance?canteen_id=${activeCanteenId}`)).data,
-  });
-
-  const [newStaffName, setNewStaffName] = useState("");
-  const [newStaffEmail, setNewStaffEmail] = useState("");
-  const [newStaffEmp, setNewStaffEmp] = useState("");
-  const [newStaffRole, setNewStaffRole] = useState("cashier");
-  const [taskTitle, setTaskTitle] = useState("");
-  const [taskAssignee, setTaskAssignee] = useState("");
-  const [shiftUserId, setShiftUserId] = useState("");
-  const [shiftDate, setShiftDate] = useState(new Date().toISOString().slice(0, 10));
-  const [shiftStart, setShiftStart] = useState("08:00");
-  const [shiftEnd, setShiftEnd] = useState("16:00");
-  const [shiftType, setShiftType] = useState("regular");
-  const [leaveUserId, setLeaveUserId] = useState("");
-  const [leaveDate, setLeaveDate] = useState(new Date().toISOString().slice(0, 10));
-  const [leaveReason, setLeaveReason] = useState("");
-
-  const staffNameById = (uid?: string) => staffList.find((s) => s.user_id === uid)?.full_name || uid?.slice(0, 8) || "Staff";
+  const handleEscalateOverdue = async () => {
+    setEscalating(true);
+    try {
+      const res = await api.post(`/queue/canteens/${activeCanteenId}/escalate-overdue`);
+      if (res.data?.dashboard) {
+        qc.setQueryData(["admin-queue", activeCanteenId], res.data.dashboard);
+      } else {
+        refetchQueue();
+      }
+      const cnt = Number(res.data?.escalated_count || 0);
+      pushToast(
+        cnt > 0 ? `Escalated ${cnt} overdue order(s) to priority` : "No overdue orders needed escalation",
+        cnt > 0 ? "success" : "info"
+      );
+    } catch (err) {
+      pushToast(getApiError(err, "Escalation failed"), "error");
+    } finally {
+      setEscalating(false);
+    }
+  };
 
   return (
     <div className="space-y-5">
-      <div className="grid gap-5 md:grid-cols-2">
-        <Card className="p-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="font-bold text-slate-900 flex items-center gap-2">
-              <Users className="h-4 w-4 text-[#76010d]" /> Staff Directory ({staffList.length})
-            </h2>
-            <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={async () => {
-                  try {
-                    await api.post(`/staff/attendance/check-in?canteen_id=${activeCanteenId}`);
-                    pushToast("Checked in", "success");
-                    refetchStaff();
-                    refetchAttendance();
-                  } catch (err) {
-                    pushToast(getApiError(err), "error");
-                  }
-                }}
-              >
-                My Check-in
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={async () => {
-                  try {
-                    await api.post("/staff/attendance/check-out");
-                    pushToast("Checked out", "info");
-                    refetchStaff();
-                    refetchAttendance();
-                  } catch (err) {
-                    pushToast(getApiError(err), "error");
-                  }
-                }}
-              >
-                Check-out
-              </Button>
-            </div>
-          </div>
-          {staffList.map((s) => (
-            <div key={s.user_id} className="flex justify-between rounded-xl border border-slate-200 p-3 text-xs">
-              <div>
-                <div className="font-bold text-slate-900">
-                  {s.full_name} ({s.employee_code})
-                </div>
-                <div className="text-slate-500">
-                  {s.designation} • {s.email}
-                </div>
-              </div>
-              <Badge tone={s.is_on_duty ? "green" : "slate"}>{s.is_on_duty ? "On Duty" : "Off Duty"}</Badge>
-            </div>
-          ))}
-        </Card>
-
-        <div className="space-y-5">
-          <Card className="p-5 space-y-3">
-            <h2 className="font-bold text-slate-900">Create Staff Member</h2>
-            <Input value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)} placeholder="Full Name" />
-            <Input value={newStaffEmail} onChange={(e) => setNewStaffEmail(e.target.value)} placeholder="Email" />
-            <Input value={newStaffEmp} onChange={(e) => setNewStaffEmp(e.target.value)} placeholder="Employee Code (EMP-201)" />
-            <Select value={newStaffRole} onChange={(e) => setNewStaffRole(e.target.value)}>
-              <option value="cashier">Cashier</option>
-              <option value="kitchen_staff">Kitchen Staff</option>
-              <option value="pickup_staff">Pickup Staff</option>
-              <option value="inventory_manager">Inventory Manager</option>
-              <option value="canteen_manager">Canteen Manager</option>
-            </Select>
-            <Button
-              onClick={async () => {
-                try {
-                  await api.post("/admin/users/staff", {
-                    full_name: newStaffName,
-                    email: newStaffEmail,
-                    password: "StaffUser@123",
-                    employee_code: newStaffEmp,
-                    designation: newStaffRole.replace("_", " "),
-                    role_names: [newStaffRole],
-                    assigned_canteen_id: activeCanteenId,
-                  });
-                  setNewStaffName("");
-                  setNewStaffEmail("");
-                  setNewStaffEmp("");
-                  pushToast("Staff user created", "success");
-                  refetchStaff();
-                } catch (err) {
-                  pushToast(getApiError(err), "error");
-                }
-              }}
-            >
-              Add Staff Account
-            </Button>
-          </Card>
-
-          <Card className="p-5 space-y-3">
-            <h2 className="font-bold text-slate-900">Assign Staff Task ({tasks.length})</h2>
-            <div className="flex gap-2">
-              <Input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder="Task title (e.g. Restock cups)" />
-              <Select value={taskAssignee} onChange={(e) => setTaskAssignee(e.target.value)} className="w-40">
-                <option value="">Any Staff</option>
-                {staffList.map((s) => (
-                  <option key={s.user_id} value={s.user_id}>
-                    {s.full_name}
-                  </option>
-                ))}
-              </Select>
-              <Button
-                size="sm"
-                onClick={async () => {
-                  if (!taskTitle.trim()) return;
-                  try {
-                    await api.post("/staff/tasks", {
-                      canteen_id: activeCanteenId,
-                      assigned_to_user_id: taskAssignee || null,
-                      title: taskTitle,
-                      priority: "normal",
-                    });
-                    setTaskTitle("");
-                    refetchTasks();
-                    pushToast("Task assigned", "success");
-                  } catch (err) {
-                    pushToast(getApiError(err), "error");
-                  }
-                }}
-              >
-                Assign
-              </Button>
-            </div>
-            <div className="space-y-1.5 max-h-36 overflow-y-auto text-xs">
-              {tasks.map((t) => (
-                <div key={t.id} className="flex items-center justify-between border-b border-slate-100 py-1.5">
-                  <span className="font-semibold">{t.title}</span>
-                  <Button
-                    size="sm"
-                    variant={t.status === "done" ? "success" : "outline"}
-                    onClick={async () => {
-                      try {
-                        await api.patch(`/staff/tasks/${t.id}`, { status: t.status === "done" ? "pending" : "done" });
-                        refetchTasks();
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      }
-                    }}
-                  >
-                    {t.status}
-                  </Button>
-                </div>
-              ))}
-            </div>
-          </Card>
+      {/* Live Queue Header & Real-time Badge */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-extrabold text-slate-900">Smart Live Queue & Counter Balancing</h2>
+          <p className="text-xs text-slate-500">
+            Real-time queue order tracking, express counter routing, SLA wait recalculation & auto-removal on handover.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <RealtimeStatusBadge status={queueSyncStatus} lastSyncedAt={queueLastSyncedAt} />
+          <Button size="sm" variant="outline" disabled={escalating} onClick={() => void handleEscalateOverdue()}>
+            <Zap className="h-3.5 w-3.5" /> {escalating ? "Escalating..." : "Auto-Escalate Overdue"}
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => refetchQueue()}>
+            <RefreshCw className="h-3.5 w-3.5" /> Refresh
+          </Button>
         </div>
       </div>
 
-      {/* Shifts & Leave Management */}
-      <div className="grid gap-5 md:grid-cols-2">
-        <Card className="p-5 space-y-3">
-          <h2 className="font-bold text-slate-900 flex items-center gap-2">
-            <Calendar className="h-4 w-4 text-[#76010d]" /> Staff Shift Roster ({shifts.length})
-          </h2>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <Select value={shiftUserId} onChange={(e) => setShiftUserId(e.target.value)}>
-              <option value="">Select Staff Member</option>
-              {staffList.map((s) => (
-                <option key={s.user_id} value={s.user_id}>
-                  {s.full_name}
-                </option>
-              ))}
-            </Select>
-            <Input type="date" value={shiftDate} onChange={(e) => setShiftDate(e.target.value)} />
-            <Input type="time" value={shiftStart} onChange={(e) => setShiftStart(e.target.value)} />
-            <Input type="time" value={shiftEnd} onChange={(e) => setShiftEnd(e.target.value)} />
+      {/* Live KPI Cards */}
+      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <Card className="p-3.5">
+          <div className="text-[11px] font-bold uppercase text-slate-500">Active Queue</div>
+          <div className="mt-1 text-2xl font-black text-slate-900">{queueDash?.active_order_count ?? 0}</div>
+          <div className="text-[11px] text-slate-500">Crowd: {queueDash?.crowd_level || "LOW"}</div>
+        </Card>
+        <Card className="p-3.5">
+          <div className="text-[11px] font-bold uppercase text-amber-700">Waiting Prep</div>
+          <div className="mt-1 text-2xl font-black text-amber-700">{queueDash?.waiting_prep_count ?? 0}</div>
+          <div className="text-[11px] text-slate-500">
+            Placed {queueDash?.placed_count ?? 0} / Acc {queueDash?.accepted_count ?? 0}
           </div>
-          <div className="flex gap-2">
-            <Select value={shiftType} onChange={(e) => setShiftType(e.target.value)}>
-              <option value="regular">Regular</option>
-              <option value="morning">Morning</option>
-              <option value="afternoon">Afternoon</option>
-              <option value="cashier">Cashier</option>
-            </Select>
-            <Button
-              size="sm"
-              onClick={async () => {
-                try {
-                  const uid = shiftUserId || staffList[0]?.user_id;
-                  if (!uid) return pushToast("No staff found", "error");
-                  await api.post("/staff/shifts", {
-                    staff_user_id: uid,
-                    canteen_id: activeCanteenId,
-                    shift_date: shiftDate,
-                    start_time: `${shiftStart}:00`,
-                    end_time: `${shiftEnd}:00`,
-                    shift_type: shiftType,
-                  });
-                  pushToast("Shift scheduled", "success");
-                  refetchShifts();
-                } catch (err) {
-                  pushToast(getApiError(err), "error");
-                }
-              }}
-            >
-              Schedule Shift
-            </Button>
+        </Card>
+        <Card className="p-3.5">
+          <div className="text-[11px] font-bold uppercase text-indigo-700">Preparing</div>
+          <div className="mt-1 text-2xl font-black text-indigo-700">{queueDash?.preparing_count ?? 0}</div>
+          <div className="text-[11px] text-slate-500">Load {queueDash?.kitchen_workload_percent ?? 0}%</div>
+        </Card>
+        <Card className="p-3.5">
+          <div className="text-[11px] font-bold uppercase text-emerald-700">Ready for Pickup</div>
+          <div className="mt-1 text-2xl font-black text-emerald-700">{queueDash?.ready_count ?? 0}</div>
+          <div className="text-[11px] text-slate-500">Removed on completion</div>
+        </Card>
+        <Card className="p-3.5">
+          <div className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1">
+            <Timer className="h-3.5 w-3.5" /> Avg Wait Time
           </div>
-          <div className="space-y-1.5 max-h-40 overflow-y-auto text-xs">
-            {shifts.slice(0, 15).map((sh) => (
-              <div key={sh.id} className="flex items-center justify-between border-b border-slate-100 py-1.5">
-                <span>
-                  <strong>{staffNameById(sh.staff_user_id)}</strong> • {sh.shift_date} ({sh.start_time.slice(0, 5)}–{sh.end_time.slice(0, 5)}) <Badge tone="slate">{sh.status}</Badge>
-                </span>
-                {sh.status !== "open" && (
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await api.delete(`/staff/shifts/${sh.id}`);
-                        refetchShifts();
-                        pushToast("Shift removed", "info");
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      }
-                    }}
-                    className="text-red-600 font-bold hover:underline"
-                  >
-                    Delete
-                  </button>
-                )}
+          <div className="mt-1 text-2xl font-black text-slate-900">{queueDash?.average_wait_minutes ?? 0}m</div>
+          <div className="text-[11px] text-slate-500">{queueDash?.orders_per_minute ?? 0} orders/min</div>
+        </Card>
+        <Card className={`p-3.5 ${delayedOrders.length > 0 ? "border-red-300 bg-red-50/40" : ""}`}>
+          <div className="text-[11px] font-bold uppercase text-red-700 flex items-center gap-1">
+            <AlertTriangle className="h-3.5 w-3.5" /> Delayed / Overdue
+          </div>
+          <div className="mt-1 text-2xl font-black text-red-700">{queueDash?.delayed_order_count ?? 0}</div>
+          <div className="text-[11px] text-slate-500">{queueDash?.on_duty_staff_count ?? 0} staff on duty</div>
+        </Card>
+      </div>
+
+      {delayedOrders.length > 0 && (
+        <div className="rounded-2xl border border-red-200 bg-red-50 p-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs text-red-900 font-semibold">
+            <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
+            <span>
+              <strong>{delayedOrders.length} Delayed Order Alert(s):</strong>{" "}
+              {delayedOrders
+                .slice(0, 4)
+                .map((d) => `${d.token_code || d.order_number} (${d.elapsed_minutes}m / ${d.counter_name})`)
+                .join(", ")}
+            </span>
+          </div>
+          <Button size="sm" variant="danger" disabled={escalating} onClick={() => void handleEscalateOverdue()}>
+            {escalating ? "Escalating..." : "Prioritize Overdue Orders"}
+          </Button>
+        </div>
+      )}
+
+      {/* Counter Load Balancing Overview */}
+      {counters.length > 0 && (
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <Layers className="h-4 w-4 text-[#76010d]" /> Counter Load & Express Capacity
+            </h3>
+            <span className="text-xs text-slate-500">Auto-balanced checkout counter routing active</span>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {counters.map((c) => (
+              <div
+                key={c.counter_id}
+                className={`rounded-xl border p-3 ${
+                  c.is_overloaded ? "border-red-300 bg-red-50/40" : "border-slate-200 bg-slate-50/60"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-bold text-sm text-slate-900 truncate">{c.name}</div>
+                  <Badge tone={c.counter_type === "express" ? "green" : "slate"}>
+                    {String(c.counter_type || "pickup").toUpperCase()}
+                  </Badge>
+                </div>
+                <div className="mt-1 text-xs text-slate-600">
+                  In Queue: <strong>{c.waiting_orders ?? c.active_orders}</strong> / {c.max_queue_capacity} • Ready:{" "}
+                  <strong>{c.ready_orders ?? 0}</strong> ({c.utilization_percent}%)
+                </div>
+                <div className="mt-2 h-2 w-full rounded-full bg-slate-200 overflow-hidden">
+                  <div
+                    className={`h-full transition-all ${
+                      c.utilization_percent >= 85
+                        ? "bg-red-500"
+                        : c.utilization_percent >= 55
+                        ? "bg-amber-500"
+                        : "bg-emerald-500"
+                    }`}
+                    style={{ width: `${Math.min(100, c.utilization_percent)}%` }}
+                  />
+                </div>
               </div>
             ))}
           </div>
         </Card>
+      )}
 
-        <Card className="p-5 space-y-3">
-          <h2 className="font-bold text-slate-900">Attendance & Leave Approvals ({attendance.length})</h2>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <Select value={leaveUserId} onChange={(e) => setLeaveUserId(e.target.value)}>
-              <option value="">Select Staff for Leave</option>
-              {staffList.map((s) => (
-                <option key={s.user_id} value={s.user_id}>
-                  {s.full_name}
-                </option>
-              ))}
-            </Select>
-            <Input type="date" value={leaveDate} onChange={(e) => setLeaveDate(e.target.value)} />
+      {/* Active Queue Table (Auto-excludes COMPLETED/CANCELLED/REJECTED) */}
+      <Card className="p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+            <Flame className="h-4 w-4 text-amber-600" /> Live Waiting & Ready Queue ({activeQueue.length})
+          </h3>
+          <span className="text-xs text-slate-500">Priority orders lead queue • Completed orders auto-remove</span>
+        </div>
+        {activeQueue.length === 0 ? (
+          <div className="py-8 text-center text-sm text-slate-500">
+            No active orders currently in queue. Completed orders are automatically cleared.
           </div>
-          <div className="flex gap-2">
-            <Input value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="Leave reason..." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-500 uppercase text-[10px]">
+                  <th className="py-2 pr-3">Pos</th>
+                  <th className="py-2 pr-3">Token / Order</th>
+                  <th className="py-2 pr-3">Customer</th>
+                  <th className="py-2 pr-3">Status</th>
+                  <th className="py-2 pr-3">Wait / Elapsed</th>
+                  <th className="py-2 pr-3">Assigned Counter</th>
+                  <th className="py-2 text-right">Priority</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {activeQueue.map((row) => (
+                  <tr key={row.order_id} className={row.is_overdue ? "bg-red-50/40" : ""}>
+                    <td className="py-2 pr-3 font-black text-[#5d010a]">
+                      {row.status === "READY" ? "RDY" : `#${row.queue_position ?? "-"}`}
+                    </td>
+                    <td className="py-2 pr-3">
+                      <div className="font-bold text-slate-900">
+                        {row.token_code || row.order_number}{" "}
+                        {row.is_priority && <Badge tone="red">PRIORITY</Badge>}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {row.order_number} • {row.item_count} items
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3 font-medium text-slate-800">{row.customer_name}</td>
+                    <td className="py-2 pr-3">
+                      <Badge
+                        tone={
+                          row.status === "READY"
+                            ? "green"
+                            : row.status === "PREPARING"
+                            ? "blue"
+                            : "amber"
+                        }
+                      >
+                        {row.status}
+                      </Badge>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <div className="font-semibold text-slate-800">
+                        {row.status === "READY" ? "0m wait" : `~${row.dynamic_wait_minutes ?? row.estimated_prep_minutes}m ETA`}
+                      </div>
+                      <div className={`text-[11px] ${row.is_overdue ? "text-red-700 font-bold" : "text-slate-500"}`}>
+                        {row.elapsed_minutes}m elapsed{row.is_overdue ? " • OVERDUE" : ""}
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <select
+                        aria-label={`Counter for ${row.order_number}`}
+                        disabled={busyOrderId === row.order_id || counters.length === 0}
+                        value={row.counter_id}
+                        onChange={(e) => void handleReassignCounter(row.order_id, e.target.value)}
+                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-800"
+                      >
+                        {counters.map((c) => (
+                          <option key={c.counter_id} value={c.counter_id}>
+                            {c.name} ({c.counter_type})
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="py-2 text-right">
+                      <Button
+                        size="sm"
+                        variant={row.is_priority ? "danger" : "outline"}
+                        disabled={busyOrderId === row.order_id}
+                        onClick={() => void handleTogglePriority(row.order_id, !row.is_priority)}
+                      >
+                        {row.is_priority ? "Clear Priority" : "Prioritize"}
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      {/* Crowd Control + Pickup Slot Configuration */}
+      <div className="grid gap-5 md:grid-cols-2">
+        <Card className="p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="font-bold text-slate-900">Queue & Crowd Controls</h2>
+              <div className="text-xs text-slate-500">
+                Kitchen Workload: {queueDash?.kitchen_workload_percent ?? 0}% • Staff On Duty:{" "}
+                {queueDash?.on_duty_staff_count ?? 1}
+              </div>
+            </div>
             <Button
               size="sm"
+              variant={queueDash?.ordering_paused ? "success" : "danger"}
               onClick={async () => {
                 try {
-                  const uid = leaveUserId || staffList[0]?.user_id;
-                  if (!uid) return pushToast("Select staff first", "error");
-                  await api.post("/staff/attendance/leave", {
-                    staff_user_id: uid,
-                    canteen_id: activeCanteenId,
-                    attendance_date: leaveDate,
-                    reason: leaveReason || "Manager recorded leave",
+                  await api.patch(`/queue/canteens/${activeCanteenId}/controls`, {
+                    ordering_paused: !queueDash?.ordering_paused,
+                    pause_reason: !queueDash?.ordering_paused ? "Paused by manager due to peak crowd" : null,
                   });
-                  setLeaveReason("");
-                  refetchAttendance();
-                  pushToast("Leave recorded", "success");
+                  refetchQueue();
                 } catch (err) {
                   pushToast(getApiError(err), "error");
                 }
               }}
             >
-              Record Leave
+              {queueDash?.ordering_paused ? "Resume Ordering" : "Pause Ordering"}
             </Button>
           </div>
-          <div className="space-y-1.5 max-h-40 overflow-y-auto text-xs">
-            {attendance.slice(0, 15).map((att) => (
-              <div key={att.id} className="flex items-center justify-between border-b border-slate-100 py-1.5">
-                <span>
-                  <strong>{staffNameById(att.staff_user_id)}</strong> • {att.attendance_date} • <Badge tone={att.status === "present" ? "green" : att.status === "leave_pending" ? "amber" : "slate"}>{att.status}</Badge>
-                </span>
-                {att.status === "leave_pending" && (
-                  <div className="flex gap-1">
+
+          <div className="grid grid-cols-2 gap-2 border-t border-slate-100 pt-3">
+            <label className="text-[11px] font-semibold text-slate-600 space-y-1">
+              <span>Max Concurrent Orders</span>
+              <Input type="number" value={maxConcurrent} onChange={(e) => setMaxConcurrent(e.target.value)} />
+            </label>
+            <label className="text-[11px] font-semibold text-slate-600 space-y-1">
+              <span>Default Prep (mins)</span>
+              <Input type="number" value={defaultPrepMins} onChange={(e) => setDefaultPrepMins(e.target.value)} />
+            </label>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              onClick={async () => {
+                try {
+                  await api.patch(`/queue/canteens/${activeCanteenId}/controls`, {
+                    max_concurrent_orders: Number(maxConcurrent),
+                    default_prep_time_minutes: Number(defaultPrepMins),
+                  });
+                  pushToast("Queue controls updated", "success");
+                  refetchQueue();
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
+              }}
+            >
+              Save Queue Settings
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={async () => {
+                try {
+                  await api.patch(`/queue/canteens/${activeCanteenId}/controls`, {
+                    auto_throttle_enabled: !queueDash?.auto_throttle_enabled,
+                  });
+                  pushToast(
+                    queueDash?.auto_throttle_enabled ? "Auto-throttle disabled" : "Auto-throttle enabled",
+                    "info"
+                  );
+                  refetchQueue();
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
+              }}
+            >
+              Auto-Throttle: {queueDash?.auto_throttle_enabled ? "ON" : "OFF"}
+            </Button>
+          </div>
+        </Card>
+
+        <Card className="p-5 space-y-3">
+          <h2 className="font-bold text-slate-900">Create / Update Pickup Slot</h2>
+          <div className="grid grid-cols-2 gap-2">
+            <Input type="date" value={slotDate} onChange={(e) => setSlotDate(e.target.value)} />
+            <Input type="number" value={slotCap} onChange={(e) => setSlotCap(e.target.value)} placeholder="Slot capacity" />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} />
+            <Input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} />
+          </div>
+          <Button
+            size="sm"
+            onClick={async () => {
+              try {
+                await api.post(`/queue/canteens/${activeCanteenId}/slots`, {
+                  slot_date: slotDate,
+                  start_time: `${startTime}:00`,
+                  end_time: `${endTime}:00`,
+                  capacity: Number(slotCap),
+                  is_active: true,
+                });
+                refetchSlots();
+                pushToast("Pickup slot configured", "success");
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          >
+            Save Pickup Slot
+          </Button>
+
+          {pickupSlots.length > 0 && (
+            <div className="border-t border-slate-100 pt-3 space-y-1.5">
+              <div className="text-[11px] font-bold uppercase text-slate-500">
+                Configured Upcoming Slots ({pickupSlots.length})
+              </div>
+              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                {pickupSlots.map((s) => (
+                  <div
+                    key={s.id}
+                    className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-1.5 text-xs"
+                  >
+                    <span>
+                      <strong>{s.slot_date}</strong> • {String(s.start_time).slice(0, 5)}–{String(s.end_time).slice(0, 5)}{" "}
+                      <span className="text-slate-500">
+                        ({s.reserved_count}/{s.capacity} reserved)
+                      </span>
+                    </span>
                     <Button
                       size="sm"
-                      variant="success"
+                      variant="outline"
                       onClick={async () => {
                         try {
-                          await api.patch(`/staff/attendance/${att.id}/review`, { approved: true });
-                          refetchAttendance();
-                          pushToast("Leave approved", "success");
+                          await api.post(`/queue/canteens/${activeCanteenId}/slots`, {
+                            slot_date: s.slot_date,
+                            start_time: s.start_time,
+                            end_time: s.end_time,
+                            capacity: s.capacity,
+                            is_active: false,
+                          });
+                          refetchSlots();
+                          pushToast("Pickup slot disabled", "info");
                         } catch (err) {
                           pushToast(getApiError(err), "error");
                         }
                       }}
                     >
-                      Approve
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      onClick={async () => {
-                        try {
-                          await api.patch(`/staff/attendance/${att.id}/review`, { approved: false });
-                          refetchAttendance();
-                          pushToast("Leave rejected", "info");
-                        } catch (err) {
-                          pushToast(getApiError(err), "error");
-                        }
-                      }}
-                    >
-                      Reject
+                      Disable
                     </Button>
                   </div>
-                )}
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          )}
         </Card>
       </div>
     </div>

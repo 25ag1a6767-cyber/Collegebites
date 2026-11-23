@@ -114,9 +114,24 @@ class StaffProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     assigned_canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("canteens.id", ondelete="SET NULL"), index=True)
     assigned_counter_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("counters.id", ondelete="SET NULL"))
     assigned_kitchen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("kitchens.id", ondelete="SET NULL"))
+    availability_status: Mapped[str] = mapped_column(String(32), nullable=False, default="available")
+    weekly_hours_target: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
     is_on_duty: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     user: Mapped["User"] = relationship(back_populates="staff_profile")
+
+
+class UserPermission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "user_permissions"
+    __table_args__ = (UniqueConstraint("user_id", "permission_id", name="uq_user_permissions_pair"),)
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    permission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    granted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    permission: Mapped["Permission"] = relationship()
 
 
 class SessionRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
