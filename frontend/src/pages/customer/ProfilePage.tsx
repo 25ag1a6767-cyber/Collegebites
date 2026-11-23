@@ -50,6 +50,30 @@ export const ProfilePage: React.FC = () => {
     queryFn: async () => (await api.get("/auth/sessions")).data,
   });
 
+  const { data: mealPlans = [] } = useQuery<any[]>({
+    queryKey: ["available-meal-plans"],
+    enabled: Boolean(user),
+    queryFn: async () => (await api.get("/meal-plans")).data,
+  });
+
+  const { data: mySubscriptions = [], refetch: refetchMySubs } = useQuery<any[]>({
+    queryKey: ["my-meal-subscriptions"],
+    enabled: Boolean(user),
+    queryFn: async () => (await api.get("/meal-plans/my-subscriptions")).data,
+  });
+
+  const { data: collegeEvents = [] } = useQuery<any[]>({
+    queryKey: ["active-college-events"],
+    enabled: Boolean(user),
+    queryFn: async () => (await api.get("/events")).data,
+  });
+
+  const { data: myBulkOrders = [] } = useQuery<any[]>({
+    queryKey: ["my-bulk-orders"],
+    enabled: Boolean(user),
+    queryFn: async () => (await api.get("/events/bulk-orders/my")).data,
+  });
+
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
   const [collegeId, setCollegeId] = useState("");
@@ -398,6 +422,94 @@ export const ProfilePage: React.FC = () => {
           </div>
         )}
       </Card>
+
+      {/* Student Meal Plans & College Events Bulk Orders */}
+      <div className="grid gap-6 md:grid-cols-2">
+        <Card className="p-5 space-y-3">
+          <div className="font-bold text-slate-900">Student Meal Plans ({mySubscriptions.length} Subscribed)</div>
+          {mySubscriptions.length > 0 && (
+            <div className="space-y-2 text-xs">
+              {mySubscriptions.map((sub: any) => (
+                <div key={sub.id} className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-1">
+                  <div className="flex justify-between font-bold text-slate-900">
+                    <span>{sub.meal_plan_name} ({sub.subscription_number})</span>
+                    <Badge tone={sub.status === "active" ? "green" : "amber"}>{sub.status.toUpperCase()}</Badge>
+                  </div>
+                  <div className="text-slate-700">
+                    Remaining Meals: <strong>{sub.remaining_meals} / {sub.total_meals}</strong> • Expires: {(sub.expires_at || "").slice(0, 10) || "Pending"}
+                  </div>
+                  {sub.redemption_code && (
+                    <div className="font-mono text-[11px] bg-white border border-emerald-200 rounded px-2 py-1 text-emerald-900">
+                      Redemption Code: <strong>{sub.redemption_code}</strong> • QR: {sub.redemption_qr_payload}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="space-y-2 pt-2 border-t border-slate-100 text-xs">
+            <div className="font-bold text-slate-600 uppercase text-[11px]">Available Campus Meal Plans ({mealPlans.length})</div>
+            {mealPlans.length === 0 ? (
+              <div className="text-slate-500">No active meal plans configured right now.</div>
+            ) : (
+              mealPlans.map((mp: any) => (
+                <div key={mp.id} className="flex items-center justify-between rounded-xl border border-slate-200 p-2.5">
+                  <div>
+                    <div className="font-bold text-slate-900">{mp.name}</div>
+                    <div className="text-[11px] text-slate-500">
+                      {mp.total_meals} Meals • {mp.validity_days} Days • ₹{mp.total_price}
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        await api.post(`/meal-plans/${mp.id}/subscribe`, { payment_method: "razorpay" });
+                        pushToast("Subscription created! Complete payment to activate.", "info");
+                        refetchMySubs();
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Subscribe
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+        </Card>
+
+        <Card className="p-5 space-y-3">
+          <div className="font-bold text-slate-900">College Events &amp; Bulk Orders ({myBulkOrders.length})</div>
+          <div className="space-y-2 text-xs max-h-60 overflow-y-auto">
+            {myBulkOrders.map((bo: any) => (
+              <div key={bo.id} className="rounded-xl border border-slate-200 p-2.5 space-y-1">
+                <div className="flex justify-between font-bold">
+                  <span>{bo.bulk_order_number} — {bo.event_name}</span>
+                  <Badge tone={bo.status === "completed" ? "green" : "amber"}>{bo.status}</Badge>
+                </div>
+                <div className="text-slate-600">
+                  {bo.total_quantity} portions • ₹{bo.total_amount} • Payment: {bo.payment_status}
+                  {bo.group_pickup_token ? ` • Token: ${bo.group_pickup_token}` : ""}
+                </div>
+              </div>
+            ))}
+            {collegeEvents.length === 0 ? (
+              <div className="text-slate-500">No active college events open for bulk ordering right now.</div>
+            ) : (
+              collegeEvents.map((ev: any) => (
+                <div key={ev.id} className="rounded-xl border border-blue-200 bg-blue-50/40 p-2.5">
+                  <div className="font-bold text-slate-900">{ev.name} ({ev.department})</div>
+                  <div className="text-[11px] text-slate-600">
+                    Event Date: {ev.event_date} • Venue: {ev.location} • Min/Max Qty: {ev.min_order_quantity}–{ev.max_order_quantity}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </Card>
+      </div>
 
       {/* Password, Sessions & Account Closure */}
       <div className="grid gap-6 md:grid-cols-2">

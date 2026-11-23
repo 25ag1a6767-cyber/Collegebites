@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -17,14 +17,20 @@ from app.core.permissions import (
     AuthenticatedPrincipal,
     enforce_canteen_scope,
     get_current_principal,
+    get_optional_principal,
     require_roles,
     scoped_canteen_for_principal,
 )
-from app.models.promotion import LoyaltyAccount, LoyaltyTransaction, Promotion
+from app.models.menu import FoodCategory, FoodItem
+from app.models.order import Order
+from app.models.promotion import Coupon, CouponRedemption, LoyaltyAccount, LoyaltyTransaction, Promotion
 from app.services.audit_service import record_audit_log
 from app.services.auth_service import recompute_loyalty_tier
+from app.services.cart_service import evaluate_coupon_discount
 
 router = APIRouter(prefix="/promotions", tags=["Offers, Banners & Loyalty"])
+
+PROMO_ADMIN_ROLES = (ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
 
 
 class PromotionCreateIn(BaseModel):
@@ -33,8 +39,52 @@ class PromotionCreateIn(BaseModel):
     subtitle: Optional[str] = None
     badge_text: Optional[str] = None
     promo_type: str = Field(default="banner", pattern="^(banner|flash_offer|combo)$")
+    coupon_code: Optional[str] = Field(default=None, max_length=48)
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
+
+
+class CouponCreateIn(BaseModel):
+    code: str = Field(min_length=2, max_length=48)
+    title: str = Field(min_length=2, max_length=160)
+    description: Optional[str] = None
+    canteen_id: Optional[UUID] = None
+    discount_type: str = Field(pattern="^(percentage|fixed)$")
+    discount_value: Decimal = Field(gt=0)
+    target_category_id: Optional[UUID] = None
+    target_food_item_id: Optional[UUID] = None
+    min_order_amount: Decimal = Field(default=Decimal("0.00"), ge=0)
+    max_discount_amount: Optional[Decimal] = Field(default=None, gt=0)
+    first_order_only: bool = False
+    usage_limit_total: Optional[int] = Field(default=None, ge=1)
+    usage_limit_per_user: int = Field(default=1, ge=1)
+    starts_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    is_active: bool = True
+
+
+class CouponUpdateIn(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=2, max_length=160)
+    description: Optional[str] = None
+    discount_type: Optional[str] = Field(default=None, pattern="^(percentage|fixed)$")
+    discount_value: Optional[Decimal] = Field(default=None, gt=0)
+    target_category_id: Optional[UUID] = None
+    target_food_item_id: Optional[UUID] = None
+    min_order_amount: Optional[Decimal] = Field(default=None, ge=0)
+    max_discount_amount: Optional[Decimal] = Field(default=None, gt=0)
+    first_order_only: Optional[bool] = None
+    usage_limit_total: Optional[int] = Field(default=None, ge=1)
+    usage_limit_per_user: Optional[int] = Field(default=None, ge=1)
+    starts_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    is_active: Optional[bool] = None
+
+
+class CouponValidateIn(BaseModel):
+    canteen_id: UUID
+    coupon_code: str = Field(min_length=2, max_length=48)
+    subtotal_amount: Decimal = Field(ge=0)
+    items: list[dict] = []
 
 
 @router.get("")
@@ -140,3 +190,208 @@ def apply_referral(
     ])
     db.commit()
     return {"message": "Referral bonus credited (+50 pts each)", "points_balance": my_acct.points_balance}
+
+
+def _serialize_coupon(
+    c: Coupon,
+    *,
+    cat_map: Optional[dict[UUID, str]] = None,
+    food_map: Optional[dict[UUID, str]] = None,
+) -> dict:
+    return {
+        "id": str(c.id),
+        "code": c.code,
+        "title": c.title,
+        "description": c.description,
+        "canteen_id": str(c.canteen_id) if c.canteen_id else None,
+        "discount_type": c.discount_type,
+        "discount_value": str(c.discount_value),
+        "target_category_id": str(c.target_category_id) if c.target_category_id else None,
+        "target_category_name": (cat_map or {}).get(c.target_category_id) if c.target_category_id else None,
+        "target_food_item_id": str(c.target_food_item_id) if c.target_food_item_id else None,
+        "target_food_item_name": (food_map or {}).get(c.target_food_item_id) if c.target_food_item_id else None,
+        "min_order_amount": str(c.min_order_amount),
+        "max_discount_amount": str(c.max_discount_amount) if c.max_discount_amount is not None else None,
+        "first_order_only": c.first_order_only,
+        "usage_limit_total": c.usage_limit_total,
+        "usage_limit_per_user": c.usage_limit_per_user,
+        "times_used": c.times_used,
+        "starts_at": c.starts_at.isoformat() if c.starts_at else None,
+        "expires_at": c.expires_at.isoformat() if c.expires_at else None,
+        "is_active": c.is_active,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
+
+
+@router.get("/coupons")
+def list_coupons(
+    canteen_id: Optional[UUID] = Query(default=None),
+    include_inactive: bool = Query(default=False),
+    db: Session = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    stmt = select(Coupon).order_by(Coupon.created_at.desc())
+    if not include_inactive:
+        stmt = stmt.where(Coupon.is_active.is_(True))
+    rows = list(db.scalars(stmt).all())
+    if not include_inactive:
+        filtered = []
+        for r in rows:
+            st = (r.starts_at if r.starts_at.tzinfo else r.starts_at.replace(tzinfo=timezone.utc)) if r.starts_at else None
+            ex = (r.expires_at if r.expires_at.tzinfo else r.expires_at.replace(tzinfo=timezone.utc)) if r.expires_at else None
+            if st and now < st:
+                continue
+            if ex and now >= ex:
+                continue
+            if r.usage_limit_total is not None and r.times_used >= r.usage_limit_total:
+                continue
+            filtered.append(r)
+        rows = filtered
+    if canteen_id:
+        rows = [r for r in rows if r.canteen_id is None or r.canteen_id == canteen_id]
+    cat_map = {c.id: c.name for c in db.scalars(select(FoodCategory)).all()}
+    food_map = {f.id: f.name for f in db.scalars(select(FoodItem)).all()}
+    return [_serialize_coupon(c, cat_map=cat_map, food_map=food_map) for c in rows]
+
+
+@router.post("/coupons", status_code=status.HTTP_201_CREATED)
+def create_coupon(
+    payload: CouponCreateIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*PROMO_ADMIN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    code = payload.code.strip().upper()
+    if db.scalar(select(Coupon).where(Coupon.code == code)):
+        raise HTTPException(status_code=409, detail="Coupon code already exists")
+    if payload.discount_type == "percentage" and payload.discount_value > Decimal("100.00"):
+        raise HTTPException(status_code=400, detail="Percentage discount cannot exceed 100%")
+    eff_cid = payload.canteen_id
+    if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        eff_cid = scoped_canteen_for_principal(principal, payload.canteen_id)
+
+    data = payload.model_dump()
+    data["code"] = code
+    data["canteen_id"] = eff_cid
+    coupon = Coupon(**data)
+    db.add(coupon)
+    record_audit_log(
+        db,
+        action="coupon.created",
+        entity_type="coupon",
+        entity_id=code,
+        actor_user_id=principal.user.id,
+        details={"discount_type": coupon.discount_type, "discount_value": str(coupon.discount_value)},
+    )
+    db.commit()
+    db.refresh(coupon)
+    return _serialize_coupon(coupon)
+
+
+@router.patch("/coupons/{coupon_id}")
+def update_coupon(
+    coupon_id: UUID,
+    payload: CouponUpdateIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*PROMO_ADMIN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    coupon = db.get(Coupon, coupon_id)
+    if not coupon:
+        raise HTTPException(status_code=404, detail="Coupon not found")
+    if coupon.canteen_id:
+        enforce_canteen_scope(principal, coupon.canteen_id)
+    updates = payload.model_dump(exclude_unset=True)
+    for k, v in updates.items():
+        setattr(coupon, k, v)
+    if coupon.discount_type == "percentage" and coupon.discount_value > Decimal("100.00"):
+        raise HTTPException(status_code=400, detail="Percentage discount cannot exceed 100%")
+    record_audit_log(
+        db,
+        action="coupon.updated",
+        entity_type="coupon",
+        entity_id=coupon.code,
+        actor_user_id=principal.user.id,
+    )
+    db.commit()
+    db.refresh(coupon)
+    return _serialize_coupon(coupon)
+
+
+@router.post("/coupons/validate")
+def validate_coupon_endpoint(
+    payload: CouponValidateIn,
+    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
+    db: Session = Depends(get_db),
+):
+    line_items = payload.items or [
+        {"food_item_id": None, "category_id": None, "line_subtotal": payload.subtotal_amount}
+    ]
+    res = evaluate_coupon_discount(
+        db,
+        coupon_code=payload.coupon_code,
+        canteen_id=payload.canteen_id,
+        line_items=line_items,
+        subtotal=payload.subtotal_amount,
+        user_id=principal.user.id if principal else None,
+        raise_on_invalid=True,
+    )
+    return {
+        "valid": res["valid"],
+        "code": res["code"],
+        "discount_amount": str(res["discount_amount"]),
+        "payable_before_tax": str(max(Decimal("0.00"), payload.subtotal_amount - res["discount_amount"])),
+        "message": res["message"],
+    }
+
+
+@router.get("/campaigns/report")
+def get_campaigns_performance_report(
+    canteen_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*PROMO_ADMIN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    eff_cid = scoped_canteen_for_principal(principal, canteen_id)
+    stmt = select(Coupon).order_by(Coupon.created_at.desc())
+    if eff_cid:
+        stmt = stmt.where((Coupon.canteen_id == eff_cid) | (Coupon.canteen_id.is_(None)))
+    coupons = list(db.scalars(stmt).all())
+
+    redemptions = db.execute(
+        select(
+            CouponRedemption.coupon_id,
+            func.count(CouponRedemption.id),
+            func.coalesce(func.sum(CouponRedemption.discount_applied), 0),
+            func.coalesce(func.sum(Order.total_amount), 0),
+        )
+        .join(Order, Order.id == CouponRedemption.order_id)
+        .where(Order.status.not_in(["CANCELLED", "REJECTED", "PAYMENT_FAILED"]))
+        .group_by(CouponRedemption.coupon_id)
+    ).all()
+    stats_map = {
+        cid: {
+            "redemptions_count": int(cnt or 0),
+            "total_discount_given": Decimal(str(disc or 0)).quantize(Decimal("0.01")),
+            "attributed_order_revenue": Decimal(str(rev or 0)).quantize(Decimal("0.01")),
+        }
+        for cid, cnt, disc, rev in redemptions
+    }
+
+    total_redemptions = sum(s["redemptions_count"] for s in stats_map.values())
+    total_discount = sum((s["total_discount_given"] for s in stats_map.values()), Decimal("0.00")).quantize(Decimal("0.01"))
+    total_revenue = sum((s["attributed_order_revenue"] for s in stats_map.values()), Decimal("0.00")).quantize(Decimal("0.01"))
+
+    return {
+        "total_campaigns": len(coupons),
+        "active_campaigns": sum(1 for c in coupons if c.is_active),
+        "total_redemptions": total_redemptions,
+        "total_discount_given": str(total_discount),
+        "attributed_order_revenue": str(total_revenue),
+        "campaigns": [
+            {
+                **_serialize_coupon(c),
+                "redemptions_count": stats_map.get(c.id, {}).get("redemptions_count", c.times_used),
+                "total_discount_given": str(stats_map.get(c.id, {}).get("total_discount_given", Decimal("0.00"))),
+                "attributed_order_revenue": str(stats_map.get(c.id, {}).get("attributed_order_revenue", Decimal("0.00"))),
+            }
+            for c in coupons
+        ],
+    }

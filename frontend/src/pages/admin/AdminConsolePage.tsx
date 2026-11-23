@@ -19,6 +19,8 @@ import { OrdersUsersTab } from "./components/OrdersUsersTab";
 import { ReconciliationPanel } from "./components/ReconciliationPanel";
 import { SecurityMonitorPanel } from "./components/SecurityMonitorPanel";
 import { WebsiteQrTab } from "./components/WebsiteQrTab";
+import { OperationsControlCenterPanel } from "./components/OperationsControlCenterPanel";
+import { MealPlansEventsInvoicesTab } from "./components/MealPlansEventsInvoicesTab";
 
 export const AdminConsolePage: React.FC = () => {
   const { pushToast } = useToast();
@@ -28,8 +30,24 @@ export const AdminConsolePage: React.FC = () => {
     (s) => s.pendingQueue.filter((q) => q.status === "pending" || q.status === "conflict").length
   );
   const [tab, setTab] = useState<
-    "analytics" | "orders" | "locations" | "menu" | "qr" | "website_qr" | "queue" | "staff" | "promotions" | "support" | "reconciliation" | "security" | "backup" | "network" | "system"
-  >("analytics");
+    | "control_center"
+    | "analytics"
+    | "orders"
+    | "meal_events_invoices"
+    | "locations"
+    | "menu"
+    | "qr"
+    | "website_qr"
+    | "queue"
+    | "staff"
+    | "promotions"
+    | "support"
+    | "reconciliation"
+    | "security"
+    | "backup"
+    | "network"
+    | "system"
+  >("control_center");
 
   const { data: college, refetch: refetchCollege } = useQuery<CollegeSettings>({
     queryKey: ["college-settings"],
@@ -79,7 +97,7 @@ export const AdminConsolePage: React.FC = () => {
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
     queryKey: ["admin-menu", activeCanteenId],
-    enabled: Boolean(activeCanteenId && tab === "menu"),
+    enabled: Boolean(activeCanteenId && (tab === "menu" || tab === "meal_events_invoices")),
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items?include_inactive=true`)).data,
   });
 
@@ -170,15 +188,17 @@ export const AdminConsolePage: React.FC = () => {
 
       <div className="no-print flex flex-wrap gap-2">
         {[
+          { k: "control_center", l: "Control Center" },
           { k: "analytics", l: "Analytics & Reports" },
           { k: "orders", l: "Orders & Users" },
+          { k: "meal_events_invoices", l: "Meal Plans, Events & Invoices" },
           { k: "locations", l: "Locations, Counters & Hours" },
           { k: "menu", l: "Menus & CSV" },
           { k: "qr", l: "Location QR Codes" },
           ...(isCollegeAdmin ? [{ k: "website_qr", l: "Website QR Generator" }] : []),
           { k: "queue", l: "Queue, Crowd & Slots" },
           { k: "staff", l: "Staff, Attendance & Tasks" },
-          { k: "promotions", l: "Announcements & Banners" },
+          { k: "promotions", l: "Offers, Campaigns & Banners" },
           { k: "support", l: "Support Tickets" },
           { k: "reconciliation", l: "Reconciliation" },
           { k: "security", l: "Security & Fraud" },
@@ -196,6 +216,18 @@ export const AdminConsolePage: React.FC = () => {
           </Button>
         ))}
       </div>
+
+      {tab === "control_center" && (
+        <OperationsControlCenterPanel activeCanteenId={activeCanteenId} isCollegeAdmin={isCollegeAdmin} />
+      )}
+
+      {tab === "meal_events_invoices" && (
+        <MealPlansEventsInvoicesTab
+          activeCanteenId={activeCanteenId}
+          menuItems={menuItems}
+          downloadBlob={downloadBlob}
+        />
+      )}
 
       {tab === "analytics" && report && (
         <BiAnalyticsPanel
@@ -280,7 +312,7 @@ export const AdminConsolePage: React.FC = () => {
                       </option>
                     ))}
                   </Select>
-                  {t.status !== "resolved" && (
+                  {t.status !== "resolved" && t.status !== "closed" && (
                     <Button
                       size="sm"
                       variant="success"
@@ -295,6 +327,26 @@ export const AdminConsolePage: React.FC = () => {
                       }}
                     >
                       Resolve
+                    </Button>
+                  )}
+                  {t.status !== "closed" && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={async () => {
+                        try {
+                          await api.patch(`/support/tickets/${t.id}/status`, {
+                            status: "closed",
+                            note: "Closed by admin after verification",
+                          });
+                          pushToast("Ticket closed", "info");
+                          refetchTickets();
+                        } catch (err) {
+                          pushToast(getApiError(err), "error");
+                        }
+                      }}
+                    >
+                      Close
                     </Button>
                   )}
                 </div>

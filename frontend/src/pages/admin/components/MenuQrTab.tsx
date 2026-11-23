@@ -98,6 +98,13 @@ export const MenuTab: React.FC<{
   const [editDesc, setEditDesc] = useState("");
   const [editImg, setEditImg] = useState("");
   const [editAllergens, setEditAllergens] = useState("");
+  const [editCalories, setEditCalories] = useState("");
+  const [editProtein, setEditProtein] = useState("");
+  const [editCarbs, setEditCarbs] = useState("");
+  const [editFat, setEditFat] = useState("");
+  const [editFiber, setEditFiber] = useState("");
+  const [editIngredientsText, setEditIngredientsText] = useState("");
+  const [editNutritionVerified, setEditNutritionVerified] = useState(false);
   const [editAvailable, setEditAvailable] = useState(true);
   const [editActive, setEditActive] = useState(true);
   const [editFeatured, setEditFeatured] = useState(false);
@@ -148,6 +155,14 @@ export const MenuTab: React.FC<{
     setEditDesc(it.description || "");
     setEditImg(it.images?.[0]?.image_url || "");
     setEditAllergens((it.allergens || []).map((a) => a.name).join(", "));
+    setEditCalories(it.calories != null ? String(it.calories) : "");
+    const nInfo: any = it.nutrition_info || {};
+    setEditProtein(nInfo.protein_g != null ? String(nInfo.protein_g) : "");
+    setEditCarbs(nInfo.carbs_g != null ? String(nInfo.carbs_g) : "");
+    setEditFat(nInfo.fat_g != null ? String(nInfo.fat_g) : "");
+    setEditFiber(nInfo.fiber_g != null ? String(nInfo.fiber_g) : "");
+    setEditIngredientsText(it.ingredients_text || "");
+    setEditNutritionVerified(Boolean(it.nutrition_verified));
     setEditAvailable(Boolean(it.is_available));
     setEditActive(Boolean(it.is_active));
     setEditFeatured(Boolean(it.is_featured));
@@ -880,6 +895,31 @@ export const MenuTab: React.FC<{
               <label className="mb-1 block font-bold text-slate-600">Allergens (comma-separated)</label>
               <Input value={editAllergens} onChange={(e) => setEditAllergens(e.target.value)} placeholder="Dairy, Gluten, Nuts" />
             </div>
+            <div className="rounded-xl border border-slate-200 p-3 space-y-2 bg-slate-50/60">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-700">Nutrition &amp; Ingredients (Phase 5)</span>
+                <label className="flex items-center gap-1.5 font-semibold text-emerald-800">
+                  <input
+                    type="checkbox"
+                    checked={editNutritionVerified}
+                    onChange={(e) => setEditNutritionVerified(e.target.checked)}
+                  />
+                  Verified Nutrition &amp; Allergen Data
+                </label>
+              </div>
+              <div className="grid grid-cols-5 gap-1.5">
+                <Input type="number" min="0" value={editCalories} onChange={(e) => setEditCalories(e.target.value)} placeholder="Kcal" />
+                <Input type="number" min="0" step="0.1" value={editProtein} onChange={(e) => setEditProtein(e.target.value)} placeholder="Protein g" />
+                <Input type="number" min="0" step="0.1" value={editCarbs} onChange={(e) => setEditCarbs(e.target.value)} placeholder="Carbs g" />
+                <Input type="number" min="0" step="0.1" value={editFat} onChange={(e) => setEditFat(e.target.value)} placeholder="Fat g" />
+                <Input type="number" min="0" step="0.1" value={editFiber} onChange={(e) => setEditFiber(e.target.value)} placeholder="Fiber g" />
+              </div>
+              <Input
+                value={editIngredientsText}
+                onChange={(e) => setEditIngredientsText(e.target.value)}
+                placeholder="Ingredients summary (e.g. Basmati rice, paneer, ghee, spices)"
+              />
+            </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
               <div>
                 <label className="mb-1 block font-bold text-slate-600">Daily From</label>
@@ -942,6 +982,15 @@ export const MenuTab: React.FC<{
                     description: editDesc,
                     image_url: editImg.trim() || null,
                     allergen_names: allergens,
+                    calories: editCalories ? Number(editCalories) : null,
+                    nutrition_verified: editNutritionVerified,
+                    ingredients_text: editIngredientsText.trim() || null,
+                    nutrition_info: {
+                      ...(editProtein ? { protein_g: Number(editProtein) } : {}),
+                      ...(editCarbs ? { carbs_g: Number(editCarbs) } : {}),
+                      ...(editFat ? { fat_g: Number(editFat) } : {}),
+                      ...(editFiber ? { fiber_g: Number(editFiber) } : {}),
+                    },
                     is_available: editAvailable,
                     is_active: editActive,
                     is_featured: editFeatured,

@@ -42,10 +42,17 @@ class TicketCreateIn(BaseModel):
     canteen_id: Optional[UUID] = None
     guest_name: Optional[str] = None
     guest_phone: Optional[str] = None
-    category: str = Field(pattern="^(food_quality|missing_item|incorrect_order|app_help|other)$")
+    category: str = Field(
+        pattern="^(food_quality|missing_item|incorrect_order|payment_issue|order_issue|app_help|other)$"
+    )
     subject: str = Field(min_length=3, max_length=200)
     description: str = Field(min_length=5, max_length=2000)
     priority: str = Field(default="normal", pattern="^(low|normal|high)$")
+
+
+class TicketStatusUpdateIn(BaseModel):
+    status: str = Field(pattern="^(open|in_progress|assigned|resolved|closed)$")
+    note: Optional[str] = Field(default=None, max_length=500)
 
 
 class TicketMessageIn(BaseModel):
@@ -315,6 +322,9 @@ def add_guest_ticket_message(
 @router.get("/tickets")
 def list_all_tickets(
     status_filter: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    priority: Optional[str] = Query(default=None),
+    search: Optional[str] = Query(default=None),
     canteen_id: Optional[UUID] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
@@ -323,10 +333,94 @@ def list_all_tickets(
     stmt = select(SupportTicket).order_by(SupportTicket.created_at.desc())
     if effective_cid:
         stmt = stmt.where(SupportTicket.canteen_id == effective_cid)
-    if status_filter:
+    if status_filter and status_filter != "all":
         stmt = stmt.where(SupportTicket.status == status_filter)
-    rows = db.scalars(stmt.limit(200)).all()
+    if category and category != "all":
+        stmt = stmt.where(SupportTicket.category == category)
+    if priority and priority != "all":
+        stmt = stmt.where(SupportTicket.priority == priority)
+    rows = list(db.scalars(stmt.limit(200)).all())
+    if search and search.strip():
+        q = search.strip().lower()
+        rows = [
+            r
+            for r in rows
+            if q in (r.ticket_number or "").lower()
+            or q in (r.subject or "").lower()
+            or q in (r.description or "").lower()
+            or q in (r.guest_name or "").lower()
+        ]
     return [_serialize_ticket(t) for t in rows]
+
+
+@router.patch("/tickets/{ticket_id}/status")
+def update_ticket_status(
+    ticket_id: UUID,
+    payload: TicketStatusUpdateIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    ticket = db.get(SupportTicket, ticket_id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    _enforce_ticket_manager_scope(principal, ticket)
+    ticket.status = payload.status
+    if payload.status in ("resolved", "closed") and not ticket.resolved_at:
+        ticket.resolved_at = datetime.now(timezone.utc)
+    if payload.note:
+        db.add(
+            SupportMessage(
+                ticket_id=ticket.id,
+                sender_user_id=principal.user.id,
+                sender_role="admin",
+                message=f"[{payload.status.upper()}] {payload.note}",
+            )
+        )
+    record_audit_log(
+        db,
+        action=f"support.ticket_{payload.status}",
+        entity_type="support_ticket",
+        entity_id=ticket.ticket_number,
+        actor_user_id=principal.user.id,
+    )
+    db.commit()
+    db.refresh(ticket)
+    return _serialize_ticket(ticket)
+
+
+@router.get("/reports/summary")
+def get_support_report_summary(
+    canteen_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    effective_cid = scoped_canteen_for_principal(principal, canteen_id)
+    stmt = select(SupportTicket)
+    if effective_cid:
+        stmt = stmt.where(SupportTicket.canteen_id == effective_cid)
+    rows = list(db.scalars(stmt).all())
+    by_status: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    res_times: list[int] = []
+    for t in rows:
+        by_status[t.status] = by_status.get(t.status, 0) + 1
+        by_category[t.category] = by_category.get(t.category, 0) + 1
+        by_priority[t.priority] = by_priority.get(t.priority, 0) + 1
+        if t.resolved_at and t.created_at:
+            res_times.append(max(0, int((t.resolved_at - t.created_at).total_seconds() // 60)))
+    avg_res = round(sum(res_times) / len(res_times), 1) if res_times else 0.0
+    return {
+        "total_tickets": len(rows),
+        "open_count": by_status.get("open", 0),
+        "in_progress_count": by_status.get("in_progress", 0) + by_status.get("assigned", 0),
+        "resolved_count": by_status.get("resolved", 0),
+        "closed_count": by_status.get("closed", 0),
+        "avg_resolution_minutes": avg_res,
+        "by_status": by_status,
+        "by_category": by_category,
+        "by_priority": by_priority,
+    }
 
 
 @router.get("/tickets/{ticket_id}/messages")

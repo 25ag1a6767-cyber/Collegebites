@@ -15,6 +15,11 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
     queryKey: ["admin-announcements"],
     queryFn: async () => (await api.get("/notifications/announcements")).data,
   });
+  const { data: campaignReport, refetch: refetchCampaigns } = useQuery<any>({
+    queryKey: ["admin-campaigns", activeCanteenId],
+    queryFn: async () =>
+      (await api.get(`/promotions/campaigns/report${activeCanteenId ? `?canteen_id=${activeCanteenId}` : ""}`)).data,
+  });
 
   const [promoTitle, setPromoTitle] = useState("");
   const [promoSubtitle, setPromoSubtitle] = useState("");
@@ -23,8 +28,111 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
   const [annTitle, setAnnTitle] = useState("");
   const [annBody, setAnnBody] = useState("");
 
+  // Coupon & Campaign state
+  const [cpCode, setCpCode] = useState("");
+  const [cpTitle, setCpTitle] = useState("");
+  const [cpType, setCpType] = useState<"percentage" | "fixed">("percentage");
+  const [cpValue, setCpValue] = useState("15.00");
+  const [cpMinOrder, setCpMinOrder] = useState("100.00");
+  const [cpMaxDisc, setCpMaxDisc] = useState("75.00");
+  const [cpLimitTotal, setCpLimitTotal] = useState("100");
+  const [cpLimitUser, setCpLimitUser] = useState("1");
+  const [cpExpires, setCpExpires] = useState("");
+
   return (
-    <div className="grid gap-6 md:grid-cols-2">
+    <div className="space-y-6">
+      {/* Promotional Campaigns & Discount Coupons */}
+      <Card className="p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="font-bold text-slate-900">Offers &amp; Promotional Campaign Management</h2>
+            <p className="text-xs text-slate-500">
+              Total Campaigns: <strong>{campaignReport?.total_campaigns ?? 0}</strong> • Active:{" "}
+              <strong>{campaignReport?.active_campaigns ?? 0}</strong> • Total Redemptions:{" "}
+              <strong>{campaignReport?.total_redemptions ?? 0}</strong> • Discount Given:{" "}
+              <strong>₹{campaignReport?.total_discount_given ?? "0.00"}</strong> • Campaign Order Revenue:{" "}
+              <strong>₹{campaignReport?.attributed_order_revenue ?? "0.00"}</strong>
+            </p>
+          </div>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+          <Input value={cpCode} onChange={(e) => setCpCode(e.target.value.toUpperCase())} placeholder="Coupon Code (e.g. CAMPUS15) *" />
+          <Input value={cpTitle} onChange={(e) => setCpTitle(e.target.value)} placeholder="Campaign Title *" />
+          <Select value={cpType} onChange={(e) => setCpType(e.target.value as any)}>
+            <option value="percentage">Percentage Discount (%)</option>
+            <option value="fixed">Fixed Flat Discount (₹)</option>
+          </Select>
+          <Input type="number" min="1" step="0.01" value={cpValue} onChange={(e) => setCpValue(e.target.value)} placeholder="Discount Value *" />
+          <Input type="number" min="0" step="0.01" value={cpMinOrder} onChange={(e) => setCpMinOrder(e.target.value)} placeholder="Min Order ₹" />
+          <Input type="number" min="1" step="0.01" value={cpMaxDisc} onChange={(e) => setCpMaxDisc(e.target.value)} placeholder="Max Discount Cap ₹" />
+          <Input type="number" min="1" value={cpLimitTotal} onChange={(e) => setCpLimitTotal(e.target.value)} placeholder="Total Usage Limit" />
+          <Input type="number" min="1" value={cpLimitUser} onChange={(e) => setCpLimitUser(e.target.value)} placeholder="Per-Customer Limit" />
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Input type="datetime-local" value={cpExpires} onChange={(e) => setCpExpires(e.target.value)} className="w-60" />
+          <Button
+            size="sm"
+            disabled={!cpCode.trim() || !cpTitle.trim() || !cpValue}
+            onClick={async () => {
+              try {
+                await api.post("/promotions/coupons", {
+                  code: cpCode.trim().toUpperCase(),
+                  title: cpTitle.trim(),
+                  canteen_id: activeCanteenId || null,
+                  discount_type: cpType,
+                  discount_value: cpValue,
+                  min_order_amount: cpMinOrder || "0.00",
+                  max_discount_amount: cpMaxDisc ? cpMaxDisc : null,
+                  usage_limit_total: cpLimitTotal ? Number(cpLimitTotal) : null,
+                  usage_limit_per_user: Number(cpLimitUser) || 1,
+                  expires_at: cpExpires ? new Date(cpExpires).toISOString() : null,
+                  is_active: true,
+                });
+                setCpCode("");
+                setCpTitle("");
+                pushToast("Promotional campaign created", "success");
+                refetchCampaigns();
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          >
+            Create Offer Campaign
+          </Button>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 text-xs pt-2 border-t border-slate-100">
+          {(campaignReport?.campaigns || []).map((c: any) => (
+            <div key={c.id} className="rounded-xl border border-slate-200 p-3 flex justify-between items-start">
+              <div>
+                <div className="font-mono font-extrabold text-[#76010d]">{c.code}</div>
+                <div className="font-bold text-slate-900">{c.title}</div>
+                <div className="text-[11px] text-slate-500">
+                  {c.discount_type === "percentage" ? `${c.discount_value}% Off` : `₹${c.discount_value} Off`} • Min ₹{c.min_order_amount} • Used: {c.redemptions_count}/{c.usage_limit_total || "∞"}
+                </div>
+                <div className="text-[11px] text-emerald-700">
+                  Discount Given: ₹{c.total_discount_given} • Revenue: ₹{c.attributed_order_revenue}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    await api.patch(`/promotions/coupons/${c.id}`, { is_active: !c.is_active });
+                    refetchCampaigns();
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                {c.is_active ? "Active" : "Paused"}
+              </Button>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <div className="grid gap-6 md:grid-cols-2">
       <Card className="p-5 space-y-3">
         <h2 className="font-bold text-slate-900 flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-[#76010d]" /> Highlight Banners & Combos ({promos.length})
@@ -146,6 +254,7 @@ export const PromotionsTab: React.FC<{ activeCanteenId: string }> = ({ activeCan
           ))}
         </div>
       </Card>
+      </div>
     </div>
   );
 };

@@ -25,6 +25,7 @@ import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 import { FoodWasteTab } from "./components/FoodWasteTab";
+import { VendorProcurementTab } from "./components/VendorProcurementTab";
 
 type SectionTab = "all" | "items" | "menu" | "stock" | "waste" | "pricing" | "suppliers" | "recipes" | "audit";
 
@@ -1202,149 +1203,14 @@ export const InventoryPage: React.FC = () => {
         </Card>
       )}
 
-      {/* Suppliers & Purchase Orders */}
-      {showBlock("suppliers") && (
-        <div className="grid gap-6 md:grid-cols-2">
-          <Card className="p-5 space-y-3">
-            <h2 className="font-bold text-slate-900 flex items-center gap-2">
-              <Truck className="h-4 w-4 text-slate-700" /> Suppliers ({suppliers.length}) & Purchase Orders
-            </h2>
-            <div className="grid grid-cols-3 gap-2">
-              <Input value={supName} onChange={(e) => setSupName(e.target.value)} placeholder="Supplier Name" />
-              <Input value={supPhone} onChange={(e) => setSupPhone(e.target.value)} placeholder="Phone" />
-              <Input value={supGst} onChange={(e) => setSupGst(e.target.value)} placeholder="GST (optional)" />
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!supName.trim()}
-              onClick={async () => {
-                try {
-                  await api.post("/inventory/suppliers", {
-                    name: supName.trim(),
-                    phone: supPhone.trim() || null,
-                    gst_number: supGst.trim() || null,
-                  });
-                  setSupName("");
-                  setSupPhone("");
-                  setSupGst("");
-                  refetchSuppliers();
-                  pushToast("Supplier added", "success");
-                } catch (err) {
-                  pushToast(getApiError(err), "error");
-                }
-              }}
-            >
-              Add Supplier
-            </Button>
-
-            <div className="border-t border-slate-100 pt-3 space-y-2">
-              <div className="text-xs font-bold text-slate-500 uppercase">Create Purchase Order</div>
-              <div className="grid grid-cols-2 gap-2">
-                <Select value={poSupplierId || suppliers[0]?.id || ""} onChange={(e) => setPoSupplierId(e.target.value)}>
-                  {suppliers.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </Select>
-                <Select value={poIngId || activeItems[0]?.ingredient_id || ""} onChange={(e) => setPoIngId(e.target.value)}>
-                  {activeItems.map((it) => (
-                    <option key={it.ingredient_id} value={it.ingredient_id}>{it.name}</option>
-                  ))}
-                </Select>
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                <Input type="number" min="0.01" step="0.01" value={poQty} onChange={(e) => setPoQty(e.target.value)} placeholder="Qty" />
-                <Input type="number" min="0" step="0.01" value={poCost} onChange={(e) => setPoCost(e.target.value)} placeholder="Unit Cost ₹" />
-                <Input type="date" value={poExpiry} onChange={(e) => setPoExpiry(e.target.value)} />
-              </div>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={suppliers.length === 0 || activeItems.length === 0}
-                onClick={async () => {
-                  try {
-                    await api.post("/inventory/purchase-orders", {
-                      canteen_id: activeId,
-                      supplier_id: poSupplierId || suppliers[0]?.id,
-                      items: [
-                        {
-                          ingredient_id: poIngId || activeItems[0]?.ingredient_id,
-                          quantity_ordered: poQty,
-                          unit_cost: poCost,
-                          expiry_date: poExpiry || null,
-                        },
-                      ],
-                    });
-                    pushToast("Purchase order created", "success");
-                    refetchPos();
-                  } catch (err) {
-                    pushToast(getApiError(err), "error");
-                  }
-                }}
-              >
-                Create Purchase Order
-              </Button>
-            </div>
-          </Card>
-
-          <Card className="p-5 space-y-2.5">
-            <h2 className="font-bold text-slate-900">Purchase Orders ({pos.length})</h2>
-            <div className="space-y-2 max-h-72 overflow-y-auto">
-              {pos.length === 0 ? (
-                <div className="text-xs text-slate-500">No purchase orders created yet.</div>
-              ) : (
-                pos.map((po) => (
-                  <div key={po.id} className="flex items-center justify-between rounded-xl border border-slate-100 p-3 text-xs">
-                    <div>
-                      <div className="font-mono font-bold text-slate-900">{po.po_number}</div>
-                      <div className="text-slate-500">Total Cost: ₹{po.total_cost}</div>
-                    </div>
-                    {po.status === "received" ? (
-                      <Badge tone="green">
-                        <CheckCircle2 className="h-3 w-3" /> Received
-                      </Badge>
-                    ) : po.status === "cancelled" ? (
-                      <Badge tone="red">Cancelled</Badge>
-                    ) : (
-                      <div className="flex items-center gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="success"
-                          onClick={async () => {
-                            try {
-                              await api.post(`/inventory/purchase-orders/${po.id}/receive`);
-                              pushToast(`Received ${po.po_number} — Stock & Batches Updated!`, "success");
-                              refreshAll();
-                            } catch (err) {
-                              pushToast(getApiError(err), "error");
-                            }
-                          }}
-                        >
-                          Receive Stock
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={async () => {
-                            try {
-                              await api.post(`/inventory/purchase-orders/${po.id}/cancel?reason=Cancelled%20from%20Inventory%20Portal`);
-                              pushToast(`Cancelled ${po.po_number}`, "info");
-                              refetchPos();
-                            } catch (err) {
-                              pushToast(getApiError(err), "error");
-                            }
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </Card>
-        </div>
+      {/* Suppliers, Purchase Orders, Goods Receiving (GRN) & Vendor Payments */}
+      {showBlock("suppliers") && activeId && (
+        <VendorProcurementTab
+          activeCanteenId={activeId}
+          activeItems={activeItems}
+          canApprovePo={canApproveSellingPrice}
+          onChanged={refreshAll}
+        />
       )}
 
       {/* Dish Recipes & Field-Level Audit History */}

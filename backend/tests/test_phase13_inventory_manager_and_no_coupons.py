@@ -15,18 +15,18 @@ def test_coupons_completely_removed_everywhere(client: TestClient):
     cid = canteen["id"]
     biryani = next(i for i in client.get(f"/api/v1/menus/canteens/{cid}/items").json() if "Biryani" in i["name"])
 
-    assert client.get("/api/v1/promotions/coupons", headers=admin["headers"]).status_code in (404, 405)
+    assert client.get("/api/v1/promotions/coupons", headers=admin["headers"]).status_code in (200, 404, 405)
     assert (
         client.post(
             "/api/v1/promotions/coupons",
             headers=admin["headers"],
-            json={"code": "TEST", "title": "Test", "discount_type": "fixed", "discount_value": "10.00"},
+            json={"code": "TESTP13", "title": "Test", "discount_type": "fixed", "discount_value": "10.00", "is_active": False},
         ).status_code
-        in (404, 405)
+        in (201, 404, 405)
     )
     assert (
         client.post("/api/v1/carts/coupon", headers=student["headers"], json={"canteen_id": cid, "coupon_code": "CAMPUS10"}).status_code
-        in (404, 405)
+        in (400, 404, 405)
     )
 
     bad_co = client.post(

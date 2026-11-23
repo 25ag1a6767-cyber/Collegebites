@@ -141,9 +141,15 @@ def _finalize_confirmed_payment(
             raise HTTPException(status_code=409, detail="Payment reference already used for another order")
 
     if payment.status == "CONFIRMED" and order.payment_status == "CONFIRMED":
-        # Already finalized cleanly; ensure token/QR/receipt exist and return without duplicating
+        # Already finalized cleanly; ensure token/QR/receipt/invoice exist and return without duplicating
         token, qr = generate_token_and_qr_for_confirmed_order(db, order)
         create_receipt_for_order(db, order, token, qr, payment)
+        try:
+            from app.services.invoice_service import ensure_invoice_for_order
+
+            ensure_invoice_for_order(db, order, payment=payment)
+        except ImportError:
+            pass
         db.commit()
         db.expire_all()
         loaded = db.scalar(
@@ -183,6 +189,12 @@ def _finalize_confirmed_payment(
 
     token, qr = generate_token_and_qr_for_confirmed_order(db, order)
     create_receipt_for_order(db, order, token, qr, payment)
+    try:
+        from app.services.invoice_service import ensure_invoice_for_order
+
+        ensure_invoice_for_order(db, order, payment=payment)
+    except ImportError:
+        pass
 
     # Deduct inventory idempotently (service defined in inventory_service when available)
     try:

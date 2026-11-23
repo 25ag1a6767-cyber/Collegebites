@@ -218,6 +218,12 @@ def serialize_food_item(
         portion_size=item.portion_size,
         calories=item.calories,
         nutrition_info=item.nutrition_info,
+        nutrition_verified=bool(getattr(item, "nutrition_verified", False)),
+        nutrition_disclaimer=(
+            "Verified nutrition & allergen information"
+            if bool(getattr(item, "nutrition_verified", False))
+            else "Nutrition and allergen information is unverified or unavailable; please consult canteen staff for severe allergies."
+        ),
         spice_levels=item.spice_levels or [],
         sugar_levels=item.sugar_levels or [],
         removable_ingredients=item.removable_ingredients or [],

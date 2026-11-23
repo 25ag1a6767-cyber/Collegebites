@@ -63,6 +63,7 @@ class FoodItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     portion_size: Mapped[Optional[str]] = mapped_column(String(64))
     calories: Mapped[Optional[int]] = mapped_column(Integer)
     nutrition_info: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    nutrition_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     spice_levels: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: ["Mild", "Medium", "Spicy"])
     sugar_levels: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     removable_ingredients: Mapped[list] = mapped_column(JSON, nullable=False, default=list)

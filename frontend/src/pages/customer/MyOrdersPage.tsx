@@ -305,6 +305,27 @@ export const MyOrdersPage: React.FC = () => {
                       <Button size="sm" variant="ghost" onClick={() => handleReorder(o)}>
                         <RotateCcw className="h-3.5 w-3.5" /> Reorder
                       </Button>
+                      {o.payment_status === "CONFIRMED" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            try {
+                              const res = await api.get(`/invoices/${o.id}/pdf`, { responseType: "blob" });
+                              const url = URL.createObjectURL(res.data);
+                              const a = document.createElement("a");
+                              a.href = url;
+                              a.download = `Invoice-${o.order_number}.pdf`;
+                              a.click();
+                              URL.revokeObjectURL(url);
+                            } catch (err) {
+                              pushToast(getApiError(err, "Failed to download tax invoice"), "error");
+                            }
+                          }}
+                        >
+                          <Receipt className="h-3.5 w-3.5" /> Tax Invoice PDF
+                        </Button>
+                      )}
                       <Link to={`/orders/${o.order_number}`}>
                         <Button size="sm" variant="outline">
                           Receipt & Track <ArrowRight className="h-3.5 w-3.5" />

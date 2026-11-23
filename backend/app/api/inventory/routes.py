@@ -36,6 +36,10 @@ class SupplierCreate(BaseModel):
     email: Optional[str] = None
     address: Optional[str] = None
     gst_number: Optional[str] = None
+    business_details: Optional[str] = None
+    supplied_products: Optional[list[str]] = None
+    payment_terms: Optional[str] = None
+    is_active: bool = True
 
 
 class IngredientCreate(BaseModel):
@@ -67,17 +71,46 @@ class RecipeUpsertIn(BaseModel):
 
 
 class POItemIn(BaseModel):
-    ingredient_id: UUID
+    ingredient_id: Optional[UUID] = None
+    item_name: Optional[str] = Field(default=None, max_length=140)
+    unit: Optional[str] = Field(default=None, max_length=32)
     quantity_ordered: Decimal = Field(gt=0)
     unit_cost: Decimal = Field(ge=0)
+    tax_rate_percent: Decimal = Field(default=Decimal("0.00"), ge=0, le=100)
     expiry_date: Optional[date] = None
 
 
 class POCreateIn(BaseModel):
     canteen_id: UUID
     supplier_id: UUID
+    initial_status: str = Field(default="ordered", pattern="^(draft|pending_approval|approved|ordered)$")
+    expected_delivery_date: Optional[date] = None
     notes: Optional[str] = None
     items: list[POItemIn] = Field(min_length=1)
+
+
+class POStatusTransitionIn(BaseModel):
+    status: str = Field(pattern="^(pending_approval|approved|ordered|cancelled)$")
+    notes: Optional[str] = Field(default=None, max_length=255)
+
+
+class VendorPaymentCreateIn(BaseModel):
+    supplier_id: UUID
+    canteen_id: Optional[UUID] = None
+    purchase_order_id: Optional[UUID] = None
+    amount: Decimal = Field(gt=0)
+    payment_method: str = Field(default="bank_transfer", pattern="^(bank_transfer|upi|neft_rtgs|cheque)$")
+    payment_reference: Optional[str] = Field(default=None, max_length=128)
+    document_url: Optional[str] = Field(default=None, max_length=255)
+    status: Optional[str] = Field(default=None, pattern="^(pending_verification|verified)$")
+    payment_date: Optional[date] = None
+    notes: Optional[str] = Field(default=None, max_length=500)
+
+
+class VendorPaymentVerifyIn(BaseModel):
+    payment_reference: str = Field(min_length=2, max_length=128)
+    document_url: Optional[str] = Field(default=None, max_length=255)
+    notes: Optional[str] = Field(default=None, max_length=500)
 
 
 class StockAdjustIn(BaseModel):
@@ -99,6 +132,9 @@ class SupplierUpdate(BaseModel):
     email: Optional[str] = None
     address: Optional[str] = None
     gst_number: Optional[str] = None
+    business_details: Optional[str] = None
+    supplied_products: Optional[list[str]] = None
+    payment_terms: Optional[str] = None
     is_active: Optional[bool] = None
 
 
@@ -118,12 +154,21 @@ class InventoryItemUpdate(BaseModel):
 
 
 class POReceiveItemIn(BaseModel):
-    ingredient_id: UUID
-    quantity_received: Decimal = Field(gt=0)
+    po_item_id: Optional[UUID] = None
+    ingredient_id: Optional[UUID] = None
+    quantity_received: Decimal = Field(ge=0)
+    quantity_delivered: Optional[Decimal] = Field(default=None, ge=0)
+    quantity_damaged: Decimal = Field(default=Decimal("0"), ge=0)
+    quantity_rejected: Decimal = Field(default=Decimal("0"), ge=0)
+    quantity_missing: Decimal = Field(default=Decimal("0"), ge=0)
     expiry_date: Optional[date] = None
+    notes: Optional[str] = Field(default=None, max_length=255)
 
 
 class POReceiveIn(BaseModel):
+    idempotency_key: Optional[str] = Field(default=None, max_length=96)
+    delivery_challan_ref: Optional[str] = Field(default=None, max_length=96)
+    notes: Optional[str] = Field(default=None, max_length=255)
     received_items: list[POReceiveItemIn] = Field(min_length=1)
 
 
@@ -201,10 +246,22 @@ class StockTransferIn(BaseModel):
 
 @router.get("/suppliers")
 def list_suppliers(
+    search: Optional[str] = Query(default=None),
+    is_active: Optional[bool] = Query(default=None),
+    product: Optional[str] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return inventory_service.list_suppliers(db)
+    return inventory_service.list_suppliers(db, search=search, is_active=is_active, product=product)
+
+
+@router.get("/suppliers/{supplier_id}/statement")
+def get_supplier_statement(
+    supplier_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    return inventory_service.get_supplier_statement(db, supplier_id)
 
 
 @router.post("/suppliers", status_code=status.HTTP_201_CREATED)
@@ -337,12 +394,14 @@ def upsert_recipe(
 @router.get("/canteens/{canteen_id}/purchase-orders")
 def list_pos(
     canteen_id: UUID,
+    status_filter: Optional[str] = Query(default=None),
+    supplier_id: Optional[UUID] = Query(default=None),
     principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, canteen_id)
-    return list(
-        db.scalars(select(PurchaseOrder).where(PurchaseOrder.canteen_id == canteen_id).order_by(PurchaseOrder.created_at.desc())).all()
+    return inventory_service.list_purchase_orders(
+        db, canteen_id, status_filter=status_filter, supplier_id=supplier_id
     )
 
 
@@ -354,6 +413,59 @@ def create_po(
 ):
     enforce_canteen_scope(principal, payload.canteen_id)
     return inventory_service.create_purchase_order(db, payload.model_dump(), principal.user.id)
+
+
+@router.post("/purchase-orders/{po_id}/status")
+def update_po_status(
+    po_id: UUID,
+    payload: POStatusTransitionIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    enforce_canteen_scope(principal, po.canteen_id)
+    can_approve = principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
+    return inventory_service.transition_purchase_order_status(
+        db,
+        po_id,
+        target_status=payload.status,
+        actor_user_id=principal.user.id,
+        can_approve=can_approve,
+        notes=payload.notes,
+    )
+
+
+@router.get("/purchase-orders/{po_id}/receipts")
+def list_po_receipts(
+    po_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    enforce_canteen_scope(principal, po.canteen_id)
+    return inventory_service.list_goods_receipts_for_po(db, po_id)
+
+
+@router.get("/purchase-orders/{po_id}/pdf")
+def download_po_pdf(
+    po_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    enforce_canteen_scope(principal, po.canteen_id)
+    pdf_bytes = inventory_service.export_purchase_order_pdf(db, po_id)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{po.po_number}.pdf"'},
+    )
 
 
 @router.post("/purchase-orders/{po_id}/receive")
@@ -368,7 +480,60 @@ def receive_po(
         raise HTTPException(status_code=404, detail="Purchase order not found")
     enforce_canteen_scope(principal, po.canteen_id)
     rec_items = [it.model_dump() for it in payload.received_items] if payload else None
-    return inventory_service.receive_purchase_order(db, po_id, principal.user.id, received_items=rec_items)
+    return inventory_service.receive_purchase_order(
+        db,
+        po_id,
+        principal.user.id,
+        received_items=rec_items,
+        idempotency_key=payload.idempotency_key if payload else None,
+        delivery_challan_ref=payload.delivery_challan_ref if payload else None,
+        notes=payload.notes if payload else None,
+    )
+
+
+@router.get("/vendor-payments")
+def list_vendor_payments(
+    canteen_id: Optional[UUID] = Query(default=None),
+    supplier_id: Optional[UUID] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    if canteen_id:
+        enforce_canteen_scope(principal, canteen_id)
+    elif principal.assigned_canteen_id and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        canteen_id = principal.assigned_canteen_id
+    return inventory_service.list_vendor_payments(
+        db, canteen_id=canteen_id, supplier_id=supplier_id, status_filter=status_filter
+    )
+
+
+@router.post("/vendor-payments", status_code=status.HTTP_201_CREATED)
+def create_vendor_payment(
+    payload: VendorPaymentCreateIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*INV_ROLES)),
+    db: Session = Depends(get_db),
+):
+    if payload.canteen_id:
+        enforce_canteen_scope(principal, payload.canteen_id)
+    return inventory_service.create_vendor_payment(db, payload.model_dump(), principal.user.id)
+
+
+@router.post("/vendor-payments/{payment_id}/verify")
+def verify_vendor_payment(
+    payment_id: UUID,
+    payload: VendorPaymentVerifyIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    return inventory_service.verify_vendor_payment(
+        db,
+        payment_id,
+        payment_reference=payload.payment_reference,
+        document_url=payload.document_url,
+        notes=payload.notes,
+        actor_user_id=principal.user.id,
+    )
 
 
 @router.post("/purchase-orders/{po_id}/cancel")

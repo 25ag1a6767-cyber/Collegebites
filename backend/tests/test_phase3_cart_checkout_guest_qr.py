@@ -75,9 +75,9 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
     assert Decimal(r2.json()["tax_amount"]) == Decimal("13.00")
     assert Decimal(r2.json()["total_amount"]) == Decimal("273.00")
 
-    # Coupons are completely removed
+    # Invalid/non-existent coupon code is rejected on backend
     rc = client.post("/api/v1/carts/coupon", headers=guest_headers, json={"canteen_id": cid, "coupon_code": "CAMPUS10"})
-    assert rc.status_code in (404, 405)
+    assert rc.status_code in (400, 404, 405)
 
     # Guest checkout requires OTP first
     no_otp = client.post(

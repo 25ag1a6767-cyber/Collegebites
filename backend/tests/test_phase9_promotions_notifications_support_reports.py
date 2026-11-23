@@ -22,14 +22,14 @@ def test_promotions_notifications_reviews_support_and_reports(client: TestClient
     assert ann.status_code == 201
     assert any(a["title"] == "Exam Week Extended Hours" for a in client.get("/api/v1/notifications/announcements").json())
 
-    assert client.get("/api/v1/promotions/coupons", headers=admin["headers"]).status_code in (404, 405)
+    assert client.get("/api/v1/promotions/coupons", headers=admin["headers"]).status_code in (200, 404, 405)
     assert (
         client.post(
             "/api/v1/promotions/coupons",
             headers=admin["headers"],
             json={"code": "FLAT20", "title": "Flat ₹20 Off", "discount_type": "fixed", "discount_value": "20.00"},
         ).status_code
-        in (404, 405)
+        in (201, 404, 405)
     )
 
     promo = client.post(

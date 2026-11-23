@@ -229,3 +229,29 @@ class ReceiptPrintHistory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     reprint_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="printed")
     printed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "invoices"
+
+    invoice_number: Mapped[str] = mapped_column(String(48), unique=True, nullable=False, index=True)
+    invoice_type: Mapped[str] = mapped_column(String(32), nullable=False, default="order", index=True)  # order | event_bulk | meal_plan
+    order_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), unique=True)
+    bulk_order_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("event_bulk_orders.id", ondelete="CASCADE"), unique=True)
+    subscription_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("student_meal_subscriptions.id", ondelete="CASCADE"), unique=True)
+    canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("canteens.id", ondelete="SET NULL"), index=True)
+    customer_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    reference_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    customer_name: Mapped[str] = mapped_column(String(140), nullable=False)
+    customer_contact: Mapped[Optional[str]] = mapped_column(String(140))
+    subtotal_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    discount_amount: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    tax_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    total_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    tax_breakdown_json: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+    items_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    payment_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    payment_reference: Mapped[Optional[str]] = mapped_column(String(128))
+    payment_status: Mapped[str] = mapped_column(String(32), nullable=False, default="CONFIRMED")
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+

@@ -142,6 +142,8 @@ export const SupportPage: React.FC = () => {
                 <option value="food_quality">Food Quality Issue</option>
                 <option value="missing_item">Missing Item</option>
                 <option value="incorrect_order">Incorrect Order</option>
+                <option value="payment_issue">Payment / Transaction Issue</option>
+                <option value="order_issue">Order Status / Delay Issue</option>
                 <option value="app_help">App / QR Help</option>
                 <option value="other">Other</option>
               </Select>

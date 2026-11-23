@@ -58,6 +58,8 @@ export const CheckoutPage: React.FC = () => {
     queryFn: async () => (await api.get("/promotions/loyalty/me")).data,
   });
 
+  const [couponInput, setCouponInput] = useState("");
+
   const [redeemPoints, setRedeemPoints] = useState(0);
   const [slotId, setSlotId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"razorpay" | "stripe">("razorpay");
@@ -494,6 +496,67 @@ export const CheckoutPage: React.FC = () => {
           <Card className="p-5 space-y-4">
             <h2 className="font-bold text-slate-900">Bill Summary (Server Verified)</h2>
 
+            {/* Promotional Coupon Code Application */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-2">
+              <div className="font-bold text-slate-700">Apply Offer / Coupon Code</div>
+              <div className="flex gap-2">
+                <Input
+                  value={couponInput}
+                  onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                  placeholder={cart.coupon_code || "Enter code (e.g. FESTIVE20)"}
+                  className="bg-white"
+                />
+                {cart.coupon_code ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={async () => {
+                      if (!activeCanteen) return;
+                      try {
+                        await api.delete(`/carts/coupon?canteen_id=${activeCanteen.id}`);
+                        setCouponInput("");
+                        refetchCart();
+                        pushToast("Coupon removed", "info");
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Remove
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!couponInput.trim() || !activeCanteen}
+                    onClick={async () => {
+                      if (!activeCanteen) return;
+                      try {
+                        await api.post("/carts/coupon", {
+                          canteen_id: activeCanteen.id,
+                          coupon_code: couponInput.trim().toUpperCase(),
+                        });
+                        setCouponInput("");
+                        refetchCart();
+                        pushToast("Coupon applied to cart!", "success");
+                      } catch (err) {
+                        pushToast(getApiError(err), "error");
+                      }
+                    }}
+                  >
+                    Apply
+                  </Button>
+                )}
+              </div>
+              {cart.coupon_message && (
+                <div className={cart.coupon_valid ? "text-emerald-700 font-semibold" : "text-red-600 font-semibold"}>
+                  {cart.coupon_message}
+                </div>
+              )}
+            </div>
+
             {user && (loyalty?.points_balance || 0) > 0 && (
               <div className="rounded-xl border border-[#76010d]/25 bg-[#fdf8f0] p-3 text-xs space-y-1.5">
                 <div className="flex items-center justify-between font-bold text-[#380106]">
@@ -532,6 +595,12 @@ export const CheckoutPage: React.FC = () => {
                 <span>Subtotal</span>
                 <span>₹{cart.subtotal_amount}</span>
               </div>
+              {Number(cart.discount_amount) > 0 && (
+                <div className="flex justify-between text-emerald-700 font-semibold">
+                  <span>Offer Discount {cart.coupon_code ? `(${cart.coupon_code})` : ""}</span>
+                  <span>-₹{cart.discount_amount}</span>
+                </div>
+              )}
               {redeemPoints > 0 && (
                 <div className="flex justify-between text-emerald-700">
                   <span>Loyalty Points Discount ({redeemPoints} pts)</span>

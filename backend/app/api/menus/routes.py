@@ -473,3 +473,40 @@ async def import_csv(
     except UnicodeDecodeError as exc:
         raise HTTPException(status_code=400, detail="CSV file must be UTF-8 encoded") from exc
     return menu_service.import_menu_csv(db, canteen_id, decoded, principal.user.id)
+
+
+@router.get("/allergens")
+def list_allergens(db: Session = Depends(get_db)):
+    from sqlalchemy import select
+    from app.models.menu import Allergen
+
+    rows = db.scalars(select(Allergen).order_by(Allergen.name.asc())).all()
+    return [{"id": str(a.id), "name": a.name, "description": a.description} for a in rows]
+
+
+@router.post("/allergens", status_code=status.HTTP_201_CREATED)
+def create_allergen(
+    name: str = Query(min_length=2, max_length=80),
+    description: Optional[str] = Query(default=None, max_length=255),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_INVENTORY_MANAGER)
+    ),
+    db: Session = Depends(get_db),
+):
+    from sqlalchemy import select
+    from app.models.menu import Allergen
+
+    clean = name.strip()
+    existing = db.scalar(select(Allergen).where(Allergen.name.ilike(clean)))
+    if existing:
+        if description is not None:
+            existing.description = description
+            db.commit()
+            db.refresh(existing)
+        return {"id": str(existing.id), "name": existing.name, "description": existing.description}
+    alg = Allergen(name=clean, description=description)
+    db.add(alg)
+    db.commit()
+    db.refresh(alg)
+    return {"id": str(alg.id), "name": alg.name, "description": alg.description}
+

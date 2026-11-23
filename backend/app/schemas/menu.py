@@ -129,6 +129,7 @@ class FoodItemCreate(BaseModel):
     portion_size: Optional[str] = None
     calories: Optional[int] = Field(default=None, ge=0)
     nutrition_info: Optional[dict[str, Any]] = None
+    nutrition_verified: bool = False
     spice_levels: list[str] = ["Mild", "Medium", "Spicy"]
     sugar_levels: list[str] = []
     removable_ingredients: list[str] = []
@@ -162,6 +163,7 @@ class FoodItemUpdate(BaseModel):
     portion_size: Optional[str] = None
     calories: Optional[int] = None
     nutrition_info: Optional[dict[str, Any]] = None
+    nutrition_verified: Optional[bool] = None
     spice_levels: Optional[list[str]] = None
     sugar_levels: Optional[list[str]] = None
     removable_ingredients: Optional[list[str]] = None
@@ -200,6 +202,8 @@ class FoodItemOut(ORMModel):
     portion_size: Optional[str]
     calories: Optional[int]
     nutrition_info: Optional[dict[str, Any]]
+    nutrition_verified: bool = False
+    nutrition_disclaimer: Optional[str] = None
     spice_levels: list[str]
     sugar_levels: list[str]
     removable_ingredients: list[str]

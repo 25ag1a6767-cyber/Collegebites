@@ -607,10 +607,28 @@ export const HomePage: React.FC = () => {
                     <strong>Ingredients:</strong> {activeItem.ingredients_text}
                   </p>
                 )}
-                {activeItem.nutrition_info && (
-                  <p className="text-[11px] text-slate-500">
-                    <strong>Nutrition:</strong> {JSON.stringify(activeItem.nutrition_info).replace(/[{}"]/g, "").replace(/,/g, " • ")}
+                {activeItem.nutrition_verified ? (
+                  <div className="space-y-1 pt-0.5">
+                    <Badge tone="green">Verified Nutrition &amp; Allergen Profile</Badge>
+                    <p className="text-[11px] text-slate-600">
+                      {activeItem.calories != null ? `${activeItem.calories} kcal` : ""}
+                      {activeItem.nutrition_info && Object.keys(activeItem.nutrition_info).length > 0
+                        ? ` • ${JSON.stringify(activeItem.nutrition_info).replace(/[{}"]/g, "").replace(/,/g, " • ")}`
+                        : ""}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                    {activeItem.nutrition_disclaimer ||
+                      "Nutrition and allergen information is unverified or unavailable; please consult canteen staff for severe allergies."}
                   </p>
+                )}
+                {activeItem.allergens && activeItem.allergens.length > 0 && (
+                  <div className="flex flex-wrap gap-1 pt-0.5">
+                    {activeItem.allergens.map((alg) => (
+                      <Badge key={alg.id} tone="amber">Allergen: {alg.name}</Badge>
+                    ))}
+                  </div>
                 )}
               </div>
             </div>

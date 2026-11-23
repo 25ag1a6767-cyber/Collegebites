@@ -16,6 +16,9 @@ from app.core.time_utils import today_college
 from app.models.auth import User
 from app.models.college import Canteen
 from app.models.inventory import (
+    DailyFoodPrepLog,
+    GoodsReceipt,
+    GoodsReceiptItem,
     InventoryAuditLog,
     InventoryItem,
     PriceChangeRequest,
@@ -26,6 +29,7 @@ from app.models.inventory import (
     StockMovement,
     StockTransfer,
     Supplier,
+    VendorPayment,
     WastageRecord,
 )
 from app.models.menu import FoodItem, Ingredient, MenuRestoreApproval, Recipe, RecipeIngredient
@@ -448,20 +452,167 @@ def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optiona
         _trigger_low_stock_alert_if_needed(db, inv_low, ing_name, canteen_id=order.canteen_id)
 
 
-def list_suppliers(db: Session) -> list[Supplier]:
-    return list(db.scalars(select(Supplier).order_by(Supplier.name)).all())
+def _compute_supplier_metrics_map(db: Session, supplier_ids: list[UUID]) -> dict[UUID, dict]:
+    if not supplier_ids:
+        return {}
+    pos = db.scalars(select(PurchaseOrder).where(PurchaseOrder.supplier_id.in_(supplier_ids))).all()
+    po_ids = [p.id for p in pos]
+    po_items = (
+        db.scalars(select(PurchaseOrderItem).where(PurchaseOrderItem.purchase_order_id.in_(po_ids))).all()
+        if po_ids
+        else []
+    )
+    po_by_id = {p.id: p for p in pos}
+    payments = db.scalars(select(VendorPayment).where(VendorPayment.supplier_id.in_(supplier_ids))).all()
+
+    metrics: dict[UUID, dict] = {
+        sid: {
+            "total_purchase_orders": 0,
+            "received_orders_count": 0,
+            "pending_orders_count": 0,
+            "total_billed_amount": Decimal("0.00"),
+            "total_paid_amount": Decimal("0.00"),
+            "pending_payment_amount": Decimal("0.00"),
+            "outstanding_balance": Decimal("0.00"),
+            "total_ordered_qty": Decimal("0.000"),
+            "total_received_qty": Decimal("0.000"),
+            "total_damaged_rejected_qty": Decimal("0.000"),
+        }
+        for sid in supplier_ids
+    }
+
+    for p in pos:
+        m = metrics[p.supplier_id]
+        m["total_purchase_orders"] += 1
+        if p.status == "received":
+            m["received_orders_count"] += 1
+        elif p.status not in ("cancelled", "draft"):
+            m["pending_orders_count"] += 1
+        if p.status not in ("cancelled", "draft"):
+            m["total_billed_amount"] += Decimal(str(p.total_cost or 0))
+
+    for it in po_items:
+        po_row = po_by_id.get(it.purchase_order_id)
+        if not po_row or po_row.status == "cancelled":
+            continue
+        m = metrics[po_row.supplier_id]
+        m["total_ordered_qty"] += Decimal(str(it.quantity_ordered or 0))
+        m["total_received_qty"] += Decimal(str(it.quantity_received or 0))
+        m["total_damaged_rejected_qty"] += Decimal(str(it.quantity_damaged or 0)) + Decimal(str(it.quantity_rejected or 0))
+
+    for vp in payments:
+        m = metrics[vp.supplier_id]
+        if vp.status == "verified":
+            m["total_paid_amount"] += Decimal(str(vp.amount or 0))
+        elif vp.status == "pending_verification":
+            m["pending_payment_amount"] += Decimal(str(vp.amount or 0))
+
+    for sid, m in metrics.items():
+        billed = m["total_billed_amount"].quantize(Decimal("0.01"))
+        paid = m["total_paid_amount"].quantize(Decimal("0.01"))
+        pend = m["pending_payment_amount"].quantize(Decimal("0.01"))
+        outstanding = max(Decimal("0.00"), billed - paid).quantize(Decimal("0.01"))
+        ord_q = m["total_ordered_qty"]
+        rec_q = m["total_received_qty"]
+        fulfillment_pct = float(((rec_q / ord_q) * Decimal("100")).quantize(Decimal("0.1"))) if ord_q > 0 else 100.0
+        m["total_billed_amount"] = str(billed)
+        m["total_paid_amount"] = str(paid)
+        m["pending_payment_amount"] = str(pend)
+        m["outstanding_balance"] = str(outstanding)
+        m["total_ordered_qty"] = str(ord_q.quantize(Decimal("0.001")))
+        m["total_received_qty"] = str(rec_q.quantize(Decimal("0.001")))
+        m["total_damaged_rejected_qty"] = str(m["total_damaged_rejected_qty"].quantize(Decimal("0.001")))
+        m["fulfillment_rate_percent"] = fulfillment_pct
+    return metrics
 
 
-def create_supplier(db: Session, data: dict, actor_user_id: UUID) -> Supplier:
-    sup = Supplier(**data)
+def _serialize_supplier(sup: Supplier, perf: Optional[dict] = None) -> dict:
+    p = perf or {
+        "total_purchase_orders": 0,
+        "received_orders_count": 0,
+        "pending_orders_count": 0,
+        "total_billed_amount": "0.00",
+        "total_paid_amount": "0.00",
+        "pending_payment_amount": "0.00",
+        "outstanding_balance": "0.00",
+        "total_ordered_qty": "0.000",
+        "total_received_qty": "0.000",
+        "total_damaged_rejected_qty": "0.000",
+        "fulfillment_rate_percent": 100.0,
+    }
+    return {
+        "id": str(sup.id),
+        "name": sup.name,
+        "contact_person": sup.contact_person,
+        "phone": sup.phone,
+        "email": sup.email,
+        "address": sup.address,
+        "gst_number": sup.gst_number,
+        "business_details": sup.business_details,
+        "supplied_products": list(sup.supplied_products or []),
+        "payment_terms": sup.payment_terms,
+        "is_active": sup.is_active,
+        "created_at": sup.created_at.isoformat() if sup.created_at else None,
+        "updated_at": sup.updated_at.isoformat() if sup.updated_at else None,
+        **p,
+    }
+
+
+def list_suppliers(
+    db: Session,
+    *,
+    search: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    product: Optional[str] = None,
+) -> list[dict]:
+    stmt = select(Supplier).order_by(Supplier.name)
+    if is_active is not None:
+        stmt = stmt.where(Supplier.is_active.is_(is_active))
+    rows = list(db.scalars(stmt).all())
+    q = (search or "").strip().lower()
+    prod_q = (product or "").strip().lower()
+    filtered: list[Supplier] = []
+    for s in rows:
+        if q:
+            hay = " ".join(
+                filter(
+                    None,
+                    [
+                        s.name,
+                        s.contact_person,
+                        s.phone,
+                        s.email,
+                        s.gst_number,
+                        s.business_details,
+                        " ".join(str(x) for x in (s.supplied_products or [])),
+                    ],
+                )
+            ).lower()
+            if q not in hay:
+                continue
+        if prod_q:
+            prods = [str(x).lower() for x in (s.supplied_products or [])]
+            if not any(prod_q in p for p in prods):
+                continue
+        filtered.append(s)
+    perf_map = _compute_supplier_metrics_map(db, [s.id for s in filtered])
+    return [_serialize_supplier(s, perf_map.get(s.id)) for s in filtered]
+
+
+def create_supplier(db: Session, data: dict, actor_user_id: UUID) -> dict:
+    payload = dict(data)
+    if payload.get("supplied_products") is None:
+        payload["supplied_products"] = []
+    sup = Supplier(**payload)
     db.add(sup)
     record_audit_log(db, action="supplier.created", entity_type="supplier", entity_id=sup.name, actor_user_id=actor_user_id)
     db.commit()
     db.refresh(sup)
-    return sup
+    perf_map = _compute_supplier_metrics_map(db, [sup.id])
+    return _serialize_supplier(sup, perf_map.get(sup.id))
 
 
-def update_supplier(db: Session, supplier_id: UUID, data: dict, actor_user_id: UUID) -> Supplier:
+def update_supplier(db: Session, supplier_id: UUID, data: dict, actor_user_id: UUID) -> dict:
     sup = db.get(Supplier, supplier_id)
     if not sup:
         raise HTTPException(status_code=404, detail="Supplier not found")
@@ -471,7 +622,8 @@ def update_supplier(db: Session, supplier_id: UUID, data: dict, actor_user_id: U
     record_audit_log(db, action="supplier.updated", entity_type="supplier", entity_id=str(sup.id), actor_user_id=actor_user_id)
     db.commit()
     db.refresh(sup)
-    return sup
+    perf_map = _compute_supplier_metrics_map(db, [sup.id])
+    return _serialize_supplier(sup, perf_map.get(sup.id))
 
 
 def update_inventory_item(db: Session, inventory_item_id: UUID, data: dict, actor_user_id: UUID) -> dict:
@@ -866,112 +1018,425 @@ def upsert_recipe(db: Session, food_item_id: UUID, yield_portions: int, ingredie
     return {"recipe_id": str(recipe.id), "food_item_id": str(food_item_id), "blocked_items": blocked}
 
 
+VALID_PO_STATUSES = {
+    "draft",
+    "pending_approval",
+    "approved",
+    "ordered",
+    "partially_received",
+    "partial",
+    "received",
+    "cancelled",
+}
+
+
+def _serialize_purchase_order(
+    db: Session,
+    po: PurchaseOrder,
+    *,
+    supplier_map: Optional[dict[UUID, Supplier]] = None,
+    items_by_po: Optional[dict[UUID, list[PurchaseOrderItem]]] = None,
+    ing_map: Optional[dict[UUID, Ingredient]] = None,
+) -> dict:
+    sup = (supplier_map or {}).get(po.supplier_id) or db.get(Supplier, po.supplier_id)
+    po_items = (
+        items_by_po.get(po.id, [])
+        if items_by_po is not None
+        else list(db.scalars(select(PurchaseOrderItem).where(PurchaseOrderItem.purchase_order_id == po.id)).all())
+    )
+    if ing_map is None:
+        ing_ids = {it.ingredient_id for it in po_items if it.ingredient_id}
+        ing_map = (
+            {i.id: i for i in db.scalars(select(Ingredient).where(Ingredient.id.in_(ing_ids))).all()}
+            if ing_ids
+            else {}
+        )
+    grn_count = db.scalar(select(func.count(GoodsReceipt.id)).where(GoodsReceipt.purchase_order_id == po.id)) or 0
+    paid_sum = (
+        db.scalar(
+            select(func.coalesce(func.sum(VendorPayment.amount), 0)).where(
+                VendorPayment.purchase_order_id == po.id,
+                VendorPayment.status == "verified",
+            )
+        )
+        or Decimal("0.00")
+    )
+    total_cost_dec = Decimal(str(po.total_cost or 0)).quantize(Decimal("0.01"))
+    paid_dec = Decimal(str(paid_sum)).quantize(Decimal("0.01"))
+    outstanding_dec = max(Decimal("0.00"), total_cost_dec - paid_dec).quantize(Decimal("0.01"))
+    display_status = "partially_received" if po.status == "partial" else po.status
+    return {
+        "id": str(po.id),
+        "po_number": po.po_number,
+        "canteen_id": str(po.canteen_id),
+        "supplier_id": str(po.supplier_id),
+        "supplier_name": sup.name if sup else "Vendor",
+        "status": po.status,
+        "lifecycle_status": display_status,
+        "subtotal_amount": str(Decimal(str(po.subtotal_amount or po.total_cost or 0)).quantize(Decimal("0.01"))),
+        "tax_amount": str(Decimal(str(po.tax_amount or 0)).quantize(Decimal("0.01"))),
+        "total_cost": str(total_cost_dec),
+        "paid_amount": str(paid_dec),
+        "outstanding_amount": str(outstanding_dec),
+        "goods_receipts_count": int(grn_count),
+        "ordered_by_user_id": str(po.ordered_by_user_id) if po.ordered_by_user_id else None,
+        "approved_by_user_id": str(po.approved_by_user_id) if po.approved_by_user_id else None,
+        "approved_at": po.approved_at.isoformat() if po.approved_at else None,
+        "expected_delivery_date": po.expected_delivery_date.isoformat() if po.expected_delivery_date else None,
+        "received_at": po.received_at.isoformat() if po.received_at else None,
+        "notes": po.notes,
+        "created_at": po.created_at.isoformat() if po.created_at else None,
+        "items": [
+            {
+                "id": str(it.id),
+                "ingredient_id": str(it.ingredient_id) if it.ingredient_id else None,
+                "item_name": it.item_name or (ing_map.get(it.ingredient_id).name if it.ingredient_id and ing_map.get(it.ingredient_id) else "Supply Item"),
+                "unit": it.unit or (ing_map.get(it.ingredient_id).unit if it.ingredient_id and ing_map.get(it.ingredient_id) else "units"),
+                "quantity_ordered": str(it.quantity_ordered),
+                "quantity_received": str(it.quantity_received),
+                "quantity_damaged": str(it.quantity_damaged or Decimal("0.000")),
+                "quantity_rejected": str(it.quantity_rejected or Decimal("0.000")),
+                "quantity_missing": str(it.quantity_missing or Decimal("0.000")),
+                "unit_cost": str(it.unit_cost),
+                "tax_rate_percent": str(it.tax_rate_percent or Decimal("0.00")),
+                "tax_amount": str(it.tax_amount or Decimal("0.00")),
+                "line_total": str(
+                    (
+                        (Decimal(str(it.quantity_ordered)) * Decimal(str(it.unit_cost)))
+                        + Decimal(str(it.tax_amount or 0))
+                    ).quantize(Decimal("0.01"))
+                ),
+                "expiry_date": it.expiry_date.isoformat() if it.expiry_date else None,
+            }
+            for it in po_items
+        ],
+    }
+
+
+def list_purchase_orders(
+    db: Session,
+    canteen_id: UUID,
+    *,
+    status_filter: Optional[str] = None,
+    supplier_id: Optional[UUID] = None,
+) -> list[dict]:
+    stmt = select(PurchaseOrder).where(PurchaseOrder.canteen_id == canteen_id)
+    if supplier_id:
+        stmt = stmt.where(PurchaseOrder.supplier_id == supplier_id)
+    if status_filter and status_filter != "all":
+        if status_filter in ("partial", "partially_received"):
+            stmt = stmt.where(PurchaseOrder.status.in_(["partial", "partially_received"]))
+        else:
+            stmt = stmt.where(PurchaseOrder.status == status_filter)
+    pos = list(db.scalars(stmt.order_by(PurchaseOrder.created_at.desc())).all())
+    if not pos:
+        return []
+    sup_ids = {p.supplier_id for p in pos}
+    sup_map = {s.id: s for s in db.scalars(select(Supplier).where(Supplier.id.in_(sup_ids))).all()}
+    po_ids = [p.id for p in pos]
+    all_items = db.scalars(select(PurchaseOrderItem).where(PurchaseOrderItem.purchase_order_id.in_(po_ids))).all()
+    items_by_po: dict[UUID, list[PurchaseOrderItem]] = {}
+    ing_ids: set[UUID] = set()
+    for it in all_items:
+        items_by_po.setdefault(it.purchase_order_id, []).append(it)
+        if it.ingredient_id:
+            ing_ids.add(it.ingredient_id)
+    ing_map = (
+        {i.id: i for i in db.scalars(select(Ingredient).where(Ingredient.id.in_(ing_ids))).all()}
+        if ing_ids
+        else {}
+    )
+    return [
+        _serialize_purchase_order(db, p, supplier_map=sup_map, items_by_po=items_by_po, ing_map=ing_map)
+        for p in pos
+    ]
+
+
 def create_purchase_order(db: Session, data: dict, actor_user_id: UUID) -> dict:
-    po_number = f"PO-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6].upper()}"
-    total = sum(
-        (Decimal(str(it["quantity_ordered"])) * Decimal(str(it["unit_cost"])) for it in data["items"]),
-        Decimal("0.00"),
-    ).quantize(Decimal("0.01"))
+    sup = db.get(Supplier, data["supplier_id"])
+    if not sup:
+        raise HTTPException(status_code=404, detail="Vendor / supplier not found")
+    if not sup.is_active:
+        raise HTTPException(status_code=400, detail="Cannot create purchase order for an inactive vendor")
+
+    init_status = (data.get("initial_status") or data.get("status") or "ordered").strip().lower()
+    if init_status not in ("draft", "pending_approval", "approved", "ordered"):
+        raise HTTPException(status_code=400, detail=f"Invalid initial purchase order status: {init_status}")
+
+    now = datetime.now(timezone.utc)
+    po_number = f"PO-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6].upper()}"
+    subtotal = Decimal("0.00")
+    tax_total = Decimal("0.00")
+    prepared_lines: list[dict] = []
+
+    for it in data["items"]:
+        ing_id = it.get("ingredient_id")
+        ing = db.get(Ingredient, ing_id) if ing_id else None
+        item_name = (it.get("item_name") or (ing.name if ing else "")).strip()
+        if not item_name:
+            raise HTTPException(status_code=400, detail="Each purchase order item must specify an ingredient_id or item_name")
+        unit = (it.get("unit") or (ing.unit if ing else "units")).strip()
+        qty = Decimal(str(it["quantity_ordered"]))
+        ucost = Decimal(str(it["unit_cost"])).quantize(Decimal("0.01"))
+        tax_rate = Decimal(str(it.get("tax_rate_percent") or "0.00")).quantize(Decimal("0.01"))
+        line_sub = (qty * ucost).quantize(Decimal("0.01"))
+        line_tax = ((line_sub * tax_rate) / Decimal("100")).quantize(Decimal("0.01"))
+        subtotal += line_sub
+        tax_total += line_tax
+        prepared_lines.append({
+            "ingredient_id": ing.id if ing else None,
+            "item_name": item_name,
+            "unit": unit,
+            "quantity_ordered": qty,
+            "unit_cost": ucost,
+            "tax_rate_percent": tax_rate,
+            "tax_amount": line_tax,
+            "expiry_date": it.get("expiry_date"),
+        })
+
+    total = (subtotal + tax_total).quantize(Decimal("0.01"))
     po = PurchaseOrder(
         po_number=po_number,
         canteen_id=data["canteen_id"],
         supplier_id=data["supplier_id"],
-        status="ordered",
+        status=init_status,
+        subtotal_amount=subtotal,
+        tax_amount=tax_total,
         total_cost=total,
         ordered_by_user_id=actor_user_id,
+        approved_by_user_id=actor_user_id if init_status in ("approved", "ordered") else None,
+        approved_at=now if init_status in ("approved", "ordered") else None,
+        expected_delivery_date=data.get("expected_delivery_date"),
         notes=data.get("notes"),
     )
     db.add(po)
     db.flush()
-    for it in data["items"]:
-        db.add(
-            PurchaseOrderItem(
-                purchase_order_id=po.id,
-                ingredient_id=it["ingredient_id"],
-                quantity_ordered=Decimal(str(it["quantity_ordered"])),
-                unit_cost=Decimal(str(it["unit_cost"])),
-                expiry_date=it.get("expiry_date"),
-            )
-        )
-    record_audit_log(db, action="purchase_order.created", entity_type="purchase_order", entity_id=po_number, actor_user_id=actor_user_id)
+    for line in prepared_lines:
+        db.add(PurchaseOrderItem(purchase_order_id=po.id, **line))
+    db.flush()
+    record_audit_log(
+        db,
+        action="purchase_order.created",
+        entity_type="purchase_order",
+        entity_id=po_number,
+        actor_user_id=actor_user_id,
+        details={"status": init_status, "total_cost": str(total)},
+    )
     db.commit()
-    return {"id": str(po.id), "po_number": po.po_number, "status": po.status, "total_cost": str(po.total_cost)}
+    db.refresh(po)
+    return _serialize_purchase_order(db, po)
+
+
+def transition_purchase_order_status(
+    db: Session,
+    po_id: UUID,
+    *,
+    target_status: str,
+    actor_user_id: UUID,
+    can_approve: bool = False,
+    notes: Optional[str] = None,
+) -> dict:
+    po = db.scalar(select(PurchaseOrder).where(PurchaseOrder.id == po_id).with_for_update())
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    target = target_status.strip().lower()
+    if target not in ("pending_approval", "approved", "ordered", "cancelled"):
+        raise HTTPException(status_code=400, detail=f"Unsupported status transition target: {target}")
+    if po.status == "cancelled":
+        raise HTTPException(status_code=409, detail="Cancelled purchase order cannot transition")
+    if po.status == "received":
+        raise HTTPException(status_code=409, detail="Received purchase order cannot transition")
+
+    if target == "approved" and not can_approve:
+        raise HTTPException(status_code=403, detail="Only College Admin or Canteen Manager can approve purchase orders")
+
+    now = datetime.now(timezone.utc)
+    if target == "approved":
+        po.approved_by_user_id = actor_user_id
+        po.approved_at = now
+    elif target == "ordered" and not po.approved_at and can_approve:
+        po.approved_by_user_id = actor_user_id
+        po.approved_at = now
+
+    po.status = target
+    if notes:
+        po.notes = f"{(po.notes or '').strip()} [{target.upper()}: {notes.strip()}]".strip()
+    record_audit_log(
+        db,
+        action=f"purchase_order.{target}",
+        entity_type="purchase_order",
+        entity_id=po.po_number,
+        actor_user_id=actor_user_id,
+        details={"status": po.status, "notes": notes},
+    )
+    db.commit()
+    db.refresh(po)
+    return _serialize_purchase_order(db, po)
 
 
 def receive_purchase_order(
-    db: Session, po_id: UUID, actor_user_id: UUID, received_items: Optional[list[dict]] = None
+    db: Session,
+    po_id: UUID,
+    actor_user_id: UUID,
+    received_items: Optional[list[dict]] = None,
+    *,
+    idempotency_key: Optional[str] = None,
+    delivery_challan_ref: Optional[str] = None,
+    notes: Optional[str] = None,
 ) -> dict:
+    if idempotency_key:
+        existing_grn = db.scalar(select(GoodsReceipt).where(GoodsReceipt.idempotency_key == idempotency_key))
+        if existing_grn:
+            po_existing = db.get(PurchaseOrder, existing_grn.purchase_order_id)
+            return {
+                "id": str(po_existing.id),
+                "po_number": po_existing.po_number,
+                "status": po_existing.status,
+                "lifecycle_status": "partially_received" if po_existing.status == "partial" else po_existing.status,
+                "grn_id": str(existing_grn.id),
+                "grn_number": existing_grn.grn_number,
+                "idempotent_replay": True,
+            }
+
     po = db.scalar(select(PurchaseOrder).where(PurchaseOrder.id == po_id).with_for_update())
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     if po.status == "cancelled":
         raise HTTPException(status_code=409, detail="Cancelled purchase order cannot be received")
+    if po.status in ("draft", "pending_approval"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Purchase order in '{po.status}' status must be approved and ordered before receiving goods",
+        )
     if po.status == "received":
-        return {"id": str(po.id), "po_number": po.po_number, "status": "received"}
+        return {"id": str(po.id), "po_number": po.po_number, "status": "received", "lifecycle_status": "received"}
 
     po_items = db.scalars(select(PurchaseOrderItem).where(PurchaseOrderItem.purchase_order_id == po.id)).all()
-    rec_map = {str(r["ingredient_id"]): r for r in (received_items or [])}
+    rec_by_ing = {str(r["ingredient_id"]): r for r in (received_items or []) if r.get("ingredient_id")}
+    rec_by_poi = {str(r["po_item_id"]): r for r in (received_items or []) if r.get("po_item_id")}
     now = datetime.now(timezone.utc)
+
+    grn = GoodsReceipt(
+        grn_number=f"GRN-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:5].upper()}",
+        purchase_order_id=po.id,
+        canteen_id=po.canteen_id,
+        supplier_id=po.supplier_id,
+        idempotency_key=idempotency_key,
+        delivery_challan_ref=delivery_challan_ref,
+        received_by_user_id=actor_user_id,
+        received_at=now,
+        notes=notes,
+    )
+    db.add(grn)
+    db.flush()
+
+    any_item_processed = False
     for poi in po_items:
         outstanding = max(Decimal("0.000"), poi.quantity_ordered - poi.quantity_received)
         if outstanding <= Decimal("0.000"):
             continue
         if received_items is not None:
-            entry = rec_map.get(str(poi.ingredient_id))
+            entry = rec_by_poi.get(str(poi.id)) or (rec_by_ing.get(str(poi.ingredient_id)) if poi.ingredient_id else None)
             if not entry:
                 continue
-            receive_qty = min(outstanding, max(Decimal("0.000"), Decimal(str(entry["quantity_received"]))))
+            raw_req_qty = Decimal(str(entry.get("quantity_received", "0")))
+            if raw_req_qty > outstanding:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot receive {raw_req_qty} for item '{poi.item_name or poi.ingredient_id}': only {outstanding} remaining on PO",
+                )
+            receive_qty = max(Decimal("0.000"), raw_req_qty)
+            damaged_qty = max(Decimal("0.000"), Decimal(str(entry.get("quantity_damaged") or "0")))
+            rejected_qty = max(Decimal("0.000"), Decimal(str(entry.get("quantity_rejected") or "0")))
+            missing_qty = max(Decimal("0.000"), Decimal(str(entry.get("quantity_missing") or "0")))
+            delivered_qty = Decimal(str(entry.get("quantity_delivered") or (receive_qty + damaged_qty + rejected_qty)))
             expiry = entry.get("expiry_date") or poi.expiry_date
+            item_notes = entry.get("notes")
         else:
             receive_qty = outstanding
+            damaged_qty = Decimal("0.000")
+            rejected_qty = Decimal("0.000")
+            missing_qty = Decimal("0.000")
+            delivered_qty = outstanding
             expiry = poi.expiry_date
-        if receive_qty <= Decimal("0.000"):
+            item_notes = None
+
+        if receive_qty <= Decimal("0.000") and damaged_qty <= Decimal("0.000") and rejected_qty <= Decimal("0.000") and missing_qty <= Decimal("0.000"):
             continue
 
+        any_item_processed = True
         poi.quantity_received += receive_qty
-        inv = db.scalar(
-            select(InventoryItem)
-            .where(InventoryItem.canteen_id == po.canteen_id, InventoryItem.ingredient_id == poi.ingredient_id)
-            .with_for_update()
-        )
-        if not inv:
-            ing = db.get(Ingredient, poi.ingredient_id)
-            inv = InventoryItem(
-                canteen_id=po.canteen_id,
-                ingredient_id=poi.ingredient_id,
-                current_quantity=Decimal("0.000"),
-                unit=ing.unit if ing else "grams",
-                unit_cost=poi.unit_cost,
-            )
-            db.add(inv)
-            db.flush()
-        inv.current_quantity += receive_qty
-        inv.unit_cost = poi.unit_cost
-        batch = StockBatch(
-            inventory_item_id=inv.id,
-            supplier_id=po.supplier_id,
-            batch_number=f"{po.po_number}-{str(poi.ingredient_id)[:4]}-{uuid4().hex[:3].upper()}",
-            initial_quantity=receive_qty,
-            remaining_quantity=receive_qty,
-            unit_cost=poi.unit_cost,
-            received_at=now,
-            expiry_date=expiry,
-        )
-        db.add(batch)
-        db.flush()
+        poi.quantity_damaged = (poi.quantity_damaged or Decimal("0.000")) + damaged_qty
+        poi.quantity_rejected = (poi.quantity_rejected or Decimal("0.000")) + rejected_qty
+        poi.quantity_missing = (poi.quantity_missing or Decimal("0.000")) + missing_qty
+
+        ing = db.get(Ingredient, poi.ingredient_id) if poi.ingredient_id else None
+        eff_item_name = poi.item_name or (ing.name if ing else "Supply Item")
         db.add(
-            StockMovement(
-                inventory_item_id=inv.id,
-                batch_id=batch.id,
-                movement_type="purchase",
-                quantity_delta=receive_qty,
-                balance_after=inv.current_quantity,
-                reference_type="purchase_order",
-                reference_id=str(po.id),
-                created_by_user_id=actor_user_id,
-                notes=f"Received {receive_qty} from {po.po_number}",
+            GoodsReceiptItem(
+                goods_receipt_id=grn.id,
+                po_item_id=poi.id,
+                ingredient_id=poi.ingredient_id,
+                item_name=eff_item_name,
+                quantity_delivered=delivered_qty,
+                quantity_accepted=receive_qty,
+                quantity_damaged=damaged_qty,
+                quantity_rejected=rejected_qty,
+                quantity_missing=missing_qty,
+                unit_cost=poi.unit_cost,
+                expiry_date=expiry,
+                notes=item_notes,
             )
         )
+
+        # CRITICAL: Update inventory stock ONLY for verified accepted quantities (receive_qty > 0)
+        if receive_qty > Decimal("0.000") and poi.ingredient_id:
+            inv = db.scalar(
+                select(InventoryItem)
+                .where(InventoryItem.canteen_id == po.canteen_id, InventoryItem.ingredient_id == poi.ingredient_id)
+                .with_for_update()
+            )
+            if not inv:
+                inv = InventoryItem(
+                    canteen_id=po.canteen_id,
+                    ingredient_id=poi.ingredient_id,
+                    current_quantity=Decimal("0.000"),
+                    unit=ing.unit if ing else (poi.unit or "grams"),
+                    unit_cost=poi.unit_cost,
+                )
+                db.add(inv)
+                db.flush()
+            inv.current_quantity += receive_qty
+            inv.unit_cost = poi.unit_cost
+            batch = StockBatch(
+                inventory_item_id=inv.id,
+                supplier_id=po.supplier_id,
+                batch_number=f"{po.po_number}-{str(poi.ingredient_id)[:4]}-{uuid4().hex[:3].upper()}",
+                initial_quantity=receive_qty,
+                remaining_quantity=receive_qty,
+                unit_cost=poi.unit_cost,
+                received_at=now,
+                expiry_date=expiry,
+            )
+            db.add(batch)
+            db.flush()
+            db.add(
+                StockMovement(
+                    inventory_item_id=inv.id,
+                    batch_id=batch.id,
+                    movement_type="purchase",
+                    quantity_delta=receive_qty,
+                    balance_after=inv.current_quantity,
+                    reference_type="purchase_order",
+                    reference_id=str(po.id),
+                    created_by_user_id=actor_user_id,
+                    notes=f"GRN {grn.grn_number}: accepted {receive_qty} from {po.po_number}",
+                )
+            )
+
+    if not any_item_processed:
+        raise HTTPException(status_code=400, detail="No valid open purchase order items matched for goods receipt")
+
     all_done = all(p.quantity_received >= p.quantity_ordered for p in po_items)
     any_done = any(p.quantity_received > 0 for p in po_items)
     po.status = "received" if all_done else ("partial" if any_done else po.status)
@@ -984,10 +1449,377 @@ def receive_purchase_order(
         entity_type="purchase_order",
         entity_id=po.po_number,
         actor_user_id=actor_user_id,
-        details={"status": po.status},
+        details={"status": po.status, "grn_number": grn.grn_number},
     )
     db.commit()
-    return {"id": str(po.id), "po_number": po.po_number, "status": po.status}
+    return {
+        "id": str(po.id),
+        "po_number": po.po_number,
+        "status": po.status,
+        "lifecycle_status": "partially_received" if po.status == "partial" else po.status,
+        "grn_id": str(grn.id),
+        "grn_number": grn.grn_number,
+    }
+
+
+def list_goods_receipts_for_po(db: Session, po_id: UUID) -> list[dict]:
+    grns = list(
+        db.scalars(
+            select(GoodsReceipt)
+            .where(GoodsReceipt.purchase_order_id == po_id)
+            .order_by(GoodsReceipt.received_at.desc())
+        ).all()
+    )
+    if not grns:
+        return []
+    grn_ids = [g.id for g in grns]
+    g_items = db.scalars(select(GoodsReceiptItem).where(GoodsReceiptItem.goods_receipt_id.in_(grn_ids))).all()
+    by_grn: dict[UUID, list[GoodsReceiptItem]] = {}
+    for gi in g_items:
+        by_grn.setdefault(gi.goods_receipt_id, []).append(gi)
+    return [
+        {
+            "id": str(g.id),
+            "grn_number": g.grn_number,
+            "purchase_order_id": str(g.purchase_order_id),
+            "canteen_id": str(g.canteen_id),
+            "supplier_id": str(g.supplier_id),
+            "idempotency_key": g.idempotency_key,
+            "delivery_challan_ref": g.delivery_challan_ref,
+            "received_at": g.received_at.isoformat() if g.received_at else None,
+            "notes": g.notes,
+            "items": [
+                {
+                    "id": str(it.id),
+                    "po_item_id": str(it.po_item_id),
+                    "ingredient_id": str(it.ingredient_id) if it.ingredient_id else None,
+                    "item_name": it.item_name,
+                    "quantity_delivered": str(it.quantity_delivered),
+                    "quantity_accepted": str(it.quantity_accepted),
+                    "quantity_damaged": str(it.quantity_damaged),
+                    "quantity_rejected": str(it.quantity_rejected),
+                    "quantity_missing": str(it.quantity_missing),
+                    "unit_cost": str(it.unit_cost),
+                    "expiry_date": it.expiry_date.isoformat() if it.expiry_date else None,
+                    "notes": it.notes,
+                }
+                for it in by_grn.get(g.id, [])
+            ],
+        }
+        for g in grns
+    ]
+
+
+def export_purchase_order_pdf(db: Session, po_id: UUID) -> bytes:
+    po = db.get(PurchaseOrder, po_id)
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    po_data = _serialize_purchase_order(db, po)
+    canteen = db.get(Canteen, po.canteen_id)
+    sup = db.get(Supplier, po.supplier_id)
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    _w, h = A4
+    y = h - 40
+
+    c.setFont("Helvetica-Bold", 15)
+    c.drawString(40, y, f"CollegeBites Purchase Order — {po_data['po_number']}")
+    y -= 18
+    c.setFont("Helvetica", 9)
+    c.drawString(40, y, f"Canteen: {canteen.name if canteen else ''} | Status: {po_data['lifecycle_status'].upper()} | Date: {(po_data['created_at'] or '')[:10]}")
+    y -= 16
+    if sup:
+        c.drawString(40, y, f"Vendor: {sup.name} | Contact: {sup.contact_person or '-'} ({sup.phone or '-'}) | GST: {sup.gst_number or '-'}")
+        y -= 20
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(40, y, "Item")
+    c.drawString(220, y, "Ordered")
+    c.drawString(290, y, "Accepted")
+    c.drawString(360, y, "Unit Cost")
+    c.drawString(430, y, "Tax")
+    c.drawString(495, y, "Line Total")
+    y -= 14
+    c.setFont("Helvetica", 9)
+    for it in po_data["items"]:
+        if y < 60:
+            c.showPage()
+            y = h - 40
+            c.setFont("Helvetica", 9)
+        c.drawString(40, y, f"{it['item_name']} ({it['unit']})"[:34])
+        c.drawString(220, y, str(it["quantity_ordered"]))
+        c.drawString(290, y, str(it["quantity_received"]))
+        c.drawString(360, y, f"Rs.{it['unit_cost']}")
+        c.drawString(430, y, f"Rs.{it['tax_amount']}")
+        c.drawString(495, y, f"Rs.{it['line_total']}")
+        y -= 14
+
+    y -= 12
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(360, y, f"Subtotal: Rs.{po_data['subtotal_amount']}")
+    y -= 14
+    c.drawString(360, y, f"Tax: Rs.{po_data['tax_amount']}")
+    y -= 14
+    c.drawString(360, y, f"Total PO Value: Rs.{po_data['total_cost']}")
+    y -= 14
+    c.drawString(360, y, f"Paid / Outstanding: Rs.{po_data['paid_amount']} / Rs.{po_data['outstanding_amount']}")
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def create_vendor_payment(db: Session, data: dict, actor_user_id: UUID) -> dict:
+    sup = db.get(Supplier, data["supplier_id"])
+    if not sup:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    po = None
+    if data.get("purchase_order_id"):
+        po = db.get(PurchaseOrder, data["purchase_order_id"])
+        if not po or po.supplier_id != sup.id:
+            raise HTTPException(status_code=400, detail="Purchase order does not belong to the selected vendor")
+        if po.status in ("cancelled", "draft"):
+            raise HTTPException(status_code=400, detail=f"Cannot record payment against a {po.status} purchase order")
+
+    amount = Decimal(str(data["amount"])).quantize(Decimal("0.01"))
+    if amount <= Decimal("0.00"):
+        raise HTTPException(status_code=400, detail="Payment amount must be greater than zero")
+
+    pay_ref = (data.get("payment_reference") or "").strip() or None
+    req_status = (data.get("status") or ("verified" if pay_ref else "pending_verification")).strip().lower()
+    if req_status == "verified" and not pay_ref:
+        raise HTTPException(
+            status_code=400,
+            detail="Vendor payment cannot be marked as verified/completed without a payment reference",
+        )
+    if pay_ref:
+        dup = db.scalar(
+            select(VendorPayment).where(
+                VendorPayment.supplier_id == sup.id,
+                VendorPayment.payment_reference == pay_ref,
+                VendorPayment.status != "cancelled",
+            )
+        )
+        if dup:
+            raise HTTPException(status_code=409, detail="Duplicate payment reference for this vendor")
+
+    now = datetime.now(timezone.utc)
+    vp = VendorPayment(
+        payment_number=f"VPAY-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:5].upper()}",
+        supplier_id=sup.id,
+        canteen_id=data.get("canteen_id") or (po.canteen_id if po else None),
+        purchase_order_id=po.id if po else None,
+        amount=amount,
+        payment_method=(data.get("payment_method") or "bank_transfer").strip(),
+        payment_reference=pay_ref,
+        document_url=(data.get("document_url") or "").strip() or None,
+        status=req_status,
+        payment_date=data.get("payment_date") or today_college(),
+        verified_at=now if req_status == "verified" else None,
+        recorded_by_user_id=actor_user_id,
+        verified_by_user_id=actor_user_id if req_status == "verified" else None,
+        notes=data.get("notes"),
+    )
+    db.add(vp)
+    record_audit_log(
+        db,
+        action="vendor_payment.created",
+        entity_type="vendor_payment",
+        entity_id=vp.payment_number,
+        actor_user_id=actor_user_id,
+        details={"supplier_id": str(sup.id), "amount": str(amount), "status": vp.status},
+    )
+    db.commit()
+    db.refresh(vp)
+    return _serialize_vendor_payment(vp, sup_name=sup.name, po_number=po.po_number if po else None)
+
+
+def verify_vendor_payment(
+    db: Session,
+    payment_id: UUID,
+    *,
+    payment_reference: str,
+    document_url: Optional[str] = None,
+    notes: Optional[str] = None,
+    actor_user_id: UUID,
+) -> dict:
+    vp = db.scalar(select(VendorPayment).where(VendorPayment.id == payment_id).with_for_update())
+    if not vp:
+        raise HTTPException(status_code=404, detail="Vendor payment not found")
+    ref = (payment_reference or "").strip()
+    if not ref:
+        raise HTTPException(
+            status_code=400,
+            detail="A valid payment reference is required to verify and complete a vendor payment",
+        )
+    dup = db.scalar(
+        select(VendorPayment).where(
+            VendorPayment.supplier_id == vp.supplier_id,
+            VendorPayment.payment_reference == ref,
+            VendorPayment.id != vp.id,
+            VendorPayment.status != "cancelled",
+        )
+    )
+    if dup:
+        raise HTTPException(status_code=409, detail="Payment reference already used for another payment to this vendor")
+
+    vp.payment_reference = ref
+    if document_url is not None:
+        vp.document_url = document_url.strip() or None
+    if notes:
+        vp.notes = notes
+    vp.status = "verified"
+    vp.verified_at = datetime.now(timezone.utc)
+    vp.verified_by_user_id = actor_user_id
+    record_audit_log(
+        db,
+        action="vendor_payment.verified",
+        entity_type="vendor_payment",
+        entity_id=vp.payment_number,
+        actor_user_id=actor_user_id,
+        details={"payment_reference": ref, "amount": str(vp.amount)},
+    )
+    db.commit()
+    db.refresh(vp)
+    sup = db.get(Supplier, vp.supplier_id)
+    po = db.get(PurchaseOrder, vp.purchase_order_id) if vp.purchase_order_id else None
+    return _serialize_vendor_payment(vp, sup_name=sup.name if sup else "Vendor", po_number=po.po_number if po else None)
+
+
+def _serialize_vendor_payment(vp: VendorPayment, *, sup_name: Optional[str] = None, po_number: Optional[str] = None) -> dict:
+    return {
+        "id": str(vp.id),
+        "payment_number": vp.payment_number,
+        "supplier_id": str(vp.supplier_id),
+        "supplier_name": sup_name,
+        "canteen_id": str(vp.canteen_id) if vp.canteen_id else None,
+        "purchase_order_id": str(vp.purchase_order_id) if vp.purchase_order_id else None,
+        "po_number": po_number,
+        "amount": str(Decimal(str(vp.amount)).quantize(Decimal("0.01"))),
+        "payment_method": vp.payment_method,
+        "payment_reference": vp.payment_reference,
+        "document_url": vp.document_url,
+        "status": vp.status,
+        "payment_date": vp.payment_date.isoformat() if vp.payment_date else None,
+        "verified_at": vp.verified_at.isoformat() if vp.verified_at else None,
+        "notes": vp.notes,
+        "created_at": vp.created_at.isoformat() if vp.created_at else None,
+    }
+
+
+def list_vendor_payments(
+    db: Session,
+    *,
+    canteen_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    status_filter: Optional[str] = None,
+) -> list[dict]:
+    stmt = select(VendorPayment)
+    if canteen_id:
+        stmt = stmt.where((VendorPayment.canteen_id == canteen_id) | (VendorPayment.canteen_id.is_(None)))
+    if supplier_id:
+        stmt = stmt.where(VendorPayment.supplier_id == supplier_id)
+    if status_filter and status_filter != "all":
+        stmt = stmt.where(VendorPayment.status == status_filter)
+    rows = list(db.scalars(stmt.order_by(VendorPayment.created_at.desc())).all())
+    if not rows:
+        return []
+    sup_ids = {r.supplier_id for r in rows}
+    po_ids = {r.purchase_order_id for r in rows if r.purchase_order_id}
+    sup_map = {s.id: s.name for s in db.scalars(select(Supplier).where(Supplier.id.in_(sup_ids))).all()}
+    po_map = (
+        {p.id: p.po_number for p in db.scalars(select(PurchaseOrder).where(PurchaseOrder.id.in_(po_ids))).all()}
+        if po_ids
+        else {}
+    )
+    return [
+        _serialize_vendor_payment(r, sup_name=sup_map.get(r.supplier_id), po_number=po_map.get(r.purchase_order_id))
+        for r in rows
+    ]
+
+
+def get_supplier_statement(db: Session, supplier_id: UUID) -> dict:
+    sup = db.get(Supplier, supplier_id)
+    if not sup:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    perf_map = _compute_supplier_metrics_map(db, [sup.id])
+    vendor_info = _serialize_supplier(sup, perf_map.get(sup.id))
+    pos = list(
+        db.scalars(
+            select(PurchaseOrder)
+            .where(PurchaseOrder.supplier_id == sup.id)
+            .order_by(PurchaseOrder.created_at.asc())
+        ).all()
+    )
+    payments = list(
+        db.scalars(
+            select(VendorPayment)
+            .where(VendorPayment.supplier_id == sup.id)
+            .order_by(VendorPayment.created_at.asc())
+        ).all()
+    )
+    grns = list(
+        db.scalars(
+            select(GoodsReceipt)
+            .where(GoodsReceipt.supplier_id == sup.id)
+            .order_by(GoodsReceipt.received_at.desc())
+        ).all()
+    )
+
+    events: list[dict] = []
+    for p in pos:
+        if p.status in ("cancelled", "draft"):
+            continue
+        events.append({
+            "timestamp": p.created_at.isoformat() if p.created_at else "",
+            "entry_type": "purchase_order",
+            "reference": p.po_number,
+            "status": p.status,
+            "debit_billed": Decimal(str(p.total_cost or 0)).quantize(Decimal("0.01")),
+            "credit_paid": Decimal("0.00"),
+            "notes": p.notes,
+        })
+    for vp in payments:
+        if vp.status != "verified":
+            continue
+        events.append({
+            "timestamp": (vp.verified_at or vp.created_at).isoformat() if (vp.verified_at or vp.created_at) else "",
+            "entry_type": "vendor_payment",
+            "reference": vp.payment_reference or vp.payment_number,
+            "status": vp.status,
+            "debit_billed": Decimal("0.00"),
+            "credit_paid": Decimal(str(vp.amount or 0)).quantize(Decimal("0.01")),
+            "notes": vp.notes,
+        })
+    events.sort(key=lambda e: e["timestamp"])
+
+    running = Decimal("0.00")
+    ledger: list[dict] = []
+    for e in events:
+        running = (running + e["debit_billed"] - e["credit_paid"]).quantize(Decimal("0.01"))
+        ledger.append({
+            "timestamp": e["timestamp"],
+            "entry_type": e["entry_type"],
+            "reference": e["reference"],
+            "status": e["status"],
+            "debit_billed": str(e["debit_billed"]),
+            "credit_paid": str(e["credit_paid"]),
+            "running_balance": str(running),
+            "notes": e["notes"],
+        })
+
+    po_map = {p.id: p.po_number for p in pos}
+    return {
+        "vendor": vendor_info,
+        "purchase_orders": [_serialize_purchase_order(db, p) for p in reversed(pos)],
+        "vendor_payments": [
+            _serialize_vendor_payment(vp, sup_name=sup.name, po_number=po_map.get(vp.purchase_order_id))
+            for vp in reversed(payments)
+        ],
+        "goods_receipts_count": len(grns),
+        "ledger": ledger,
+    }
 
 
 def adjust_or_waste_stock(

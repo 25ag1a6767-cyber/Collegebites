@@ -28,11 +28,11 @@ from app.models.order import (
     SlotReservation,
 )
 from app.models.payment import OrderQRCode, Payment, PaymentTransaction, PickupToken
-from app.models.promotion import LoyaltyAccount, LoyaltyTransaction
+from app.models.promotion import Coupon, CouponRedemption, LoyaltyAccount, LoyaltyTransaction
 from app.schemas.order import CheckoutItemDirectIn, CheckoutRequest, OrderItemOut, OrderOut, PickupSlotOut
 from app.services.audit_service import record_audit_log
 from app.services.auth_service import validate_guest_otp_token
-from app.services.cart_service import get_active_cart
+from app.services.cart_service import evaluate_coupon_discount, get_active_cart
 from app.services.college_service import compute_canteen_live_status, get_or_create_college_settings
 from app.services.menu_service import compute_schedule_availability_map
 from app.websockets import emit_order_event_sync
@@ -430,8 +430,11 @@ def checkout_order(
                     )
                 )
 
-    if payload.coupon_code and payload.coupon_code.strip():
-        raise HTTPException(status_code=400, detail="Coupons are disabled and not supported")
+    eff_coupon_code = (
+        payload.coupon_code.strip().upper()
+        if (payload.coupon_code and payload.coupon_code.strip())
+        else (cart.coupon_code.strip().upper() if (cart and cart.coupon_code and cart.coupon_code.strip()) else None)
+    )
 
     if not line_specs:
         raise HTTPException(status_code=400, detail="Cart is empty; add items before checkout")
@@ -572,6 +575,24 @@ def checkout_order(
                 pass
 
         discount = Decimal("0.00")
+        applied_coupon: Optional[Coupon] = None
+        coupon_discount = Decimal("0.00")
+        if eff_coupon_code:
+            c_res = evaluate_coupon_discount(
+                db,
+                coupon_code=eff_coupon_code,
+                canteen_id=canteen.id,
+                line_items=[
+                    {"food_item_id": f.id, "category_id": f.category_id, "line_subtotal": l_sub}
+                    for f, _v, _q, _up, _au, l_sub, _in, _cu in prepared_items
+                ],
+                subtotal=subtotal,
+                user_id=user_id,
+                raise_on_invalid=True,
+            )
+            applied_coupon = db.scalar(select(Coupon).where(Coupon.id == c_res["coupon"].id).with_for_update())
+            coupon_discount = c_res["discount_amount"]
+            discount = _quantize(discount + coupon_discount)
 
         redeemed_pts = 0
         loyalty_acct: Optional[LoyaltyAccount] = None
@@ -630,7 +651,7 @@ def checkout_order(
             discount_amount=_quantize(discount),
             tax_amount=tax_amount,
             total_amount=total_amount,
-            coupon_code=None,
+            coupon_code=applied_coupon.code if applied_coupon else None,
             estimated_prep_minutes=est_prep,
             estimated_pickup_at=now + timedelta(minutes=est_prep),
             notes=payload.notes,
@@ -669,6 +690,19 @@ def checkout_order(
         if pickup_slot:
             slot_exp = (now + timedelta(minutes=15)) if payload.payment_method in ("razorpay", "stripe") else None
             db.add(SlotReservation(pickup_slot_id=pickup_slot.id, order_id=order.id, status="reserved", expires_at=slot_exp))
+
+        if applied_coupon and coupon_discount > Decimal("0.00"):
+            applied_coupon.times_used += 1
+            db.add(
+                CouponRedemption(
+                    coupon_id=applied_coupon.id,
+                    order_id=order.id,
+                    user_id=user_id,
+                    discount_applied=coupon_discount,
+                )
+            )
+            if cart and cart.coupon_code:
+                cart.coupon_code = None
 
         if loyalty_acct and redeemed_pts > 0:
             loyalty_acct.points_balance -= redeemed_pts

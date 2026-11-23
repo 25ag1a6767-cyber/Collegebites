@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, Money, QuantityNumeric, TimestampMixin, UUIDPrimaryKeyMixin
@@ -18,6 +18,9 @@ class Supplier(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     email: Mapped[Optional[str]] = mapped_column(String(160))
     address: Mapped[Optional[str]] = mapped_column(Text)
     gst_number: Mapped[Optional[str]] = mapped_column(String(32))
+    business_details: Mapped[Optional[str]] = mapped_column(Text)
+    supplied_products: Mapped[Optional[list]] = mapped_column(JSON, default=list)
+    payment_terms: Mapped[Optional[str]] = mapped_column(String(80))
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
 
@@ -88,9 +91,14 @@ class PurchaseOrder(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     po_number: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
     canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
     supplier_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ordered")  # draft | ordered | received | cancelled
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ordered")  # draft | pending_approval | approved | ordered | partially_received | partial | received | cancelled
+    subtotal_amount: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    tax_amount: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
     total_cost: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
     ordered_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    approved_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    expected_delivery_date: Mapped[Optional[date]] = mapped_column(Date)
     received_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     notes: Mapped[Optional[str]] = mapped_column(Text)
 
@@ -101,11 +109,88 @@ class PurchaseOrderItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     purchase_order_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    ingredient_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingredients.id", ondelete="RESTRICT"), nullable=False)
+    ingredient_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("ingredients.id", ondelete="RESTRICT"), nullable=True)
+    item_name: Mapped[Optional[str]] = mapped_column(String(140))
+    unit: Mapped[str] = mapped_column(String(32), nullable=False, default="units")
     quantity_ordered: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False)
     quantity_received: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    quantity_damaged: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    quantity_rejected: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    quantity_missing: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
     unit_cost: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    tax_rate_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, default=Decimal("0.00"))
+    tax_amount: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
     expiry_date: Mapped[Optional[date]] = mapped_column(Date)
+
+
+class GoodsReceipt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "goods_receipts"
+
+    grn_number: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
+    purchase_order_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("purchase_orders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    canteen_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    supplier_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(96), unique=True)
+    delivery_challan_ref: Mapped[Optional[str]] = mapped_column(String(96))
+    received_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class GoodsReceiptItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "goods_receipt_items"
+
+    goods_receipt_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("goods_receipts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    po_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("purchase_order_items.id", ondelete="CASCADE"), nullable=False
+    )
+    ingredient_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("ingredients.id", ondelete="SET NULL")
+    )
+    item_name: Mapped[str] = mapped_column(String(140), nullable=False)
+    quantity_delivered: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False)
+    quantity_accepted: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False)
+    quantity_damaged: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    quantity_rejected: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    quantity_missing: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    unit_cost: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+
+
+class VendorPayment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "vendor_payments"
+
+    payment_number: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
+    supplier_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("suppliers.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("canteens.id", ondelete="SET NULL"), index=True
+    )
+    purchase_order_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("purchase_orders.id", ondelete="SET NULL"), index=True
+    )
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(32), nullable=False, default="bank_transfer")
+    payment_reference: Mapped[Optional[str]] = mapped_column(String(128))
+    document_url: Mapped[Optional[str]] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending_verification", index=True
+    )  # pending_verification | verified | cancelled
+    payment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    recorded_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    verified_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    notes: Mapped[Optional[str]] = mapped_column(Text)
 
 
 class StockAdjustment(Base, UUIDPrimaryKeyMixin, TimestampMixin):

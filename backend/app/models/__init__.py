@@ -55,6 +55,7 @@ from app.models.order import (
     SlotReservation,
 )
 from app.models.payment import (
+    Invoice,
     OrderHandoverRecord,
     OrderQRCode,
     OrderTokenSequence,
@@ -71,6 +72,8 @@ from app.models.payment import (
 )
 from app.models.inventory import (
     DailyFoodPrepLog,
+    GoodsReceipt,
+    GoodsReceiptItem,
     InventoryAuditLog,
     InventoryItem,
     PriceChangeRequest,
@@ -81,7 +84,18 @@ from app.models.inventory import (
     StockMovement,
     StockTransfer,
     Supplier,
+    VendorPayment,
     WastageRecord,
+)
+from app.models.meal_plan import (
+    MealPlan,
+    MealPlanRedemption,
+    StudentMealSubscription,
+)
+from app.models.event import (
+    CollegeEvent,
+    EventBulkOrder,
+    EventBulkOrderItem,
 )
 from app.models.staff import StaffAttendance, StaffShift, StaffTask, StaffWeeklySchedule
 from app.models.promotion import (
@@ -213,4 +227,14 @@ __all__ = [
     "BackupRecord",
     "BackupSetting",
     "RecoveryLog",
+    "GoodsReceipt",
+    "GoodsReceiptItem",
+    "VendorPayment",
+    "MealPlan",
+    "StudentMealSubscription",
+    "MealPlanRedemption",
+    "CollegeEvent",
+    "EventBulkOrder",
+    "EventBulkOrderItem",
+    "Invoice",
 ]

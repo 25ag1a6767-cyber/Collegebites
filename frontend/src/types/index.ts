@@ -140,6 +140,8 @@ export interface FoodItem {
   portion_size?: string | null;
   calories?: number | null;
   nutrition_info?: Record<string, unknown> | null;
+  nutrition_verified?: boolean;
+  nutrition_disclaimer?: string | null;
   spice_levels: string[];
   sugar_levels: string[];
   removable_ingredients: string[];
