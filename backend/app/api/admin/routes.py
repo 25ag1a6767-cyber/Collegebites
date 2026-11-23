@@ -1,4 +1,5 @@
 import hmac
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -22,7 +23,16 @@ from app.core.permissions import (
     scoped_canteen_for_principal,
 )
 from app.core.redis_client import get_redis
-from app.models.auth import Permission, Role, RolePermission, StaffProfile, User, UserPermission
+from app.models.auth import (
+    Permission,
+    RefreshToken,
+    Role,
+    RolePermission,
+    SessionRecord,
+    StaffProfile,
+    User,
+    UserPermission,
+)
 from app.models.college import CollegeHoliday, Counter, DiningTable, Kitchen, KitchenStation, PickupLocation
 from app.models.order import Order, OrderItem
 from app.models.payment import Payment, PickupToken
@@ -340,6 +350,16 @@ def update_user_status(
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     target.is_active = payload.is_active
+    if not payload.is_active:
+        now = datetime.now(timezone.utc)
+        for sess in db.scalars(
+            select(SessionRecord).where(SessionRecord.user_id == target.id, SessionRecord.revoked_at.is_(None))
+        ).all():
+            sess.revoked_at = now
+        for tok in db.scalars(
+            select(RefreshToken).where(RefreshToken.user_id == target.id, RefreshToken.revoked_at.is_(None))
+        ).all():
+            tok.revoked_at = now
     record_audit_log(
         db,
         action="user.status_updated",

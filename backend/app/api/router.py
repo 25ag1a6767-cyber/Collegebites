@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.admin.routes import router as admin_router
 from app.api.auth.routes import router as auth_router
+from app.api.backups.routes import router as backups_router
 from app.api.canteens.routes import router as canteens_router
 from app.api.carts.routes import router as carts_router
 from app.api.customers.routes import router as customers_router
@@ -20,6 +21,7 @@ from app.api.qr.routes import router as qr_router
 from app.api.queue.routes import router as queue_router
 from app.api.realtime.routes import router as realtime_router
 from app.api.reports.routes import router as reports_router
+from app.api.security.routes import router as security_router
 from app.api.staff.routes import router as staff_router
 from app.api.support.routes import router as support_router
 from app.api.tokens.routes import router as tokens_router
@@ -47,6 +49,8 @@ api_router.include_router(promotions_router)
 api_router.include_router(notifications_router)
 api_router.include_router(support_router)
 api_router.include_router(reports_router)
+api_router.include_router(security_router)
+api_router.include_router(backups_router)
 api_router.include_router(kiosk_router)
 api_router.include_router(realtime_router)
 api_router.include_router(ws_router)

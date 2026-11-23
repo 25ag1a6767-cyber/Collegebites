@@ -18,17 +18,21 @@ interface AppState {
   guestOrderTokens: Record<string, string>;
   printerWidth: "58mm" | "80mm" | "a4";
   autoPrintPos: boolean;
+  pendingCheckoutKey: string | null;
+  pendingCheckoutCartSig: string | null;
 
   setAuth: (accessToken: string, refreshToken: string, user: User) => void;
   logout: () => void;
   setSelectedCanteen: (canteenId: string, counterId?: string | null, tableId?: string | null, qrCode?: string | null) => void;
   saveGuestOrderToken: (orderNumber: string, token: string) => void;
   setPrinterPrefs: (width: "58mm" | "80mm" | "a4", autoPrintPos: boolean) => void;
+  getOrCreateCheckoutIdemKey: (cartSig: string) => string;
+  clearCheckoutIdemKey: () => void;
 }
 
 export const useAppStore = create<AppState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       accessToken: null,
       refreshToken: null,
       user: null,
@@ -40,9 +44,11 @@ export const useAppStore = create<AppState>()(
       guestOrderTokens: {},
       printerWidth: "80mm",
       autoPrintPos: true,
+      pendingCheckoutKey: null,
+      pendingCheckoutCartSig: null,
 
       setAuth: (accessToken, refreshToken, user) => set({ accessToken, refreshToken, user }),
-      logout: () => set({ accessToken: null, refreshToken: null, user: null }),
+      logout: () => set({ accessToken: null, refreshToken: null, user: null, pendingCheckoutKey: null, pendingCheckoutCartSig: null }),
       setSelectedCanteen: (canteenId, counterId = null, tableId = null, qrCode = null) =>
         set({
           selectedCanteenId: canteenId,
@@ -55,6 +61,16 @@ export const useAppStore = create<AppState>()(
           guestOrderTokens: { ...state.guestOrderTokens, [orderNumber]: token },
         })),
       setPrinterPrefs: (printerWidth, autoPrintPos) => set({ printerWidth, autoPrintPos }),
+      getOrCreateCheckoutIdemKey: (cartSig) => {
+        const cur = get();
+        if (cur.pendingCheckoutKey && cur.pendingCheckoutCartSig === cartSig) {
+          return cur.pendingCheckoutKey;
+        }
+        const nextKey = "cb-idem-" + Date.now() + "-" + Math.random().toString(36).slice(2, 9);
+        set({ pendingCheckoutKey: nextKey, pendingCheckoutCartSig: cartSig });
+        return nextKey;
+      },
+      clearCheckoutIdemKey: () => set({ pendingCheckoutKey: null, pendingCheckoutCartSig: null }),
     }),
     {
       name: "collegebites-app-state",

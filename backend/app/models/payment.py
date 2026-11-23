@@ -70,15 +70,41 @@ class PaymentWebhookEvent(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
+class ReconciliationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "reconciliation_runs"
+
+    trigger: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("canteens.id", ondelete="SET NULL"), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    total_checked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    matched_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    discrepancy_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_verified_amount: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    run_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    summary_json: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
+
 class PaymentReconciliation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "payment_reconciliation"
+    __table_args__ = (UniqueConstraint("payment_id", name="uq_reconcil_payment_id"),)
 
     payment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payments.id", ondelete="CASCADE"), nullable=False, index=True)
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("reconciliation_runs.id", ondelete="SET NULL"), index=True)
+    gateway_provider: Mapped[str] = mapped_column(String(48), nullable=False, default="razorpay")
+    gateway_settlement_id: Mapped[Optional[str]] = mapped_column(String(120))
+    gateway_reference: Mapped[Optional[str]] = mapped_column(String(120))
     expected_amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
     settled_amount: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
     discrepancy_amount: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")  # matched | discrepancy | pending
+    gateway_fee: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    tax_on_fee: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")  # matched | discrepancy | pending | failed
+    reconciliation_source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    discrepancy_type: Mapped[str] = mapped_column(String(48), nullable=False, default="none")
     reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     reconciled_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     notes: Mapped[Optional[str]] = mapped_column(Text)

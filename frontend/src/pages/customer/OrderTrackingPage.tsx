@@ -16,6 +16,8 @@ import {
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
+import { fetchWithOfflineCache, readOfflineCache, saveOfflineCache } from "../../utils/offlineSync";
 import type { Order, ReceiptSnapshot } from "../../types";
 import { enableBrowserPushNotifications, playOrderAlertChime, showBrowserNotification } from "../../utils/notifications";
 import { BrandLoadingState, BrandLogo } from "../../components/branding/BrandLogo";
@@ -49,6 +51,8 @@ export const OrderTrackingPage: React.FC = () => {
   const qc = useQueryClient();
   const { pushToast } = useToast();
   const { accessToken, guestOrderTokens, setSelectedCanteen } = useAppStore();
+  const isOnline = useOfflineStore((s) => s.isOnline);
+  const offlineCachedOrder = orderNumber ? readOfflineCache<Order>(`order:${orderNumber}`) : null;
 
   const guestToken = searchParams.get("guest_token") || (orderNumber ? guestOrderTokens[orderNumber] : undefined);
   const [manualGuestToken, setManualGuestToken] = useState(guestToken || "");
@@ -73,8 +77,11 @@ export const OrderTrackingPage: React.FC = () => {
   const { data: order, error, refetch } = useQuery<Order>({
     queryKey: ["order", orderNumber, effectiveToken],
     enabled: Boolean(orderNumber),
-    queryFn: async () => (await api.get(`/orders/${orderNumber}${querySuffix}`)).data,
-    refetchInterval: () => (realtimeLiveRef.current ? 30000 : 5000),
+    queryFn: () =>
+      fetchWithOfflineCache(`order:${orderNumber}`, async () =>
+        (await api.get(`/orders/${orderNumber}${querySuffix}`)).data
+      ),
+    refetchInterval: () => (!isOnline ? false : realtimeLiveRef.current ? 30000 : 5000),
     refetchIntervalInBackground: true,
   });
 
@@ -86,6 +93,7 @@ export const OrderTrackingPage: React.FC = () => {
     queryKeys: [["order", orderNumber, effectiveToken], ["receipt", orderNumber, effectiveToken]],
     onSnapshot: (snap) => {
       if (snap?.order) {
+        if (orderNumber) saveOfflineCache(`order:${orderNumber}`, snap.order);
         qc.setQueryData(["order", orderNumber, effectiveToken], snap.order);
         if (snap.order.payment_status === "CONFIRMED") {
           qc.invalidateQueries({ queryKey: ["receipt", orderNumber, effectiveToken] });
@@ -98,7 +106,10 @@ export const OrderTrackingPage: React.FC = () => {
   const { data: receipt, refetch: refetchReceipt } = useQuery<ReceiptSnapshot>({
     queryKey: ["receipt", orderNumber, effectiveToken],
     enabled: Boolean(order && order.payment_status === "CONFIRMED"),
-    queryFn: async () => (await api.get(`/tokens/receipts/${orderNumber}${querySuffix}`)).data,
+    queryFn: () =>
+      fetchWithOfflineCache(`receipt:${orderNumber}`, async () =>
+        (await api.get(`/tokens/receipts/${orderNumber}${querySuffix}`)).data
+      ),
   });
 
   // Complete or record cancelled Stripe PaymentIntent / Checkout redirect
@@ -363,6 +374,11 @@ export const OrderTrackingPage: React.FC = () => {
                   Status: {order.status}
                 </Badge>
                 <RealtimeStatusBadge status={orderSyncStatus} lastSyncedAt={orderLastSyncedAt} />
+                {!isOnline && offlineCachedOrder?.cachedAt && (
+                  <Badge tone="amber">
+                    Offline Snapshot ({new Date(offlineCachedOrder.cachedAt).toLocaleTimeString()})
+                  </Badge>
+                )}
                 {order.delayed_minutes > 0 && (
                   <Badge tone="amber">
                     Delayed +{order.delayed_minutes}m ({order.delay_reason})
@@ -506,7 +522,7 @@ export const OrderTrackingPage: React.FC = () => {
                     <Button
                       size="sm"
                       variant="success"
-                      disabled={busy}
+                      disabled={busy || !isOnline}
                       onClick={() =>
                         setStripeModalOrder(
                           effectiveToken && !order.guest_access_token
@@ -518,10 +534,10 @@ export const OrderTrackingPage: React.FC = () => {
                       Complete Stripe Payment
                     </Button>
                   )}
-                <Button size="sm" variant="primary" disabled={busy} onClick={() => void handleRetryOnlinePayment("razorpay")}>
+                <Button size="sm" variant="primary" disabled={busy || !isOnline} onClick={() => void handleRetryOnlinePayment("razorpay")}>
                   <RefreshCw className="h-3.5 w-3.5" /> Pay via Razorpay UPI
                 </Button>
-                <Button size="sm" variant="secondary" disabled={busy} onClick={() => void handleRetryOnlinePayment("stripe")}>
+                <Button size="sm" variant="secondary" disabled={busy || !isOnline} onClick={() => void handleRetryOnlinePayment("stripe")}>
                   <RefreshCw className="h-3.5 w-3.5" /> Pay via Stripe
                 </Button>
               </>

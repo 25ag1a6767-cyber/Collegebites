@@ -566,6 +566,14 @@ def change_user_password(
     ).all()
     for sess in other_sessions:
         sess.revoked_at = now
+    for tok in db.scalars(
+        select(RefreshToken).where(
+            RefreshToken.user_id == user.id,
+            RefreshToken.session_id != current_session_id,
+            RefreshToken.revoked_at.is_(None),
+        )
+    ).all():
+        tok.revoked_at = now
     record_audit_log(
         db,
         action="user.password_changed",
@@ -694,6 +702,16 @@ def assign_user_roles(
 
     if data.is_active is not None:
         user.is_active = data.is_active
+        if not data.is_active:
+            now = datetime.now(timezone.utc)
+            for sess in db.scalars(
+                select(SessionRecord).where(SessionRecord.user_id == user.id, SessionRecord.revoked_at.is_(None))
+            ).all():
+                sess.revoked_at = now
+            for tok in db.scalars(
+                select(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            ).all():
+                tok.revoked_at = now
 
     staff_prof = db.scalar(select(StaffProfile).where(StaffProfile.user_id == user.id))
     if staff_prof and data.canteen_id is not None:

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import limiter
 from app.core.permissions import (
     AuthenticatedPrincipal,
     client_ip_from_request,
@@ -28,7 +29,7 @@ from app.schemas.auth import (
     UserOut,
 )
 from app.schemas.common import MessageResponse
-from app.services import auth_service
+from app.services import auth_service, security_service
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -39,8 +40,30 @@ def register(payload: RegisterCustomerRequest, request: Request, db: Session = D
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit("12/minute")
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    return auth_service.login_user(db, payload, ip_address=client_ip_from_request(request))
+    ip = client_ip_from_request(request)
+    ua = request.headers.get("user-agent")
+    security_service.assert_login_allowed(db, payload.identifier, ip_address=ip, user_agent=ua)
+    try:
+        res = auth_service.login_user(db, payload, ip_address=ip)
+    except HTTPException as exc:
+        security_service.record_login_failure(
+            db,
+            payload.identifier,
+            ip_address=ip,
+            user_agent=ua,
+            reason=str(exc.detail),
+        )
+        raise
+    security_service.record_login_success(
+        db,
+        res.user.id,
+        payload.identifier,
+        ip_address=ip,
+        user_agent=ua,
+    )
+    return res
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -72,12 +95,14 @@ def get_otp_capabilities():
 
 
 @router.post("/otp/request", response_model=OTPRequestResponse)
-def request_otp(payload: OTPRequest, db: Session = Depends(get_db)):
+@limiter.limit("8/minute")
+def request_otp(payload: OTPRequest, request: Request, db: Session = Depends(get_db)):
     return auth_service.request_otp(db, payload)
 
 
 @router.post("/otp/verify", response_model=OTPVerifyResponse)
-def verify_otp(payload: OTPVerifyRequest, db: Session = Depends(get_db)):
+@limiter.limit("15/minute")
+def verify_otp(payload: OTPVerifyRequest, request: Request, db: Session = Depends(get_db)):
     return auth_service.verify_otp(db, payload)
 
 
@@ -95,8 +120,24 @@ class PhoneVerifyCompleteIn(BaseModel):
 
 
 @router.post("/otp/login", response_model=TokenResponse)
+@limiter.limit("10/minute")
 def otp_login(payload: OTPLoginRequest, request: Request, db: Session = Depends(get_db)):
-    return auth_service.login_with_otp(db, payload, ip_address=client_ip_from_request(request))
+    ip = client_ip_from_request(request)
+    ua = request.headers.get("user-agent")
+    security_service.assert_login_allowed(db, payload.target, ip_address=ip, user_agent=ua)
+    try:
+        res = auth_service.login_with_otp(db, payload, ip_address=ip)
+    except HTTPException as exc:
+        security_service.record_login_failure(
+            db,
+            payload.target,
+            ip_address=ip,
+            user_agent=ua,
+            reason=str(exc.detail),
+        )
+        raise
+    security_service.record_login_success(db, res.user.id, payload.target, ip_address=ip, user_agent=ua)
+    return res
 
 
 @router.post("/phone/verify", response_model=UserOut)
@@ -122,6 +163,7 @@ def change_password(
 
 
 @router.post("/password-reset/confirm", response_model=MessageResponse)
+@limiter.limit("8/minute")
 def password_reset_confirm(payload: PasswordResetConfirmRequest, request: Request, db: Session = Depends(get_db)):
     auth_service.confirm_password_reset(db, payload, ip_address=client_ip_from_request(request))
     return MessageResponse(message="Password reset successfully")

@@ -65,6 +65,9 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_failed_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     user_roles: Mapped[list["UserRole"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     customer_profile: Mapped[Optional["CustomerProfile"]] = relationship(

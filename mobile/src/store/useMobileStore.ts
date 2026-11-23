@@ -41,6 +41,9 @@ interface MobileState {
   scannedQrCode: string | null;
   guestOrderTokens: Record<string, string>;
   cachedOrders: Record<string, any>;
+  cachedCanteens: any[];
+  cachedMenuByCanteen: Record<string, any[]>;
+  isOnline: boolean;
   onboardingSeen: boolean;
   hydrated: boolean;
 
@@ -50,6 +53,9 @@ interface MobileState {
   setCanteen: (canteenId: string, qrCode?: string | null) => void;
   saveGuestOrderToken: (orderNumber: string, token: string) => void;
   saveCachedOrder: (orderNumber: string, orderObj: any) => void;
+  saveCachedCanteens: (list: any[]) => void;
+  saveCachedMenu: (canteenId: string, items: any[]) => void;
+  setOnlineStatus: (online: boolean) => void;
   markOnboardingSeen: () => Promise<void>;
 }
 
@@ -64,6 +70,9 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   scannedQrCode: null,
   guestOrderTokens: {},
   cachedOrders: {},
+  cachedCanteens: [],
+  cachedMenuByCanteen: {},
+  isOnline: true,
   onboardingSeen: false,
   hydrated: false,
 
@@ -208,4 +217,29 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     setSecure(`cb_order_${orderNumber}`, JSON.stringify(compact)).catch(() => {});
     setSecure("cb_order_keys", JSON.stringify(keptKeys)).catch(() => {});
   },
+  saveCachedCanteens: (list) => {
+    const compact = (list || []).slice(0, 10).map((c: any) => ({
+      id: c.id,
+      name: c.name,
+      slug: c.slug,
+      location: c.location,
+      crowd_level: c.crowd_level,
+      estimated_wait_minutes: c.estimated_wait_minutes,
+    }));
+    set({ cachedCanteens: compact });
+    setSecure("cb_cached_canteens", JSON.stringify(compact)).catch(() => {});
+  },
+  saveCachedMenu: (canteenId, items) => {
+    const compact = (items || []).slice(0, 20).map((i: any) => ({
+      id: i.id,
+      name: i.name,
+      base_price: i.base_price,
+      is_available: i.is_available,
+      veg_type: i.veg_type,
+      prep_time_minutes: i.prep_time_minutes,
+      category_name: i.category_name,
+    }));
+    set((s) => ({ cachedMenuByCanteen: { ...s.cachedMenuByCanteen, [canteenId]: compact } }));
+  },
+  setOnlineStatus: (isOnline) => set({ isOnline }),
 }));

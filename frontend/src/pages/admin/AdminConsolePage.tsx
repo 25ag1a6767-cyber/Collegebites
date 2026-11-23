@@ -3,24 +3,32 @@ import { useQuery } from "@tanstack/react-query";
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
 import type { Canteen, CollegeSettings, FoodItem } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
+import { NetworkSyncPanel } from "../../components/ui/NetworkSyncPanel";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 import { BiAnalyticsPanel } from "./components/BiAnalyticsPanel";
+import { BackupRecoveryPanel } from "./components/BackupRecoveryPanel";
 import { LocationsTab } from "./components/LocationsTab";
 import { MenuTab, QRTab } from "./components/MenuQrTab";
 import { QueueTab, StaffTab } from "./components/QueueStaffTab";
 import { PromotionsTab, SystemTab } from "./components/PromotionsSystemTab";
 import { OrdersUsersTab } from "./components/OrdersUsersTab";
+import { ReconciliationPanel } from "./components/ReconciliationPanel";
+import { SecurityMonitorPanel } from "./components/SecurityMonitorPanel";
 import { WebsiteQrTab } from "./components/WebsiteQrTab";
 
 export const AdminConsolePage: React.FC = () => {
   const { pushToast } = useToast();
   const { user, selectedCanteenId } = useAppStore();
   const isCollegeAdmin = Boolean(user?.roles?.some((r) => r === "super_admin" || r === "college_admin"));
+  const offlinePendingCount = useOfflineStore(
+    (s) => s.pendingQueue.filter((q) => q.status === "pending" || q.status === "conflict").length
+  );
   const [tab, setTab] = useState<
-    "analytics" | "orders" | "locations" | "menu" | "qr" | "website_qr" | "queue" | "staff" | "promotions" | "support" | "system"
+    "analytics" | "orders" | "locations" | "menu" | "qr" | "website_qr" | "queue" | "staff" | "promotions" | "support" | "reconciliation" | "security" | "backup" | "network" | "system"
   >("analytics");
 
   const { data: college, refetch: refetchCollege } = useQuery<CollegeSettings>({
@@ -56,7 +64,7 @@ export const AdminConsolePage: React.FC = () => {
       ? activeCanteenId
       : "";
   const { status: adminSyncStatus, lastSyncedAt: adminLastSyncedAt } = useRealtimeSync({
-    enabled: tab === "analytics" || tab === "queue",
+    enabled: Boolean(user),
     ssePath: `/realtime/staff/orders/stream${streamCanteenScope ? `?canteen_id=${streamCanteenScope}` : ""}`,
     wsPath: activeCanteenId ? `/ws/kitchen/${activeCanteenId}` : "/ws/board/all",
     queryKeys: [["admin-report"], ["admin-queue"], ["admin-all-orders"]],
@@ -172,6 +180,10 @@ export const AdminConsolePage: React.FC = () => {
           { k: "staff", l: "Staff, Attendance & Tasks" },
           { k: "promotions", l: "Announcements & Banners" },
           { k: "support", l: "Support Tickets" },
+          { k: "reconciliation", l: "Reconciliation" },
+          { k: "security", l: "Security & Fraud" },
+          ...(isCollegeAdmin ? [{ k: "backup", l: "Backups & DR" }] : []),
+          { k: "network", l: offlinePendingCount > 0 ? `Network & Sync (${offlinePendingCount})` : "Network & Sync" },
           ...(isCollegeAdmin ? [{ k: "system", l: "Settings, Reconcile & Audits" }] : []),
         ].map((item) => (
           <Button
@@ -353,6 +365,18 @@ export const AdminConsolePage: React.FC = () => {
           ))}
         </Card>
       )}
+
+      {tab === "reconciliation" && (
+        <ReconciliationPanel isCollegeAdmin={isCollegeAdmin} activeCanteenId={activeCanteenId} downloadBlob={downloadBlob} />
+      )}
+
+      {tab === "security" && (
+        <SecurityMonitorPanel isCollegeAdmin={isCollegeAdmin} activeCanteenId={activeCanteenId} />
+      )}
+
+      {tab === "backup" && isCollegeAdmin && <BackupRecoveryPanel downloadBlob={downloadBlob} />}
+
+      {tab === "network" && <NetworkSyncPanel />}
 
       {tab === "system" && (
         <SystemTab college={college} refetchCollege={refetchCollege} health={health} auditLogs={auditLogs} />

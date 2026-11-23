@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { AppState, type AppStateStatus } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { buildMobileWsUrl } from "../api/client";
+import { useMobileStore } from "../store/useMobileStore";
 
-export type MobileRealtimeStatus = "connecting" | "live" | "reconnecting";
+export type MobileRealtimeStatus = "connecting" | "live" | "reconnecting" | "offline";
 
 export function useMobileRealtimeWs(options: {
   enabled: boolean;
@@ -38,6 +39,7 @@ export function useMobileRealtimeWs(options: {
         ws.onopen = () => {
           attempt = 0;
           setStatus("live");
+          useMobileStore.getState().setOnlineStatus(true);
           invalidateAll();
           pingTimer = setInterval(() => {
             if (ws && ws.readyState === WebSocket.OPEN) {
@@ -60,8 +62,10 @@ export function useMobileRealtimeWs(options: {
           pingTimer = null;
           if (!cancelled) {
             attempt += 1;
-            setStatus("reconnecting");
-            const delayMs = Math.min(15000, 1200 * Math.pow(2, Math.min(attempt, 4)));
+            const online = useMobileStore.getState().isOnline;
+            setStatus(online ? "reconnecting" : "offline");
+            const delayMs =
+              Math.min(15000, 1200 * Math.pow(2, Math.min(attempt, 4))) + Math.floor(Math.random() * 400);
             reconnectTimer = setTimeout(connect, delayMs);
           }
         };

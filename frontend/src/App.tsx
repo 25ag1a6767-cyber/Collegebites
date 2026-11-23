@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Navbar } from "./components/layout/Navbar";
+import { OfflineBanner } from "./components/layout/OfflineBanner";
 import { MobileAppNav } from "./components/layout/MobileAppNav";
 import { BrandFooter, BrandLogo } from "./components/branding/BrandLogo";
 import { Button, Card, ToastProvider } from "./components/ui/Primitives";
@@ -77,6 +78,7 @@ export function App() {
         <BrowserRouter>
           <div className="min-h-screen flex flex-col overflow-x-hidden bg-[#fdf8f0]/40 text-slate-900 pb-20 md:pb-0">
             <Navbar />
+            <OfflineBanner />
             <div className="flex-1">
               <Routes>
               <Route path="/" element={<HomePage />} />

@@ -1,25 +1,21 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.logging import setup_logging
+from app.core.rate_limit import limiter
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.websockets import ws_manager
 
 setup_logging()
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=[settings.RATE_LIMIT_DEFAULT],
-    enabled=settings.RATE_LIMIT_ENABLED,
-)
 
 
 @asynccontextmanager
@@ -51,8 +47,14 @@ def create_app() -> FastAPI:
     app.include_router(api_router, prefix=settings.API_PREFIX)
 
     @app.get("/health", tags=["Health"])
-    def health():
-        return {"status": "ok", "service": settings.APP_NAME, "environment": settings.ENVIRONMENT}
+    def health(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "status": "ok",
+            "service": settings.APP_NAME,
+            "environment": settings.ENVIRONMENT,
+            "server_time": datetime.now(timezone.utc).isoformat(),
+        }
 
     return app
 

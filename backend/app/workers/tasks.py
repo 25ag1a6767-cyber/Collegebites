@@ -1,7 +1,11 @@
 from app.core.database import SessionLocal
 from app.integrations.email_provider import send_email
 from app.integrations.sms_provider import send_sms_or_whatsapp
-from app.services.maintenance_service import cleanup_expired_auth_artifacts, scan_inventory_alerts
+from app.services.maintenance_service import (
+    cleanup_expired_auth_artifacts,
+    run_scheduled_maintenance,
+    scan_inventory_alerts,
+)
 from app.workers.celery_app import celery_app
 
 
@@ -31,3 +35,10 @@ def scan_inventory_alerts_task() -> dict:
     """Create unread in-app low-stock & expiry alerts for inventory/canteen managers without spamming duplicates."""
     with SessionLocal() as db:
         return scan_inventory_alerts(db)
+
+
+@celery_app.task
+def scheduled_backup_and_reconcile_task() -> dict:
+    """Run automated financial reconciliation and encrypted database backup when due."""
+    with SessionLocal() as db:
+        return run_scheduled_maintenance(db, trigger="celery_schedule")

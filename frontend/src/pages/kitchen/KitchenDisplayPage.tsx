@@ -4,6 +4,8 @@ import { AlertTriangle, BellRing, Check, Clock, Flame, Printer, Search, Star, Tr
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
+import { executeOrQueueSafeMutation, fetchWithOfflineCache } from "../../utils/offlineSync";
 import type { Canteen, FoodItem, Order } from "../../types";
 import { playOrderAlertChime, showBrowserNotification } from "../../utils/notifications";
 import { BrandLogo } from "../../components/branding/BrandLogo";
@@ -112,17 +114,20 @@ export const KitchenDisplayPage: React.FC = () => {
     queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/staff`)).data,
   });
 
+  const isOnline = useOfflineStore((s) => s.isOnline);
   const { data: orders = [], refetch } = useQuery<Order[]>({
     queryKey: ["kitchen-orders", activeCanteenId, kitchenId, stationId],
     enabled: Boolean(activeCanteenId),
-    queryFn: async () => {
-      const qs = new URLSearchParams();
-      if (kitchenId) qs.set("kitchen_id", kitchenId);
-      if (stationId) qs.set("station_id", stationId);
-      const q = qs.toString() ? `?${qs.toString()}` : "";
-      return (await api.get(`/kitchen/canteens/${activeCanteenId}/orders${q}`)).data;
-    },
-    refetchInterval: kdsSyncStatus === "live" ? 30000 : 4000,
+    queryFn: () =>
+      fetchWithOfflineCache(`kds:${activeCanteenId}:${kitchenId}:${stationId}`, async () => {
+        const qs = new URLSearchParams();
+        if (kitchenId) qs.set("kitchen_id", kitchenId);
+        if (stationId) qs.set("station_id", stationId);
+        const q = qs.toString() ? `?${qs.toString()}` : "";
+        const data = (await api.get(`/kitchen/canteens/${activeCanteenId}/orders${q}`)).data;
+        return data;
+      }),
+    refetchInterval: !isOnline ? false : kdsSyncStatus === "live" ? 30000 : 4000,
     refetchIntervalInBackground: true,
   });
 
@@ -169,9 +174,19 @@ export const KitchenDisplayPage: React.FC = () => {
 
   const act = async (url: string, msg: string) => {
     try {
-      await api.post(url);
-      pushToast(msg, "success");
-      refetch();
+      const res = await executeOrQueueSafeMutation({
+        method: "POST",
+        url,
+        category: "kitchen_status",
+        label: msg,
+        invalidateKeys: [["kitchen-orders", activeCanteenId], ["operational-token-board"]],
+      });
+      if (res.queued) {
+        pushToast(`Offline: queued "${msg}" to sync on reconnect`, "info");
+      } else {
+        pushToast(msg, "success");
+        refetch();
+      }
     } catch (err) {
       pushToast(getApiError(err), "error");
     }

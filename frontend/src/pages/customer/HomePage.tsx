@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
+import { fetchWithOfflineCache } from "../../utils/offlineSync";
 import type { Canteen, CartSummary, FoodCategory, FoodItem } from "../../types";
 import { BrandEmptyState, BrandLoadingState, BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Modal, Select, crowdBadgeTone, useToast } from "../../components/ui/Primitives";
@@ -27,6 +29,7 @@ export const HomePage: React.FC = () => {
   const qc = useQueryClient();
   const { pushToast } = useToast();
   const { user, selectedCanteenId, setSelectedCanteen } = useAppStore();
+  const isOnline = useOfflineStore((s) => s.isOnline);
 
   const [search, setSearch] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>("");
@@ -49,8 +52,8 @@ export const HomePage: React.FC = () => {
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
-    queryFn: async () => (await api.get("/canteens")).data,
-    refetchInterval: 15000,
+    queryFn: () => fetchWithOfflineCache("canteens", async () => (await api.get("/canteens")).data),
+    refetchInterval: isOnline ? 15000 : false,
   });
 
   const activeCanteen = useMemo(
@@ -61,8 +64,11 @@ export const HomePage: React.FC = () => {
   const { data: categories = [] } = useQuery<FoodCategory[]>({
     queryKey: ["categories", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
-    queryFn: async () => (await api.get(`/menus/canteens/${activeCanteen!.id}/categories`)).data,
-    refetchInterval: 8000,
+    queryFn: () =>
+      fetchWithOfflineCache(`categories:${activeCanteen!.id}`, async () =>
+        (await api.get(`/menus/canteens/${activeCanteen!.id}/categories`)).data
+      ),
+    refetchInterval: isOnline ? 8000 : false,
   });
 
   // Honor QR deep-link query params (?canteen=<slug|id>&category=<id|slug>#menu) and /canteen/:canteenSlug
@@ -97,7 +103,7 @@ export const HomePage: React.FC = () => {
   const { data: items = [], isLoading: itemsLoading } = useQuery<FoodItem[]>({
     queryKey: ["menu-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, maxPrice, sortBy, activeTag],
     enabled: Boolean(activeCanteen?.id),
-    refetchInterval: 8000,
+    refetchInterval: isOnline ? 8000 : false,
     queryFn: async () => {
       const params = new URLSearchParams();
       if (search.trim()) params.set("q", search.trim());
@@ -111,7 +117,13 @@ export const HomePage: React.FC = () => {
       if (activeTag === "recommended") params.set("recommended", "true");
       params.set("available_only", "true");
       params.set("sort_by", sortBy);
-      return (await api.get(`/menus/canteens/${activeCanteen!.id}/items?${params.toString()}`)).data;
+      const key =
+        !search.trim() && !selectedCategoryId && vegFilter === "all" && !maxPrice && activeTag === "all"
+          ? `menu:${activeCanteen!.id}:all`
+          : `menu:${activeCanteen!.id}:${params.toString()}`;
+      return fetchWithOfflineCache(key, async () =>
+        (await api.get(`/menus/canteens/${activeCanteen!.id}/items?${params.toString()}`)).data
+      );
     },
   });
 

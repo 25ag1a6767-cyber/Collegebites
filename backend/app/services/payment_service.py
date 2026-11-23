@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -32,6 +32,7 @@ from app.schemas.payment import (
     StripeFailureRequest,
     StripeVerifyRequest,
 )
+from app.services import security_service
 from app.services.audit_service import record_audit_log
 from app.services.order_service import rollback_unpaid_incentives, serialize_order, transition_order_status
 from app.services.receipt_service import create_receipt_for_order
@@ -101,6 +102,17 @@ def _finalize_confirmed_payment(
             actor_user_id=actor_user_id,
             details={"order_status": order.status, "payment_reference": payment_reference},
         )
+        security_service.create_security_alert(
+            db,
+            alert_type="duplicate_payment_callback",
+            severity="high",
+            title=f"Late payment capture on terminal order {order.order_number}",
+            description=f"Captured payment callback ({payment_reference}) arrived for {order.status} order {order.order_number}. Retained under no-refund ledger conflict review.",
+            canteen_id=order.canteen_id,
+            order_id=order.id,
+            metadata={"order_status": order.status, "payment_reference": payment_reference},
+            dedupe_minutes=15,
+        )
         db.commit()
         raise HTTPException(
             status_code=409,
@@ -115,6 +127,17 @@ def _finalize_confirmed_payment(
             )
         )
         if dup_pay:
+            security_service.create_security_alert(
+                db,
+                alert_type="duplicate_payment_callback",
+                severity="high",
+                title=f"Duplicate payment reference {provider_payment_id} blocked",
+                description=f"Payment reference {provider_payment_id} was submitted for order {order.order_number} but belongs to payment {dup_pay.id}.",
+                canteen_id=order.canteen_id,
+                order_id=order.id,
+                metadata={"existing_payment_id": str(dup_pay.id), "provider_payment_id": provider_payment_id},
+            )
+            db.commit()
             raise HTTPException(status_code=409, detail="Payment reference already used for another order")
 
     if payment.status == "CONFIRMED" and order.payment_status == "CONFIRMED":
@@ -206,6 +229,150 @@ def _finalize_confirmed_payment(
     return serialize_order(db, loaded)
 
 
+def _record_invalid_webhook_and_alert(
+    db: Session,
+    *,
+    provider: str,
+    raw_body: bytes,
+    reason: str,
+) -> None:
+    parsed_snippet: dict[str, Any] = {}
+    try:
+        raw_obj = json.loads(raw_body.decode("utf-8", errors="ignore"))
+        if isinstance(raw_obj, dict):
+            parsed_snippet = {
+                "event": raw_obj.get("event") or raw_obj.get("type"),
+                "event_id": raw_obj.get("event_id") or raw_obj.get("id"),
+            }
+    except Exception:
+        parsed_snippet = {"raw_preview": raw_body[:300].decode("utf-8", errors="ignore")}
+
+    evt_id = f"invalid_{provider}_{uuid4().hex[:12]}"
+    db.add(
+        PaymentWebhookEvent(
+            provider=provider,
+            event_id=evt_id,
+            event_type=str(parsed_snippet.get("event") or "invalid_signature")[:120],
+            signature_verified=False,
+            processed=False,
+            processing_error=reason[:500],
+            payload=parsed_snippet,
+        )
+    )
+    security_service.create_security_alert(
+        db,
+        alert_type="webhook_signature_invalid",
+        severity="high",
+        title=f"Invalid {provider.title()} webhook signature rejected",
+        description=f"Webhook callback failed cryptographic verification: {reason}",
+        metadata={"provider": provider, **parsed_snippet},
+        dedupe_minutes=10,
+    )
+    db.commit()
+
+
+def _resolve_payment_by_provider_order(
+    db: Session, *, provider_order_id: str, provider: Optional[str] = None
+) -> Optional[Payment]:
+    stmt = select(Payment).where(Payment.provider_order_id == provider_order_id)
+    if provider:
+        stmt = stmt.where(Payment.provider == provider)
+    row = db.scalar(stmt)
+    if row:
+        return row
+    tx = db.scalar(
+        select(PaymentTransaction)
+        .where(PaymentTransaction.external_reference == provider_order_id)
+        .order_by(PaymentTransaction.created_at.desc())
+    )
+    return db.get(Payment, tx.payment_id) if tx else None
+
+
+def _validate_gateway_amount_currency(
+    db: Session,
+    *,
+    order: Order,
+    payment: Payment,
+    amount_paise: Optional[Any],
+    currency: Optional[str],
+    source: str,
+    gateway_ref: Optional[str],
+) -> bool:
+    expected_paise = int((payment.amount * 100).quantize(Decimal("1")))
+    expected_currency = (payment.currency or "INR").upper()
+    mismatch_type: Optional[str] = None
+    settled_dec = payment.amount
+    detail_msg = ""
+
+    if amount_paise is not None:
+        try:
+            actual_paise = int(amount_paise)
+            settled_dec = (Decimal(actual_paise) / Decimal("100")).quantize(Decimal("0.01"))
+            if actual_paise < expected_paise:
+                mismatch_type = "amount_mismatch"
+                detail_msg = f"Paid ₹{settled_dec} is less than expected ₹{payment.amount}"
+        except (TypeError, ValueError):
+            pass
+
+    if currency and str(currency).upper() != expected_currency:
+        mismatch_type = mismatch_type or "currency_mismatch"
+        detail_msg = f"Gateway currency {currency} does not match expected {expected_currency}"
+
+    if not mismatch_type:
+        return True
+
+    discrepancy = (payment.amount - settled_dec).quantize(Decimal("0.01"))
+    db.add(
+        PaymentTransaction(
+            payment_id=payment.id,
+            order_id=order.id,
+            transaction_type="amount_mismatch",
+            amount=settled_dec,
+            status="DISCREPANCY",
+            external_reference=gateway_ref,
+            raw_summary={"source": source, "reason": detail_msg, "currency": currency},
+        )
+    )
+    existing_rec = db.scalar(select(PaymentReconciliation).where(PaymentReconciliation.payment_id == payment.id))
+    if existing_rec:
+        existing_rec.settled_amount = settled_dec
+        existing_rec.discrepancy_amount = discrepancy
+        existing_rec.status = "discrepancy"
+        existing_rec.discrepancy_type = mismatch_type
+        existing_rec.reconciliation_source = source
+        existing_rec.gateway_provider = payment.provider
+        existing_rec.gateway_reference = gateway_ref
+        existing_rec.notes = detail_msg
+    else:
+        db.add(
+            PaymentReconciliation(
+                payment_id=payment.id,
+                order_id=order.id,
+                gateway_provider=payment.provider,
+                gateway_reference=gateway_ref,
+                expected_amount=payment.amount,
+                settled_amount=settled_dec,
+                discrepancy_amount=discrepancy,
+                status="discrepancy",
+                reconciliation_source=source,
+                discrepancy_type=mismatch_type,
+                notes=detail_msg,
+            )
+        )
+    security_service.create_security_alert(
+        db,
+        alert_type="payment_amount_mismatch",
+        severity="high",
+        title=f"Payment discrepancy on {order.order_number}",
+        description=detail_msg,
+        canteen_id=order.canteen_id,
+        order_id=order.id,
+        metadata={"expected": str(payment.amount), "received": str(settled_dec), "source": source},
+    )
+    db.commit()
+    return False
+
+
 def verify_razorpay_checkout_payment(
     db: Session, payload: RazorpayVerifyRequest, actor_user_id: Optional[UUID] = None
 ) -> OrderOut:
@@ -218,6 +385,13 @@ def verify_razorpay_checkout_payment(
     )
     if not payment or payment.provider_order_id != payload.razorpay_order_id:
         raise HTTPException(status_code=400, detail="Razorpay order reference does not match this order")
+
+    _authorize_payment_actor(
+        order,
+        user_id=actor_user_id,
+        provider_order_id=payload.razorpay_order_id,
+        expected_provider_order_id=payment.provider_order_id,
+    )
 
     if not razorpay_gateway.verify_payment_signature(
         razorpay_order_id=payload.razorpay_order_id,
@@ -238,6 +412,21 @@ def verify_razorpay_checkout_payment(
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
 
+    if razorpay_gateway.use_live_api:
+        gw_pay = razorpay_gateway.fetch_payment(payload.razorpay_payment_id)
+        if gw_pay:
+            ok_amt = _validate_gateway_amount_currency(
+                db,
+                order=order,
+                payment=payment,
+                amount_paise=gw_pay.get("amount"),
+                currency=gw_pay.get("currency"),
+                source="gateway_verify",
+                gateway_ref=payload.razorpay_payment_id,
+            )
+            if not ok_amt:
+                raise HTTPException(status_code=400, detail="Gateway payment amount or currency does not match order total")
+
     return _finalize_confirmed_payment(
         db,
         order=order,
@@ -254,11 +443,23 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
     if not x_razorpay_signature or not razorpay_gateway.verify_webhook_signature(
         raw_body=raw_body, x_razorpay_signature=x_razorpay_signature
     ):
+        _record_invalid_webhook_and_alert(
+            db,
+            provider="razorpay",
+            raw_body=raw_body,
+            reason="Missing or invalid X-Razorpay-Signature header",
+        )
         raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature")
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
+        _record_invalid_webhook_and_alert(
+            db,
+            provider="razorpay",
+            raw_body=raw_body,
+            reason="Malformed Razorpay webhook JSON payload",
+        )
         raise HTTPException(status_code=400, detail="Malformed Razorpay webhook JSON payload") from exc
     event_type = payload.get("event", "unknown")
     payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
@@ -287,13 +488,28 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
     rzp_order_id = payment_entity.get("order_id")
     rzp_payment_id = payment_entity.get("id")
     if event_type in ("payment.captured", "order.paid") and rzp_order_id:
-        pay_ref = db.scalar(select(Payment.id, Payment.order_id).where(Payment.provider_order_id == rzp_order_id))
-        pay_row_ro = db.scalar(select(Payment).where(Payment.provider_order_id == rzp_order_id))
+        pay_row_ro = _resolve_payment_by_provider_order(db, provider_order_id=rzp_order_id, provider="razorpay")
         if pay_row_ro:
             # Always acquire Order lock BEFORE Payment lock to avoid deadlocks with verify endpoint
             order = db.scalar(select(Order).where(Order.id == pay_row_ro.order_id).with_for_update())
             payment = db.scalar(select(Payment).where(Payment.id == pay_row_ro.id).with_for_update())
             if order and payment:
+                ok_amt = _validate_gateway_amount_currency(
+                    db,
+                    order=order,
+                    payment=payment,
+                    amount_paise=payment_entity.get("amount"),
+                    currency=payment_entity.get("currency"),
+                    source="webhook",
+                    gateway_ref=rzp_payment_id or rzp_order_id,
+                )
+                if not ok_amt:
+                    evt.processed = True
+                    evt.processing_error = "amount_or_currency_mismatch"
+                    evt.processed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    return {"status": "discrepancy_flagged", "event_id": event_id}
+
                 evt.processed = True
                 evt.processed_at = datetime.now(timezone.utc)
                 if order.status in ("CANCELLED", "REJECTED", "PAYMENT_FAILED"):
@@ -312,7 +528,7 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
                 return {"status": "processed", "event_id": event_id}
 
     elif event_type == "payment.failed" and rzp_order_id:
-        pay_row_ro = db.scalar(select(Payment).where(Payment.provider_order_id == rzp_order_id))
+        pay_row_ro = _resolve_payment_by_provider_order(db, provider_order_id=rzp_order_id, provider="razorpay")
         if pay_row_ro:
             order = db.scalar(select(Order).where(Order.id == pay_row_ro.order_id).with_for_update())
             payment = db.scalar(select(Payment).where(Payment.id == pay_row_ro.id).with_for_update())
@@ -524,11 +740,26 @@ def verify_stripe_checkout_payment(
 
 def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header: Optional[str]) -> dict[str, Any]:
     if not stripe_signature_header:
+        _record_invalid_webhook_and_alert(
+            db,
+            provider="stripe",
+            raw_body=raw_body,
+            reason="Missing Stripe-Signature header",
+        )
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature")
 
-    payload = stripe_gateway.construct_webhook_event(
-        raw_body=raw_body, stripe_signature_header=stripe_signature_header
-    )
+    try:
+        payload = stripe_gateway.construct_webhook_event(
+            raw_body=raw_body, stripe_signature_header=stripe_signature_header
+        )
+    except HTTPException as exc:
+        _record_invalid_webhook_and_alert(
+            db,
+            provider="stripe",
+            raw_body=raw_body,
+            reason=str(exc.detail),
+        )
+        raise
     event_type = payload.get("type", "unknown")
     event_id = payload.get("id") or f"evt_stripe_{event_type}"
     obj = payload.get("data", {}).get("object", {})
@@ -571,6 +802,23 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
         order = db.scalar(select(Order).where(Order.id == pay_ro.order_id).with_for_update())
         payment = db.scalar(select(Payment).where(Payment.id == pay_ro.id).with_for_update())
         if order and payment:
+            if event_type in ("payment_intent.succeeded", "checkout.session.completed"):
+                pi_id = obj.get("id") if event_type == "payment_intent.succeeded" else (obj.get("payment_intent") or obj.get("id"))
+                amt_val = obj.get("amount_received") if obj.get("amount_received") is not None else (obj.get("amount") or obj.get("amount_total"))
+                if not _validate_gateway_amount_currency(
+                    db,
+                    order=order,
+                    payment=payment,
+                    amount_paise=amt_val,
+                    currency=obj.get("currency"),
+                    source="webhook",
+                    gateway_ref=pi_id,
+                ):
+                    evt.processed = True
+                    evt.processing_error = "amount_or_currency_mismatch"
+                    evt.processed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    return {"status": "discrepancy_flagged", "event_id": event_id}
             evt.processed = True
             evt.processed_at = datetime.now(timezone.utc)
             if event_type in ("payment_intent.succeeded", "checkout.session.completed"):
@@ -763,6 +1011,18 @@ def retry_online_payment(
         )
         db.add(payment)
     else:
+        existing_meta = dict(payment.gateway_metadata or {})
+        prev_orders = list(existing_meta.get("previous_provider_orders") or [])
+        if payment.provider_order_id and payment.provider_order_id != provider_order_id:
+            prev_orders.append(
+                {
+                    "provider": payment.provider,
+                    "provider_order_id": payment.provider_order_id,
+                    "replaced_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        if prev_orders:
+            gateway_meta["previous_provider_orders"] = prev_orders[-10:]
         payment.provider = method
         payment.method = method
         payment.provider_order_id = provider_order_id
@@ -811,25 +1071,55 @@ def reconcile_payment(db: Session, payload: ReconcileRequest, actor_user_id: UUI
         raise HTTPException(status_code=404, detail="Payment not found")
     discrepancy = (payment.amount - payload.settled_amount).quantize(Decimal("0.01"))
     rec_status = "matched" if discrepancy == Decimal("0.00") else "discrepancy"
-    rec = PaymentReconciliation(
-        payment_id=payment.id,
-        order_id=payment.order_id,
-        expected_amount=payment.amount,
-        settled_amount=payload.settled_amount,
-        discrepancy_amount=discrepancy,
-        status=rec_status,
-        reconciled_at=datetime.now(timezone.utc),
-        reconciled_by_user_id=actor_user_id,
-        notes=payload.notes,
-    )
-    db.add(rec)
+    disc_type = "none" if discrepancy == Decimal("0.00") else "amount_mismatch"
+    now = datetime.now(timezone.utc)
+
+    rec = db.scalar(select(PaymentReconciliation).where(PaymentReconciliation.payment_id == payment.id))
+    if rec:
+        rec.gateway_provider = payment.provider
+        rec.gateway_settlement_id = payload.gateway_settlement_id or rec.gateway_settlement_id
+        rec.gateway_reference = payment.payment_reference or payment.provider_order_id
+        rec.expected_amount = payment.amount
+        rec.settled_amount = payload.settled_amount
+        rec.discrepancy_amount = discrepancy
+        rec.gateway_fee = payload.gateway_fee
+        rec.status = rec_status
+        rec.reconciliation_source = "manual"
+        rec.discrepancy_type = disc_type
+        rec.reconciled_at = now
+        rec.reconciled_by_user_id = actor_user_id
+        rec.notes = payload.notes
+    else:
+        rec = PaymentReconciliation(
+            payment_id=payment.id,
+            order_id=payment.order_id,
+            gateway_provider=payment.provider,
+            gateway_settlement_id=payload.gateway_settlement_id,
+            gateway_reference=payment.payment_reference or payment.provider_order_id,
+            expected_amount=payment.amount,
+            settled_amount=payload.settled_amount,
+            discrepancy_amount=discrepancy,
+            gateway_fee=payload.gateway_fee,
+            status=rec_status,
+            reconciliation_source="manual",
+            discrepancy_type=disc_type,
+            reconciled_at=now,
+            reconciled_by_user_id=actor_user_id,
+            notes=payload.notes,
+        )
+        db.add(rec)
+
     record_audit_log(
         db,
         action="payment.reconciled",
         entity_type="payment",
         entity_id=str(payment.id),
         actor_user_id=actor_user_id,
-        details={"status": rec_status, "discrepancy": str(discrepancy)},
+        details={
+            "status": rec_status,
+            "discrepancy": str(discrepancy),
+            "settlement_id": payload.gateway_settlement_id,
+        },
     )
     db.commit()
     db.refresh(rec)

@@ -4,6 +4,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, Receipt, RotateCcw, Search } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
+import { fetchWithOfflineCache } from "../../utils/offlineSync";
 import type { Order } from "../../types";
 import { BrandEmptyState, BrandLoadingState } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
@@ -78,11 +80,12 @@ export const MyOrdersPage: React.FC = () => {
     }
   };
 
+  const isOnline = useOfflineStore((s) => s.isOnline);
   const { data: orders = [], isLoading } = useQuery<Order[]>({
     queryKey: ["my-orders"],
     enabled: Boolean(user),
-    queryFn: async () => (await api.get("/orders/my")).data,
-    refetchInterval: 15000,
+    queryFn: () => fetchWithOfflineCache("orders:my", async () => (await api.get("/orders/my")).data),
+    refetchInterval: isOnline ? 15000 : false,
   });
 
   const filteredOrders = orders.filter((o) => {

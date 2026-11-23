@@ -1,4 +1,4 @@
-const CACHE_NAME = "collegebites-shell-v3";
+const CACHE_NAME = "collegebites-shell-v4";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -69,7 +69,8 @@ self.addEventListener("fetch", (event) => {
     url.pathname.startsWith("/icons/") ||
     url.pathname.startsWith("/branding/") ||
     url.pathname.startsWith("/favicon") ||
-    url.pathname === "/manifest.webmanifest"
+    url.pathname === "/manifest.webmanifest" ||
+    /\.(js|css|woff2?|png|jpg|jpeg|svg|webp)$/i.test(url.pathname)
   ) {
     event.respondWith(
       caches.match(request).then((cached) => {

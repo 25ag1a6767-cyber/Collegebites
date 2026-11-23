@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.college import Canteen
 from app.models.engagement import Notification
-from app.models.auth import OTPVerification, RefreshToken
+from app.models.auth import OTPVerification, RefreshToken, SessionRecord
 from app.services.audit_service import record_audit_log
 from app.services.inventory_service import get_inventory_alerts
 from app.services.order_service import release_expired_slot_reservations
@@ -18,11 +18,13 @@ def cleanup_expired_auth_artifacts(db: Session) -> dict[str, int]:
     now = datetime.now(timezone.utc)
     otp_res = db.execute(delete(OTPVerification).where(OTPVerification.expires_at < now))
     tok_res = db.execute(delete(RefreshToken).where(RefreshToken.expires_at < now))
+    sess_res = db.execute(delete(SessionRecord).where(SessionRecord.expires_at < now))
     released_slots = release_expired_slot_reservations(db)
     db.commit()
     return {
         "deleted_otps": int(otp_res.rowcount or 0),
         "deleted_refresh_tokens": int(tok_res.rowcount or 0),
+        "deleted_sessions": int(sess_res.rowcount or 0),
         "released_expired_slots": int(released_slots),
     }
 
@@ -73,16 +75,31 @@ def run_scheduled_maintenance(
     actor_user_id: Optional[UUID] = None,
     trigger: str = "manual",
 ) -> dict[str, Any]:
-    """Run all periodic cleanup and inventory alert scans atomically for HTTP cron or admin use."""
+    """Run periodic cleanup, inventory alert scan, and automated financial reconciliation."""
     cleanup_stats = cleanup_expired_auth_artifacts(db)
     alert_stats = scan_inventory_alerts(db)
+    from app.services import backup_service, reconciliation_service
+
+    reconcil_stats = reconciliation_service.run_auto_reconciliation(
+        db,
+        trigger=trigger,
+        actor_user_id=actor_user_id,
+    )
+    backup_stats = backup_service.run_scheduled_backup_if_due(db, trigger="cron")
     record_audit_log(
         db,
         action="system.maintenance_run",
         entity_type="system",
         entity_id="maintenance",
         actor_user_id=actor_user_id,
-        details={"trigger": trigger, **cleanup_stats, **alert_stats},
+        details={
+            "trigger": trigger,
+            **cleanup_stats,
+            **alert_stats,
+            "reconciled_checked": reconcil_stats["total_checked"],
+            "reconciled_discrepancies": reconcil_stats["discrepancy_count"],
+            "backup_ran": backup_stats.get("ran", False),
+        },
     )
     db.commit()
     return {
@@ -91,4 +108,7 @@ def run_scheduled_maintenance(
         "executed_at": datetime.now(timezone.utc).isoformat(),
         **cleanup_stats,
         **alert_stats,
+        "reconciled_checked": reconcil_stats["total_checked"],
+        "reconciled_discrepancies": reconcil_stats["discrepancy_count"],
+        "backup_status": backup_stats,
     }

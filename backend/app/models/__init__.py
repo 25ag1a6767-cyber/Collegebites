@@ -67,6 +67,7 @@ from app.models.payment import (
     Receipt,
     ReceiptPrintHistory,
     ReceiptPrintJob,
+    ReconciliationRun,
 )
 from app.models.inventory import (
     DailyFoodPrepLog,
@@ -100,7 +101,17 @@ from app.models.engagement import (
     SupportMessage,
     SupportTicket,
 )
-from app.models.system import ActivityLog, AuditLog, DailySalesSummary, SystemEvent
+from app.models.system import (
+    ActivityLog,
+    AuditLog,
+    BackupRecord,
+    BackupSetting,
+    DailySalesSummary,
+    LoginAttempt,
+    RecoveryLog,
+    SecurityAlert,
+    SystemEvent,
+)
 
 __all__ = [
     "Base",
@@ -154,6 +165,7 @@ __all__ = [
     "Payment",
     "PaymentTransaction",
     "PaymentWebhookEvent",
+    "ReconciliationRun",
     "PaymentReconciliation",
     "OrderTokenSequence",
     "PickupToken",
@@ -196,4 +208,9 @@ __all__ = [
     "ActivityLog",
     "DailySalesSummary",
     "SystemEvent",
+    "LoginAttempt",
+    "SecurityAlert",
+    "BackupRecord",
+    "BackupSetting",
+    "RecoveryLog",
 ]

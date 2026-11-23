@@ -1,5 +1,6 @@
 import axios from "axios";
 import { useAppStore } from "../store/useAppStore";
+import { useOfflineStore } from "../store/useOfflineStore";
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 
@@ -20,10 +21,42 @@ api.interceptors.request.use((config) => {
 let refreshingPromise: Promise<string | null> | null = null;
 
 api.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    const off = useOfflineStore.getState();
+    if (!off.isOnline || off.networkState !== "online") {
+      off.setNetworkStatus(true, "online");
+      off.addRecoveryLog("success", "API connection restored", "Backend responded successfully.");
+    }
+    return res;
+  },
   async (error) => {
     const original = error.config;
-    if (error.response?.status === 401 && !original._retry && useAppStore.getState().refreshToken) {
+
+    // Auto-retry safe/idempotent GET requests on transient network or 502/503/504 errors
+    if (
+      original &&
+      String(original.method || "get").toLowerCase() === "get" &&
+      (typeof navigator === "undefined" || navigator.onLine !== false) &&
+      (!error.response || error.response.status >= 502)
+    ) {
+      const retryCount = Number(original._getRetryCount || 0);
+      if (retryCount < 2) {
+        original._getRetryCount = retryCount + 1;
+        const delayMs = 350 * Math.pow(2, retryCount);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        return api(original);
+      }
+    }
+
+    if (!error.response && typeof navigator !== "undefined" && navigator.onLine === false) {
+      const off = useOfflineStore.getState();
+      if (off.isOnline) {
+        off.setNetworkStatus(false, "offline");
+        off.addRecoveryLog("warn", "Network offline detected", "Browser is offline; serving cached read-only state.");
+      }
+    }
+
+    if (error.response?.status === 401 && original && !original._retry && useAppStore.getState().refreshToken) {
       original._retry = true;
       if (!refreshingPromise) {
         refreshingPromise = axios

@@ -110,6 +110,14 @@ class StripeGateway:
             "currency": "inr",
         }
 
+    def fetch_payment_intent_safe(self, payment_intent_id: str) -> Optional[dict[str, Any]]:
+        if not self.use_live_api or not payment_intent_id:
+            return None
+        try:
+            return self.retrieve_payment_intent(payment_intent_id)
+        except Exception:
+            return None
+
     def create_checkout_session(
         self,
         *,

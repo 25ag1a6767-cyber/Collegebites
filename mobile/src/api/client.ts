@@ -47,9 +47,27 @@ mobileApi.interceptors.request.use((config) => {
 let refreshingPromise: Promise<string | null> | null = null;
 
 mobileApi.interceptors.response.use(
-  (res) => res,
+  (res) => {
+    useMobileStore.getState().setOnlineStatus(true);
+    return res;
+  },
   async (error) => {
     const original = error.config;
+    if (
+      original &&
+      String(original.method || "get").toLowerCase() === "get" &&
+      (!error.response || error.response.status >= 502)
+    ) {
+      const retryCount = Number(original._getRetryCount || 0);
+      if (retryCount < 2) {
+        original._getRetryCount = retryCount + 1;
+        await new Promise((r) => setTimeout(r, 350 * Math.pow(2, retryCount)));
+        return mobileApi(original);
+      }
+    }
+    if (!error.response) {
+      useMobileStore.getState().setOnlineStatus(false);
+    }
     const state = useMobileStore.getState();
     if (error.response?.status === 401 && original && !original._retry && state.refreshToken) {
       original._retry = true;

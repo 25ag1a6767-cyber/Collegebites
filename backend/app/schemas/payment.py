@@ -62,17 +62,32 @@ class PaymentOut(ORMModel):
 class ReconcileRequest(BaseModel):
     payment_id: UUID
     settled_amount: Decimal = Field(ge=0)
+    gateway_settlement_id: Optional[str] = Field(default=None, max_length=120)
+    gateway_fee: Decimal = Field(default=Decimal("0.00"), ge=0)
     notes: Optional[str] = None
+
+
+class AutoReconcileRequest(BaseModel):
+    canteen_id: Optional[UUID] = None
+    fetch_gateway: bool = False
 
 
 class ReconciliationOut(ORMModel):
     id: UUID
     payment_id: UUID
     order_id: UUID
+    batch_id: Optional[UUID] = None
+    gateway_provider: str = "razorpay"
+    gateway_settlement_id: Optional[str] = None
+    gateway_reference: Optional[str] = None
     expected_amount: Decimal
     settled_amount: Decimal
     discrepancy_amount: Decimal
+    gateway_fee: Decimal = Decimal("0.00")
+    tax_on_fee: Decimal = Decimal("0.00")
     status: str
+    reconciliation_source: str = "manual"
+    discrepancy_type: str = "none"
     reconciled_at: Optional[datetime]
     notes: Optional[str]
 

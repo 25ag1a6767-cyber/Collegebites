@@ -5,6 +5,8 @@ import { ArrowLeft, Maximize2, Minimize2, Volume2, VolumeX } from "lucide-react"
 import { api } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
+import { fetchWithOfflineCache, saveOfflineCache } from "../../utils/offlineSync";
 import type { Canteen, DigitalBoardResponse } from "../../types";
 import { playOrderAlertChime } from "../../utils/notifications";
 import { BrandLogo } from "../../components/branding/BrandLogo";
@@ -35,12 +37,15 @@ export const TokenBoardPage: React.FC = () => {
     activeScope === "all" ? "/realtime/board/stream" : `/realtime/board/stream?canteen_id=${activeScope}`;
   const wsPath = activeScope === "all" ? "/ws/board/all" : `/ws/board/${activeScope}`;
 
+  const isOnline = useOfflineStore((s) => s.isOnline);
+
   const { status: syncStatus, lastSyncedAt } = useRealtimeSync<DigitalBoardResponse>({
     enabled: Boolean(activeScope),
     ssePath,
     wsPath,
     queryKeys: [["digital-board", activeScope]],
     onSnapshot: (snapshot) => {
+      saveOfflineCache(`digital-board:${activeScope}`, snapshot);
       qc.setQueryData(["digital-board", activeScope], snapshot);
     },
   });
@@ -48,9 +53,10 @@ export const TokenBoardPage: React.FC = () => {
   const { data: board } = useQuery<DigitalBoardResponse>({
     queryKey: ["digital-board", activeScope],
     enabled: Boolean(activeScope),
-    queryFn: async () => (await api.get(boardEndpoint)).data,
+    queryFn: () =>
+      fetchWithOfflineCache(`digital-board:${activeScope}`, async () => (await api.get(boardEndpoint)).data),
     staleTime: 0,
-    refetchInterval: 1000,
+    refetchInterval: isOnline ? 1000 : false,
     refetchIntervalInBackground: true,
   });
 

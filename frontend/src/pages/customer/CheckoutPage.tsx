@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, CreditCard, ShieldAlert, Trash2 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
 import type { Canteen, CartSummary, CollegeSettings, Order } from "../../types";
 import { BrandEmptyState, BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
@@ -90,7 +91,9 @@ export const CheckoutPage: React.FC = () => {
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
   const [noteModalItem, setNoteModalItem] = useState<{ id: string; note: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [idemKey] = useState(() => "cb-idem-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+  const isOnline = useOfflineStore((s) => s.isOnline);
+  const getOrCreateCheckoutIdemKey = useAppStore((s) => s.getOrCreateCheckoutIdemKey);
+  const clearCheckoutIdemKey = useAppStore((s) => s.clearCheckoutIdemKey);
 
   const updateItemQty = async (cartItemId: string, newQty: number) => {
     try {
@@ -156,29 +159,41 @@ export const CheckoutPage: React.FC = () => {
 
   const placeOrder = async () => {
     if (!activeCanteen || !cart || cart.items.length === 0) return;
+    if (!isOnline || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+      return pushToast("You are offline. Online payment & checkout require a live server connection.", "error");
+    }
     if (!acceptedPolicy) {
       return pushToast("Please acknowledge the college cancellation & payment policy", "error");
     }
+    const cartSig = `${activeCanteen.id}:${cart.total_amount}:${cart.items
+      .map((i) => `${i.id}:${i.quantity}`)
+      .join(",")}:${paymentMethod}`;
+    const checkoutIdemKey = getOrCreateCheckoutIdemKey(cartSig);
     setBusy(true);
     try {
-      const res = await api.post<Order>("/orders/checkout", {
-        canteen_id: activeCanteen.id,
-        counter_id: selectedCounterId || null,
-        table_id: selectedTableId || null,
-        location_qr_code: scannedLocationQrCode || null,
-        pickup_slot_id: slotId || null,
-        order_type: orderType,
-        order_channel: scannedLocationQrCode ? "qr" : "web",
-        payment_method: paymentMethod,
-        redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
-        idempotency_key: idemKey,
-        guest_name: !user ? guestName : null,
-        guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
-        guest_email: !user && guestEmail.trim() ? guestEmail.trim() : null,
-        guest_otp_verification_token: !user ? otpVerifiedToken : null,
-        accepted_policy: acceptedPolicy,
-      });
+      const res = await api.post<Order>(
+        "/orders/checkout",
+        {
+          canteen_id: activeCanteen.id,
+          counter_id: selectedCounterId || null,
+          table_id: selectedTableId || null,
+          location_qr_code: scannedLocationQrCode || null,
+          pickup_slot_id: slotId || null,
+          order_type: orderType,
+          order_channel: scannedLocationQrCode ? "qr" : "web",
+          payment_method: paymentMethod,
+          redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
+          idempotency_key: checkoutIdemKey,
+          guest_name: !user ? guestName : null,
+          guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
+          guest_email: !user && guestEmail.trim() ? guestEmail.trim() : null,
+          guest_otp_verification_token: !user ? otpVerifiedToken : null,
+          accepted_policy: acceptedPolicy,
+        },
+        { headers: { "X-Idempotency-Key": checkoutIdemKey } }
+      );
 
+      clearCheckoutIdemKey();
       const ord = res.data;
       if (ord.guest_access_token) {
         saveGuestOrderToken(ord.order_number, ord.guest_access_token);
@@ -550,14 +565,22 @@ export const CheckoutPage: React.FC = () => {
               </label>
             </div>
 
+            {!isOnline && (
+              <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-xs font-semibold text-red-800">
+                Offline Mode: Order submission and payment processing are locked until internet connectivity is restored to prevent unverified or duplicate charges.
+              </div>
+            )}
+
             <Button
               variant="primary"
               size="lg"
               className="w-full"
-              disabled={busy || cart.validation_errors.length > 0}
+              disabled={busy || !isOnline || cart.validation_errors.length > 0}
               onClick={placeOrder}
             >
-              {busy
+              {!isOnline
+                ? "Reconnect to Pay & Place Order"
+                : busy
                 ? "Processing..."
                 : paymentMethod === "razorpay" || paymentMethod === "stripe"
                 ? `Pay ₹${cart.total_amount}`

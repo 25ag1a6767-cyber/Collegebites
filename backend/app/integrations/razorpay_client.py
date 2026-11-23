@@ -115,5 +115,18 @@ class RazorpayGateway:
     def compute_test_webhook_signature(self, *, raw_body: bytes) -> str:
         return hmac.new(self.webhook_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
 
+    def fetch_payment(self, razorpay_payment_id: str) -> Optional[dict[str, Any]]:
+        if not self.use_live_api or not razorpay_payment_id:
+            return None
+        try:
+            return self._client().payment.fetch(razorpay_payment_id)
+        except (
+            razorpay.errors.BadRequestError,
+            razorpay.errors.GatewayError,
+            razorpay.errors.ServerError,
+            requests.exceptions.RequestException,
+        ):
+            return None
+
 
 razorpay_gateway = RazorpayGateway()

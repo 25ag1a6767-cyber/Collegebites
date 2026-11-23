@@ -26,7 +26,16 @@ const ACTIVE_STATUSES = new Set(["PAYMENT_PENDING", "PAYMENT_CONFIRMED", "PLACED
 export default function MenuScreen() {
   const router = useRouter();
   const qc = useQueryClient();
-  const { user, selectedCanteenId, setCanteen } = useMobileStore();
+  const {
+    user,
+    selectedCanteenId,
+    setCanteen,
+    isOnline,
+    cachedCanteens,
+    cachedMenuByCanteen,
+    saveCachedCanteens,
+    saveCachedMenu,
+  } = useMobileStore();
   const [search, setSearch] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState("");
   const [vegFilter, setVegFilter] = useState<"all" | "veg" | "nonveg">("all");
@@ -52,15 +61,20 @@ export default function MenuScreen() {
   });
 
   const {
-    data: canteens = [],
+    data: liveCanteens = [],
     isError: canteensErr,
     error: canteensErrObj,
     refetch: refetchCanteens,
   } = useQuery<any[]>({
     queryKey: ["m-canteens"],
-    queryFn: canteensApi.listCanteens,
-    refetchInterval: 10000,
+    queryFn: async () => {
+      const data = await canteensApi.listCanteens();
+      saveCachedCanteens(data);
+      return data;
+    },
+    refetchInterval: isOnline ? 10000 : false,
   });
+  const canteens = liveCanteens.length > 0 ? liveCanteens : cachedCanteens;
   const activeCanteen = canteens.find((c) => c.id === selectedCanteenId) || canteens[0];
 
   const { data: categories = [] } = useQuery<any[]>({
@@ -96,7 +110,7 @@ export default function MenuScreen() {
   });
 
   const {
-    data: items = [],
+    data: liveItems = [],
     isLoading: itemsLoading,
     isError: itemsErr,
     error: itemsErrObj,
@@ -104,16 +118,22 @@ export default function MenuScreen() {
   } = useQuery<any[]>({
     queryKey: ["m-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, tagFilter, sortBy],
     enabled: Boolean(activeCanteen?.id),
-    refetchInterval: 8000,
-    queryFn: () =>
-      menuApi.listItems(activeCanteen.id, {
+    refetchInterval: isOnline ? 8000 : false,
+    queryFn: async () => {
+      const data = await menuApi.listItems(activeCanteen.id, {
         q: search,
         categoryId: selectedCategoryId,
         vegFilter,
         tagFilter,
         sortBy,
-      }),
+      });
+      if (!search && !selectedCategoryId && vegFilter === "all" && tagFilter === "all") {
+        saveCachedMenu(activeCanteen.id, data);
+      }
+      return data;
+    },
   });
+  const items = liveItems.length > 0 ? liveItems : (activeCanteen?.id ? cachedMenuByCanteen[activeCanteen.id] || [] : []);
 
   const { data: cart } = useQuery<any>({
     queryKey: ["m-cart", activeCanteen?.id],

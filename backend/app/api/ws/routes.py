@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -54,6 +55,11 @@ def _authenticate_jwt_from_ws(websocket: WebSocket) -> Optional[AuthenticatedPri
     try:
         sess = db.get(SessionRecord, session_id)
         if not sess or sess.revoked_at is not None:
+            return None
+        expires_at = sess.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
             return None
         user = db.get(User, user_id)
         if not user or not user.is_active:

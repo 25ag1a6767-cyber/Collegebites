@@ -45,9 +45,12 @@ def checkout(
     payload: CheckoutRequest,
     request: Request,
     x_guest_session_id: Optional[str] = Header(default=None),
+    x_idempotency_key: Optional[str] = Header(default=None),
     principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
     db: Session = Depends(get_db),
 ):
+    if not payload.idempotency_key and x_idempotency_key and x_idempotency_key.strip():
+        payload.idempotency_key = x_idempotency_key.strip()[:120]
     return order_service.checkout_order(
         db,
         payload,

@@ -16,6 +16,8 @@ import {
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
+import { useOfflineStore } from "../../store/useOfflineStore";
+import { executeOrQueueSafeMutation, fetchWithOfflineCache, saveOfflineCache } from "../../utils/offlineSync";
 import type { Canteen, OperationalTokenBoardResponse, OperationalTokenCard } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
@@ -234,12 +236,15 @@ export const OperationalTokenBoardPage: React.FC = () => {
       : `/realtime/token-board/stream?canteen_id=${activeScope}`;
   const wsPath = activeScope === "all" ? "/ws/board/all" : `/ws/kitchen/${activeScope}`;
 
+  const isOnline = useOfflineStore((s) => s.isOnline);
+
   const { status: syncStatus, lastSyncedAt, triggerSync } = useRealtimeSync<OperationalTokenBoardResponse>({
     enabled: Boolean(accessToken),
     ssePath,
     wsPath,
     queryKeys: [["operational-token-board", activeScope]],
     onSnapshot: (snap) => {
+      saveOfflineCache(`op-board:${activeScope}`, snap);
       qc.setQueryData(["operational-token-board", activeScope], snap);
     },
   });
@@ -247,11 +252,12 @@ export const OperationalTokenBoardPage: React.FC = () => {
   const { data: board, isLoading } = useQuery<OperationalTokenBoardResponse>({
     queryKey: ["operational-token-board", activeScope],
     enabled: Boolean(accessToken),
-    queryFn: async () => {
-      const qs = activeScope === "all" ? "" : `?canteen_id=${encodeURIComponent(activeScope)}`;
-      return (await api.get(`/pickup/token-board${qs}`)).data;
-    },
-    refetchInterval: syncStatus === "live" ? 30000 : 4000,
+    queryFn: () =>
+      fetchWithOfflineCache(`op-board:${activeScope}`, async () => {
+        const qs = activeScope === "all" ? "" : `?canteen_id=${encodeURIComponent(activeScope)}`;
+        return (await api.get(`/pickup/token-board${qs}`)).data;
+      }),
+    refetchInterval: !isOnline ? false : syncStatus === "live" ? 30000 : 4000,
     refetchIntervalInBackground: true,
   });
 
@@ -262,6 +268,10 @@ export const OperationalTokenBoardPage: React.FC = () => {
     setBusyOrderId(card.order_id);
     try {
       if (action === "handover") {
+        if (!isOnline) {
+          pushToast("Handover confirmation requires live connectivity.", "error");
+          return;
+        }
         await api.post("/pickup/handover", {
           order_id: card.order_id,
           counter_id: card.counter_id,
@@ -269,8 +279,19 @@ export const OperationalTokenBoardPage: React.FC = () => {
         });
         pushToast(`Token ${card.token_code} completed`, "success");
       } else {
-        await api.post(`/kitchen/orders/${card.order_id}/${action}`);
-        pushToast(`Token ${card.token_code} moved to next stage`, "success");
+        const res = await executeOrQueueSafeMutation({
+          method: "POST",
+          url: `/kitchen/orders/${card.order_id}/${action}`,
+          category: "kitchen_status",
+          label: `Token ${card.token_code}: ${action}`,
+          invalidateKeys: [["operational-token-board"], ["kitchen-orders"]],
+        });
+        pushToast(
+          res.queued
+            ? `Offline: "${action}" queued for ${card.token_code} and will sync on reconnect`
+            : `Token ${card.token_code} moved to next stage`,
+          res.queued ? "info" : "success"
+        );
       }
       triggerSync();
     } catch (err) {

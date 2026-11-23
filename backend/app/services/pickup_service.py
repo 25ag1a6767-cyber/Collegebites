@@ -27,6 +27,7 @@ from app.schemas.operations import (
     TokenBoardItem,
     TokenBoardOrderItemDetail,
 )
+from app.services import security_service
 from app.services.audit_service import record_audit_log
 from app.services.order_service import transition_order_status
 from app.websockets import emit_order_event_sync
@@ -70,6 +71,16 @@ def _log_verification(
             details=details,
         )
     )
+    if not is_valid:
+        security_service.record_qr_fraud_if_applicable(
+            db,
+            order=order,
+            canteen_id=canteen_id,
+            staff_user_id=staff_user_id,
+            method=method,
+            presented=presented,
+            result_code=result_code,
+        )
     db.commit()
 
 
@@ -264,6 +275,20 @@ def confirm_handover(db: Session, payload: HandoverConfirmRequest, staff_user_id
 
     existing_ho = db.scalar(select(OrderHandoverRecord).where(OrderHandoverRecord.order_id == order.id))
     if existing_ho or order.status == "COMPLETED":
+        token_for_log = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
+        _log_verification(
+            db,
+            order=order,
+            token_row=token_for_log,
+            staff_user_id=staff_user_id,
+            canteen_id=order.canteen_id,
+            counter_id=payload.counter_id or order.counter_id,
+            method=payload.verification_method,
+            presented=token_for_log.token_code if token_for_log else order.order_number,
+            result_code="ALREADY_COLLECTED",
+            is_valid=False,
+            details="Duplicate handover confirmation attempted",
+        )
         raise HTTPException(status_code=409, detail="Order has already been collected; duplicate handover rejected")
 
     if order.status != "READY":

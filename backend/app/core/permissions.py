@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 from uuid import UUID
 
@@ -65,6 +66,9 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "kiosk:manage",
         "audit:view",
         "qr:website_manage",
+        "security:view",
+        "security:manage",
+        "backup:manage",
     ],
     ROLE_CANTEEN_MANAGER: [
         "canteen:manage_assigned",
@@ -84,6 +88,7 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "report:view_canteen",
         "support:view",
         "qr:manage",
+        "security:view",
     ],
     ROLE_CASHIER: [
         "pos:use",
@@ -213,6 +218,11 @@ def get_optional_principal(
 
     session_rec = db.get(SessionRecord, session_id)
     if not session_rec or session_rec.revoked_at is not None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired or revoked")
+    expires_at = session_rec.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired or revoked")
 
     user = db.get(User, user_id)

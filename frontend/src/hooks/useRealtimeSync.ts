@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { buildWsUrl } from "../api/client";
 import { useAppStore } from "../store/useAppStore";
+import { useOfflineStore } from "../store/useOfflineStore";
+import { computeReconnectDelayMs, flushSyncQueue } from "../utils/offlineSync";
 
 export type RealtimeStatus = "connecting" | "live" | "reconnecting" | "offline";
 
@@ -110,6 +112,7 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
   const [reconnectTick, setReconnectTick] = useState(0);
 
   const lastVersionRef = useRef<string | null>(null);
+  const prevStatusRef = useRef<RealtimeStatus>(status);
   const onSnapshotRef = useRef(onSnapshot);
   const onEventRef = useRef(onEvent);
   const queryKeysRef = useRef(queryKeys);
@@ -123,6 +126,39 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
     }
   };
 
+  // Track connectivity transitions into recovery logs & flush pending offline actions on live restore
+  useEffect(() => {
+    if (!enabled) return;
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = status;
+    const offStore = useOfflineStore.getState();
+
+    if (status === "live") {
+      offStore.setNetworkStatus(true, "online");
+      if (prev === "offline" || prev === "reconnecting") {
+        offStore.addRecoveryLog(
+          "success",
+          "Real-time stream recovered",
+          `${ssePath || wsPath || "Realtime"} reconnected and refreshed latest state.`
+        );
+        invalidateAll();
+        void flushSyncQueue(qc);
+      }
+    } else if (status === "offline") {
+      offStore.setNetworkStatus(false, "offline");
+      if (prev !== "offline") {
+        offStore.addRecoveryLog("warn", "Real-time stream offline", "Internet connection unavailable.");
+      }
+    } else if (status === "reconnecting" && prev === "live") {
+      offStore.setNetworkStatus(true, "reconnecting");
+      offStore.addRecoveryLog(
+        "warn",
+        "Real-time connection interrupted",
+        "Attempting exponential backoff reconnection."
+      );
+    }
+  }, [status, enabled, ssePath, wsPath, qc]);
+
   // Reset deduplication cursor when subscription target changes
   useEffect(() => {
     lastVersionRef.current = null;
@@ -135,6 +171,7 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
       setStatus("connecting");
       setReconnectTick((n) => n + 1);
       invalidateAll();
+      void flushSyncQueue(qc);
     };
     const handleOffline = () => {
       setStatus("offline");
@@ -144,6 +181,7 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
         invalidateAll();
         if (navigator.onLine !== false) {
           setReconnectTick((n) => n + 1);
+          void flushSyncQueue(qc);
         }
       }
     };
@@ -253,7 +291,7 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
         if (cancelled || err?.name === "AbortError") return;
         attempt += 1;
         setStatus(typeof navigator !== "undefined" && navigator.onLine === false ? "offline" : "reconnecting");
-        const delayMs = Math.min(15000, 1000 * Math.pow(2, Math.min(attempt, 4))) + Math.floor(Math.random() * 400);
+        const delayMs = computeReconnectDelayMs(attempt, 1000, 15000, 400);
         timer = setTimeout(connectSse, delayMs);
       }
     };
@@ -294,8 +332,12 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
           try {
             const payload = JSON.parse(ev.data);
             if (payload?.event === "pong") return;
-            if (payload?.version && !shouldAcceptRealtimeVersion(lastVersionRef.current, payload.version)) {
-              return;
+            if (payload?.version) {
+              if (!shouldAcceptRealtimeVersion(lastVersionRef.current, payload.version)) {
+                setLastSyncedAt(new Date());
+                return;
+              }
+              lastVersionRef.current = payload.version;
             }
             setLastSyncedAt(new Date());
             onEventRef.current?.(payload, payload?.event || "ws.event");
@@ -309,7 +351,10 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
           pingTimer = null;
           if (!cancelled) {
             attempt += 1;
-            const delayMs = Math.min(15000, 1200 * Math.pow(2, Math.min(attempt, 4)));
+            if (!ssePath) {
+              setStatus(typeof navigator !== "undefined" && navigator.onLine === false ? "offline" : "reconnecting");
+            }
+            const delayMs = computeReconnectDelayMs(attempt, 1200, 15000, 400);
             reconnectTimer = setTimeout(connectWs, delayMs);
           }
         };
