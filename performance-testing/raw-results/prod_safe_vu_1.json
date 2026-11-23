@@ -1,0 +1,269 @@
+{
+    "root_group": {
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "Frontend_Board_Page status is 200": {
+                    "path": "::Frontend_Board_Page status is 200",
+                    "id": "25d57c7e0971fadb29a81ec15b457178",
+                    "passes": 1,
+                    "fails": 1,
+                    "name": "Frontend_Board_Page status is 200"
+                },
+                "Frontend_Board_Page duration < 1500ms": {
+                    "passes": 2,
+                    "fails": 0,
+                    "name": "Frontend_Board_Page duration < 1500ms",
+                    "path": "::Frontend_Board_Page duration < 1500ms",
+                    "id": "f50df86c4672d93a9046c9abe618daaf"
+                },
+                "Backend_Health status is 200": {
+                    "passes": 1,
+                    "fails": 1,
+                    "name": "Backend_Health status is 200",
+                    "path": "::Backend_Health status is 200",
+                    "id": "6efb7a7e6759e6fbf72c75d90ad3b647"
+                },
+                "Backend_Health duration < 1500ms": {
+                    "path": "::Backend_Health duration < 1500ms",
+                    "id": "c2ddc7a7a3c02b85c55f1af851ee9a2e",
+                    "passes": 2,
+                    "fails": 0,
+                    "name": "Backend_Health duration < 1500ms"
+                },
+                "College_Settings status is 200": {
+                    "name": "College_Settings status is 200",
+                    "path": "::College_Settings status is 200",
+                    "id": "9cd7b759ba77fb29344f95487d557bb8",
+                    "passes": 1,
+                    "fails": 1
+                },
+                "College_Settings duration < 1500ms": {
+                    "name": "College_Settings duration < 1500ms",
+                    "path": "::College_Settings duration < 1500ms",
+                    "id": "94a2d7ec5d7413e6879a7a90a63ffb4b",
+                    "passes": 2,
+                    "fails": 0
+                },
+                "List_Canteens status is 200": {
+                    "name": "List_Canteens status is 200",
+                    "path": "::List_Canteens status is 200",
+                    "id": "cc4f01c669a34f6db6088e4937cb5cb5",
+                    "passes": 0,
+                    "fails": 2
+                },
+                "List_Canteens duration < 1500ms": {
+                    "name": "List_Canteens duration < 1500ms",
+                    "path": "::List_Canteens duration < 1500ms",
+                    "id": "e658b7090aa4df896f3221d8b52b25e1",
+                    "passes": 2,
+                    "fails": 0
+                },
+                "Public_Token_Board status is 200": {
+                    "name": "Public_Token_Board status is 200",
+                    "path": "::Public_Token_Board status is 200",
+                    "id": "73986e4c062768e67c030bab34ea232a",
+                    "passes": 0,
+                    "fails": 1
+                },
+                "Public_Token_Board duration < 1500ms": {
+                    "id": "ebcdc6ffc292cc0c1c45f578107adc7f",
+                    "passes": 1,
+                    "fails": 0,
+                    "name": "Public_Token_Board duration < 1500ms",
+                    "path": "::Public_Token_Board duration < 1500ms"
+                },
+                "Menu_Allergens status is 200": {
+                    "fails": 1,
+                    "name": "Menu_Allergens status is 200",
+                    "path": "::Menu_Allergens status is 200",
+                    "id": "7d820a512a849f3150a92c66ad07d14a",
+                    "passes": 0
+                },
+                "Menu_Allergens duration < 1500ms": {
+                    "passes": 1,
+                    "fails": 0,
+                    "name": "Menu_Allergens duration < 1500ms",
+                    "path": "::Menu_Allergens duration < 1500ms",
+                    "id": "64d3811473c70b7280c3ac3c58370c10"
+                },
+                "Active_Coupons status is 200": {
+                    "path": "::Active_Coupons status is 200",
+                    "id": "0b2138a3a0d8d9cb0045354271733c52",
+                    "passes": 0,
+                    "fails": 1,
+                    "name": "Active_Coupons status is 200"
+                },
+                "Active_Coupons duration < 1500ms": {
+                    "name": "Active_Coupons duration < 1500ms",
+                    "path": "::Active_Coupons duration < 1500ms",
+                    "id": "c5b2e9c3c14d4e1a6c573d4d3fc8b808",
+                    "passes": 1,
+                    "fails": 0
+                },
+                "Public_Meal_Plans status is 200": {
+                    "id": "0ffd63df8341ba9d9b7def7fc9e4d719",
+                    "passes": 0,
+                    "fails": 1,
+                    "name": "Public_Meal_Plans status is 200",
+                    "path": "::Public_Meal_Plans status is 200"
+                },
+                "Public_Meal_Plans duration < 1500ms": {
+                    "passes": 1,
+                    "fails": 0,
+                    "name": "Public_Meal_Plans duration < 1500ms",
+                    "path": "::Public_Meal_Plans duration < 1500ms",
+                    "id": "69e8f30aa059b52ba703df67147d6481"
+                },
+                "Public_College_Events status is 200": {
+                    "passes": 0,
+                    "fails": 1,
+                    "name": "Public_College_Events status is 200",
+                    "path": "::Public_College_Events status is 200",
+                    "id": "12ab1b9b234846072c1a905e48347a86"
+                },
+                "Public_College_Events duration < 1500ms": {
+                    "name": "Public_College_Events duration < 1500ms",
+                    "path": "::Public_College_Events duration < 1500ms",
+                    "id": "95e5b72be28b4ce188c282a2d8a8d385",
+                    "passes": 1,
+                    "fails": 0
+                }
+            },
+        "name": "",
+        "path": ""
+    },
+    "metrics": {
+        "vus": {
+            "value": 1,
+            "min": 1,
+            "max": 1
+        },
+        "http_req_receiving": {
+            "avg": 1.5542076923076922,
+            "min": 0,
+            "med": 0.5282,
+            "max": 8.5053,
+            "p(90)": 3.9176600000000006,
+            "p(95)": 5.902799999999994
+        },
+        "http_req_connecting": {
+            "med": 0,
+            "max": 3.6273,
+            "p(90)": 0,
+            "p(95)": 1.4509199999999949,
+            "avg": 0.27902307692307693,
+            "min": 0
+        },
+        "http_req_sending": {
+            "min": 0,
+            "med": 0.5232,
+            "max": 0.6558,
+            "p(90)": 0.6132,
+            "p(95)": 0.6311399999999999,
+            "avg": 0.4260230769230769
+        },
+        "http_req_waiting": {
+            "max": 277.8758,
+            "p(90)": 212.77446000000015,
+            "p(95)": 266.04247999999995,
+            "avg": 55.97473846153847,
+            "min": 9.6082,
+            "med": 16.9952
+        },
+        "http_req_duration": {
+            "p(95)": 266.04247999999995,
+            "avg": 57.95496923076923,
+            "min": 17.2123,
+            "med": 18.7071,
+            "max": 277.8758,
+            "p(90)": 212.89590000000015,
+            "thresholds": {
+                "p(95)<1500": false
+            }
+        },
+        "http_req_failed": {
+            "passes": 10,
+            "fails": 3,
+            "thresholds": {
+                "rate<0.02": true
+            },
+            "value": 0.7692307692307693
+        },
+        "data_sent": {
+            "count": 2248,
+            "rate": 562.2807749049488
+        },
+        "custom_error_rate": {
+            "passes": 10,
+            "fails": 3,
+            "value": 0.7692307692307693
+        },
+        "vus_max": {
+            "max": 1,
+            "value": 1,
+            "min": 1
+        },
+        "http_4xx_errors": {
+            "count": 10,
+            "rate": 2.501248998687495
+        },
+        "http_req_blocked": {
+            "max": 110.5203,
+            "p(90)": 0,
+            "p(95)": 44.208119999999845,
+            "avg": 8.501561538461539,
+            "min": 0,
+            "med": 0
+        },
+        "endpoint_duration_ms": {
+            "avg": 57.95496923076923,
+            "min": 17.2123,
+            "med": 18.7071,
+            "max": 277.8758,
+            "p(90)": 212.89590000000015,
+            "p(95)": 266.04247999999995
+        },
+        "data_received": {
+            "count": 263569,
+            "rate": 65925.16973350642
+        },
+        "http_reqs": {
+            "count": 13,
+            "rate": 3.251623698293743
+        },
+        "iteration_duration": {
+            "avg": 3049.3431,
+            "min": 3049.3431,
+            "med": 3049.3431,
+            "max": 3049.3431,
+            "p(90)": 3049.3431,
+            "p(95)": 3049.3431
+        },
+        "http_req_duration{expected_response:true}": {
+            "med": 258.1536,
+            "max": 277.8758,
+            "p(90)": 273.93136000000004,
+            "p(95)": 275.90358000000003,
+            "avg": 189.29816666666667,
+            "min": 31.8651
+        },
+        "checks": {
+            "passes": 16,
+            "fails": 10,
+            "value": 0.6153846153846154
+        },
+        "iterations": {
+            "count": 1,
+            "rate": 0.2501248998687495
+        },
+        "http_req_tls_handshaking": {
+            "p(95)": 30.793199999999892,
+            "avg": 5.921769230769231,
+            "min": 0,
+            "med": 0,
+            "max": 76.983,
+            "p(90)": 0
+        }
+    }
+}

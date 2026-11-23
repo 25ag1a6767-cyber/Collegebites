@@ -1,0 +1,12 @@
+environment,concurrent_virtual_users,total_requests,successful_requests,failed_requests,requests_per_second_measured,requests_per_minute_projected,requests_per_hour_projected,requests_per_day_theoretical_projection,avg_response_time_ms,min_response_time_ms,max_response_time_ms,p50_response_time_ms,p90_response_time_ms,p95_response_time_ms,p99_response_time_ms,http_4xx_errors,http_5xx_errors,timeout_errors,error_rate_percent,cpu_usage_percent,memory_consumption_mb,active_db_connections
+Production_Vercel_Safe_ReadOnly_Guardrail,1,13,3,10,3.25,195.0,11700.0,280800.0,57.95,17.21,277.88,18.71,212.9,266.04,277.88,10,0,0,76.92,N/A (Vercel Serverless),N/A (Vercel Serverless),N/A (Neon NullPool)
+Local_Staging_RateLimit_300_Per_Min_Enabled,25,692,692,0,83.47,5008.3,300497.88,7211949.13,244.13,6.15,1392.74,182.95,488.51,737.21,1192.46,0,0,0,0.0,14.2,132.4,6
+Local_Staging_Unthrottled,1,125,125,0,15.52,930.9,55854.22,1340501.37,13.44,3.36,64.08,10.58,25.71,28.67,58.13,0,0,0,0.0,4.2,220.4,1
+Local_Staging_Unthrottled,5,531,531,0,65.97,3958.13,237488.02,5699712.5,24.91,2.04,283.5,16.41,49.52,66.52,136.13,0,0,0,0.0,14.8,226.6,4
+Local_Staging_Unthrottled,10,855,855,0,105.91,6354.44,381266.7,9150400.79,43.47,1.72,356.78,27.49,97.54,143.05,233.91,0,0,0,0.0,28.4,231.9,6
+Local_Staging_Unthrottled,25,806,806,0,97.47,5848.41,350904.45,8421706.75,202.31,2.74,1205.48,143.71,363.35,792.53,1050.22,0,0,0,0.0,52.6,246.6,14
+Local_Staging_Unthrottled,50,721,721,0,86.23,5173.61,310416.78,7450002.61,516.01,17.16,2014.02,460.98,946.65,1201.61,1648.34,0,0,0,0.0,76.4,253.6,26
+Local_Staging_Unthrottled,100,346,246,100,26.49,1589.45,95367.28,2288814.83,3574.02,97.9,10003.39,1171.89,10000.86,10001.17,10001.47,0,100,100,28.9,94.2,262.1,50
+Local_Staging_Unthrottled,250,327,0,327,31.9,1914.15,114849.09,2756378.26,7646.17,0.0,10032.16,9999.78,10004.03,10005.92,10014.94,0,327,250,100.0,97.8,291.1,50
+Local_Staging_Unthrottled,500,5650,43,5607,479.13,28747.81,1724868.66,41396847.83,861.33,0.0,10016.15,0.0,0.0,9999.25,10001.23,0,5607,457,99.24,98.9,348.6,50
+Local_Staging_Unthrottled,1000,24459,0,24459,1533.31,91998.3,5519898.0,132477552.01,285.13,0.0,10012.12,0.0,0.0,0.0,9999.48,0,24459,698,100.0,99.5,419.1,50

@@ -1,0 +1,48 @@
+environment,module,http_method,endpoint,samples,sql_queries_per_request,payload_bytes,avg_ms,min_ms,p50_ms,p90_ms,p95_ms,p99_ms,max_ms,error_rate_percent
+Production_Vercel_ReadOnly,Frontend: Website Home (/),GET,/,3,N/A (Remote),1944,51.73,22.25,25.16,107.79,107.79,107.79,107.79,0.0
+Production_Vercel_ReadOnly,Frontend: Login Page (/login),GET,/login,3,N/A (Remote),1944,30.89,25.61,32.74,34.32,34.32,34.32,34.32,0.0
+Production_Vercel_ReadOnly,Frontend: Customer Menu (/canteen/main-canteen),GET,/canteen/main-canteen,3,N/A (Remote),1944,22.63,21.1,21.4,25.38,25.38,25.38,25.38,0.0
+Production_Vercel_ReadOnly,Frontend: Order History (/orders),GET,/orders,3,N/A (Remote),1944,24.5,23.73,24.8,24.98,24.98,24.98,24.98,0.0
+Production_Vercel_ReadOnly,Frontend: Live Token Board (/board),GET,/board,3,N/A (Remote),1944,28.49,24.46,27.89,33.1,33.1,33.1,33.1,0.0
+Production_Vercel_ReadOnly,Frontend: Manager & Admin Console (/admin),GET,/admin,3,N/A (Remote),1944,60.84,23.44,23.97,135.09,135.09,135.09,135.09,0.0
+Production_Vercel_ReadOnly,Production API: Health (/health),GET,/health,3,N/A (Remote),116,295.89,233.85,326.03,327.8,327.8,327.8,327.8,0.0
+Production_Vercel_ReadOnly,Production API: College Settings (/api/v1/canteens/college),GET,/api/v1/canteens/college,3,N/A (Remote),914,288.35,249.97,305.95,309.12,309.12,309.12,309.12,0.0
+Production_Vercel_ReadOnly,Production API: List Canteens (/api/v1/canteens),GET,/api/v1/canteens,3,N/A (Remote),2255,360.71,304.9,365.23,411.99,411.99,411.99,411.99,0.0
+Production_Vercel_ReadOnly,Production API: Public Token Board (/api/v1/pickup/board),GET,/api/v1/pickup/board,3,N/A (Remote),193,280.55,249.59,288.37,303.7,303.7,303.7,303.7,0.0
+Production_Vercel_ReadOnly,Production API: Menu Allergens (/api/v1/menus/allergens),GET,/api/v1/menus/allergens,3,N/A (Remote),328,299.32,282.22,307.37,308.36,308.36,308.36,308.36,0.0
+Production_Vercel_ReadOnly,Production API: Active Coupons (/api/v1/promotions/coupons),GET,/api/v1/promotions/coupons,3,N/A (Remote),691,299.49,284.67,287.05,326.74,326.74,326.74,326.74,0.0
+Production_Vercel_ReadOnly,Production API: Student Meal Plans (/api/v1/meal-plans),GET,/api/v1/meal-plans,3,N/A (Remote),1321,314.89,282.2,285.28,377.19,377.19,377.19,377.19,0.0
+Production_Vercel_ReadOnly,Production API: College Events (/api/v1/events),GET,/api/v1/events,3,N/A (Remote),1385,298.72,283.49,283.61,329.06,329.06,329.06,329.06,0.0
+Local_Staging_PostgreSQL18,Health,GET,/health,15,0,117,4.46,2.85,4.5,5.0,5.37,6.05,6.22,0.0
+Local_Staging_PostgreSQL18,College Settings,GET,/api/v1/canteens/college,15,1,943,5.42,4.21,5.56,6.34,6.43,6.45,6.45,0.0
+Local_Staging_PostgreSQL18,List Canteens,GET,/api/v1/canteens,15,11,2228,16.34,12.87,16.23,19.44,21.51,22.87,23.21,0.0
+Local_Staging_PostgreSQL18,Canteen Detail,GET,/api/v1/canteens/d27f4e90-b77e-474a-bc80-80e4ce5ade97,15,11,3203,21.83,14.87,22.21,25.21,27.6,30.46,31.17,0.0
+Local_Staging_PostgreSQL18,Menu Categories,GET,/api/v1/menus/canteens/d27f4e90-b77e-474a-bc80-80e4ce5ade97/categories,15,1,588,9.99,7.69,10.23,11.58,11.66,11.78,11.81,0.0
+Local_Staging_PostgreSQL18,Menu Items Catalog,GET,/api/v1/menus/canteens/d27f4e90-b77e-474a-bc80-80e4ce5ade97/items,15,11,8614,21.84,14.55,19.97,29.58,37.13,42.76,44.16,0.0
+Local_Staging_PostgreSQL18,Menu Allergens,GET,/api/v1/menus/allergens,15,1,328,8.07,5.88,8.1,9.1,9.35,9.72,9.81,0.0
+Local_Staging_PostgreSQL18,Active Coupons,GET,/api/v1/promotions/coupons,15,3,673,11.64,9.35,11.59,13.8,14.14,14.28,14.31,0.0
+Local_Staging_PostgreSQL18,Student Meal Plans,GET,/api/v1/meal-plans,15,4,1309,11.53,7.19,11.26,14.46,15.76,16.11,16.2,0.0
+Local_Staging_PostgreSQL18,College Events,GET,/api/v1/events,15,4,1403,9.14,6.74,8.8,12.34,13.1,13.91,14.11,0.0
+Local_Staging_PostgreSQL18,Public Token Board,GET,/api/v1/pickup/board,15,3,10906,11.32,7.13,11.28,14.57,15.31,15.74,15.85,0.0
+Local_Staging_PostgreSQL18,Live Queue Metrics,GET,/api/v1/queue/canteens/d27f4e90-b77e-474a-bc80-80e4ce5ade97,15,25,13047,21.27,18.83,20.9,23.62,24.16,25.16,25.42,0.0
+Local_Staging_PostgreSQL18,Auth Current Session,GET,/api/v1/auth/me,15,10,465,9.09,7.34,9.17,10.13,10.51,10.87,10.96,0.0
+Local_Staging_PostgreSQL18,Customer Profile,GET,/api/v1/customers/profile,15,8,375,9.41,6.58,9.52,11.11,11.62,11.99,12.08,0.0
+Local_Staging_PostgreSQL18,Customer Loyalty,GET,/api/v1/promotions/loyalty/me,15,8,113,11.99,8.8,11.6,14.82,14.99,15.01,15.01,0.0
+Local_Staging_PostgreSQL18,Customer Add to Cart,POST,/api/v1/carts/items,15,30,5500,34.09,23.77,32.51,41.46,44.93,45.83,46.05,0.0
+Local_Staging_PostgreSQL18,Customer Get Cart,GET,/api/v1/carts,15,18,5500,16.61,14.7,16.11,19.02,19.88,19.95,19.96,0.0
+Local_Staging_PostgreSQL18,Customer Orders History,GET,/api/v1/orders/my,15,21,53823,42.47,22.85,30.34,33.27,92.45,202.6,230.13,0.0
+Local_Staging_PostgreSQL18,Customer Meal Subscriptions,GET,/api/v1/meal-plans/my-subscriptions,15,7,2,8.29,6.33,8.03,9.51,9.73,9.88,9.92,0.0
+Local_Staging_PostgreSQL18,Operational Token Board,GET,/api/v1/pickup/token-board,15,11,26523,19.7,14.16,15.57,30.43,37.41,43.96,45.59,0.0
+Local_Staging_PostgreSQL18,Pickup Token Verification,POST,/api/v1/pickup/verify,15,13,579,19.77,15.5,18.95,25.1,26.16,26.91,27.1,0.0
+Local_Staging_PostgreSQL18,Inventory Items List,GET,/api/v1/inventory/items,15,0,22,5.1,3.53,5.26,6.45,6.54,6.67,6.7,100.0
+Local_Staging_PostgreSQL18,Inventory Alerts,GET,/api/v1/inventory/alerts,15,0,22,4.47,3.02,4.58,5.65,6.12,6.48,6.57,100.0
+Local_Staging_PostgreSQL18,Vendor & Suppliers List,GET,/api/v1/inventory/suppliers,15,9,841,12.59,10.04,12.25,14.06,15.33,16.65,16.98,0.0
+Local_Staging_PostgreSQL18,Purchase Orders List,GET,/api/v1/inventory/purchase-orders,15,0,31,3.46,2.34,3.55,4.4,4.6,4.83,4.89,100.0
+Local_Staging_PostgreSQL18,Food Waste Analytics,GET,/api/v1/inventory/wastage/analytics,15,0,22,4.11,3.01,3.74,5.48,6.13,6.45,6.54,100.0
+Local_Staging_PostgreSQL18,Staff Performance Report,GET,/api/v1/staff/performance,15,6,351,13.6,9.91,13.75,16.57,16.99,17.08,17.1,100.0
+Local_Staging_PostgreSQL18,Support Tickets Summary,GET,/api/v1/support/reports/summary,15,7,170,19.15,13.92,19.39,23.29,23.76,23.98,24.03,0.0
+Local_Staging_PostgreSQL18,Invoices Ledger,GET,/api/v1/invoices,15,7,2,15.71,12.18,15.19,18.92,20.41,21.16,21.34,0.0
+Local_Staging_PostgreSQL18,Admin Orders Console,GET,/api/v1/admin/orders,15,235,53823,134.51,106.12,125.12,174.3,193.12,213.45,218.54,0.0
+Local_Staging_PostgreSQL18,Admin System Health,GET,/api/v1/admin/health,15,10,117,12.98,6.55,12.47,20.74,22.19,22.28,22.3,0.0
+Local_Staging_PostgreSQL18,Operations Control Center,GET,/api/v1/reports/operations-control-center,15,21,14814,21.22,18.01,20.43,24.62,25.01,25.2,25.25,0.0
+Local_Staging_PostgreSQL18,Analytics BI Dashboard,GET,/api/v1/reports/dashboard,15,42,13138,34.79,26.69,34.15,41.12,41.36,41.75,41.85,0.0
