@@ -1,7 +1,7 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -69,14 +69,17 @@ def confirm_handover(
 
 @router.get("/board", response_model=DigitalBoardResponse)
 def get_digital_board_all_or_filtered(
+    response: Response,
     canteen_id: Optional[UUID] = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return pickup_service.get_digital_token_board(db, canteen_id)
 
 
 @router.get("/board/{canteen_id}", response_model=DigitalBoardResponse)
-def get_digital_board(canteen_id: UUID, db: Session = Depends(get_db)):
+def get_digital_board(canteen_id: UUID, response: Response, db: Session = Depends(get_db)):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return pickup_service.get_digital_token_board(db, canteen_id)
 
 

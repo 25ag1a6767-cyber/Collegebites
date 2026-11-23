@@ -49,7 +49,8 @@ export const TokenBoardPage: React.FC = () => {
     queryKey: ["digital-board", activeScope],
     enabled: Boolean(activeScope),
     queryFn: async () => (await api.get(boardEndpoint)).data,
-    refetchInterval: syncStatus === "live" ? 30000 : 4000,
+    staleTime: 0,
+    refetchInterval: 1000,
     refetchIntervalInBackground: true,
   });
 
@@ -127,6 +128,9 @@ export const TokenBoardPage: React.FC = () => {
                 COLLEGEBITES PICKUP DISPLAY
               </span>
               <RealtimeStatusBadge status={syncStatus} lastSyncedAt={lastSyncedAt} darkSurface />
+              <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold text-emerald-300">
+                Auto-refresh: 1s
+              </span>
             </div>
             <h1 className="text-2xl md:text-4xl font-black tracking-tight">
               {board?.canteen_name || "All Campus Canteens"}

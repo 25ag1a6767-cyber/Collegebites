@@ -27,7 +27,8 @@ export default function BoardScreen() {
     queryKey: ["m-board", activeId],
     enabled: Boolean(activeId),
     queryFn: () => tokensApi.getBoard(activeId),
-    refetchInterval: syncStatus === "live" ? 15000 : 4000,
+    staleTime: 0,
+    refetchInterval: 1000,
   });
 
   return (
