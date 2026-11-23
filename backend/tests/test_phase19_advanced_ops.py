@@ -210,3 +210,10 @@ def test_multi_station_routing_kot_escpos_and_queue_controls(client: TestClient)
         ).status_code
         == 400
     )
+
+    # KDS staff directory & inventory_manager access to canteen kitchen stations
+    k_staff = client.get(f"/api/v1/kitchen/canteens/{main_canteen['id']}/staff", headers=kitchen["headers"])
+    assert k_staff.status_code == 200 and len(k_staff.json()) >= 1
+    inv_mgr = login_as(client, "inventory@collegebites.edu", "Staff@12345")
+    inv_stations = client.get(f"/api/v1/kitchen/canteens/{main_canteen['id']}/stations", headers=inv_mgr["headers"])
+    assert inv_stations.status_code == 200 and len(inv_stations.json()) >= 1

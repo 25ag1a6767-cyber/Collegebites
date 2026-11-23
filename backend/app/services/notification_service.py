@@ -7,10 +7,13 @@ from fastapi import HTTPException
 from sqlalchemy import event, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.integrations.email_provider import send_email
 from app.integrations.expo_push_provider import send_expo_push
 from app.integrations.sms_provider import send_sms_or_whatsapp
-from app.models.auth import CustomerProfile, User
+from app.integrations.web_push_provider import send_web_push
+from app.models.auth import CustomerProfile, StaffProfile, User, UserRole
+from app.models.auth import Role
 from app.models.engagement import Announcement, Notification, NotificationPreference
 from app.models.order import Order
 from app.websockets import emit_user_notification_sync
@@ -74,6 +77,70 @@ def _safe_send_push(token: str, title: str, msg: str, data: Optional[dict] = Non
         return False, str(exc)
 
 
+def _send_web_push_for_pref(
+    pref: NotificationPreference,
+    *,
+    title: str,
+    msg: str,
+    url_path: str,
+    data: Optional[dict] = None,
+) -> tuple[bool, list[str]]:
+    subs = [s for s in (pref.web_push_subscriptions or []) if isinstance(s, dict) and s.get("endpoint")]
+    if not subs or not pref.push_enabled or not settings.VAPID_PRIVATE_KEY or not settings.VAPID_PUBLIC_KEY:
+        return True, []
+    errors: list[str] = []
+    kept: list[dict] = []
+    any_ok = False
+    for sub in subs:
+        ok, reason = send_web_push(sub, title=title, body=msg, url_path=url_path, data=data)
+        if ok:
+            any_ok = True
+            kept.append(sub)
+        elif reason == "gone":
+            # Drop expired 404/410 browser endpoint cleanly
+            continue
+        else:
+            errors.append(reason)
+            kept.append(sub)
+    if len(kept) != len(subs):
+        pref.web_push_subscriptions = kept
+    return any_ok or not errors, errors
+
+
+def _dispatch_role_web_push(
+    db: Session,
+    *,
+    role_target: str,
+    canteen_id: Optional[UUID],
+    title: str,
+    msg: str,
+    url_path: str,
+    data: Optional[dict] = None,
+) -> None:
+    if not settings.VAPID_PRIVATE_KEY or not settings.VAPID_PUBLIC_KEY:
+        return
+    stmt = (
+        select(NotificationPreference)
+        .join(User, User.id == NotificationPreference.user_id)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .outerjoin(StaffProfile, StaffProfile.user_id == User.id)
+        .where(
+            User.is_active.is_(True),
+            Role.name == role_target,
+            NotificationPreference.push_enabled.is_(True),
+        )
+    )
+    if canteen_id:
+        stmt = stmt.where(
+            or_(StaffProfile.assigned_canteen_id == canteen_id, StaffProfile.assigned_canteen_id.is_(None))
+        )
+    prefs = db.scalars(stmt).all()
+    for p in prefs:
+        if p.web_push_subscriptions:
+            _send_web_push_for_pref(p, title=title, msg=msg, url_path=url_path, data=data)
+
+
 def _create_notification(
     db: Session,
     *,
@@ -115,6 +182,25 @@ def _create_notification(
             title=title,
             message=message,
             order_number=(metadata_json or {}).get("order_number"),
+        )
+    elif role_target:
+        url_path = (
+            "/kitchen"
+            if role_target == "kitchen_staff"
+            else "/inventory"
+            if role_target == "inventory_manager"
+            else "/pickup"
+            if role_target == "pickup_staff"
+            else "/token-board"
+        )
+        _dispatch_role_web_push(
+            db,
+            role_target=role_target,
+            canteen_id=canteen_id,
+            title=title,
+            msg=message,
+            url_path=url_path,
+            data={"event_type": event_type, **(metadata_json or {})},
         )
     return n, True
 
@@ -177,6 +263,16 @@ def _dispatch_user_notifications(
             ok, reason = _safe_send_push(pref.expo_push_token, title, msg, {"order_number": order.order_number})
             if not ok:
                 delivery_errors["expo_push"] = reason
+        if pref and pref.push_enabled and pref.web_push_subscriptions:
+            wp_ok, wp_errs = _send_web_push_for_pref(
+                pref,
+                title=title,
+                msg=msg,
+                url_path=f"/orders/{order.order_number}",
+                data={"order_number": order.order_number, "event_type": event_type},
+            )
+            if not wp_ok and wp_errs:
+                delivery_errors["web_push"] = ",".join(wp_errs[:3])
         if notif and delivery_errors:
             notif.metadata_json = {**meta, "delivery_errors": delivery_errors}
     elif send_external:

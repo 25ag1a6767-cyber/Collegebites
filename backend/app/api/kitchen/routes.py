@@ -9,6 +9,7 @@ from app.core.database import get_db
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_COLLEGE_ADMIN,
+    ROLE_INVENTORY_MANAGER,
     ROLE_KITCHEN_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
@@ -203,11 +204,21 @@ class OrderAssignIn(BaseModel):
 @router.get("/canteens/{canteen_id}/stations")
 def list_kitchen_stations(
     canteen_id: UUID,
-    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES, ROLE_INVENTORY_MANAGER)),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, canteen_id)
     return kitchen_service.list_canteen_stations_with_workload(db, canteen_id)
+
+
+@router.get("/canteens/{canteen_id}/staff")
+def list_kitchen_staff_members(
+    canteen_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return kitchen_service.list_canteen_kitchen_staff(db, canteen_id)
 
 
 @router.post("/orders/{order_id}/assign")

@@ -145,6 +145,12 @@ export const InventoryPage: React.FC = () => {
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/wastage?limit=40`)).data,
   });
 
+  const { data: kitchenStations = [] } = useQuery<any[]>({
+    queryKey: ["inv-kitchen-stations", activeId],
+    enabled: Boolean(activeId),
+    queryFn: async () => (await api.get(`/kitchen/canteens/${activeId}/stations`)).data,
+  });
+
   const { data: adjustmentRecords = [], refetch: refetchAdjustments } = useQuery<any[]>({
     queryKey: ["inv-adjustments", activeId],
     enabled: Boolean(activeId),
@@ -206,6 +212,7 @@ export const InventoryPage: React.FC = () => {
   // Customer Menu Management State (Inventory Manager menu ops; selling price updates remain approval-gated)
   const [newMenuCatName, setNewMenuCatName] = useState("");
   const [newFoodCatId, setNewFoodCatId] = useState("");
+  const [newFoodStationId, setNewFoodStationId] = useState("");
   const [newFoodName, setNewFoodName] = useState("");
   const [newFoodDesc, setNewFoodDesc] = useState("");
   const [newFoodPrice, setNewFoodPrice] = useState("");
@@ -214,6 +221,7 @@ export const InventoryPage: React.FC = () => {
   const [editFood, setEditFood] = useState<any | null>(null);
   const [editFoodName, setEditFoodName] = useState("");
   const [editFoodCatId, setEditFoodCatId] = useState("");
+  const [editFoodStationId, setEditFoodStationId] = useState("");
   const [editFoodDesc, setEditFoodDesc] = useState("");
   const [editFoodPrepMins, setEditFoodPrepMins] = useState("10");
   const [editFoodVeg, setEditFoodVeg] = useState(true);
@@ -1558,6 +1566,7 @@ export const InventoryPage: React.FC = () => {
                                 setEditFood(m);
                                 setEditFoodName(m.name);
                                 setEditFoodCatId(m.category_id);
+                                setEditFoodStationId(m.station_id || "");
                                 setEditFoodDesc(m.description || "");
                                 setEditFoodPrepMins(String(m.prep_time_minutes || 10));
                                 setEditFoodVeg(Boolean(m.is_veg));
@@ -1676,6 +1685,14 @@ export const InventoryPage: React.FC = () => {
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </Select>
+              {kitchenStations.length > 0 && (
+                <Select value={newFoodStationId} onChange={(e) => setNewFoodStationId(e.target.value)}>
+                  <option value="">Kitchen Station (Optional)</option>
+                  {kitchenStations.map((st) => (
+                    <option key={st.id} value={st.id}>{st.name}</option>
+                  ))}
+                </Select>
+              )}
               <Input value={newFoodName} onChange={(e) => setNewFoodName(e.target.value)} placeholder="Dish Name *" />
               <Input value={newFoodDesc} onChange={(e) => setNewFoodDesc(e.target.value)} placeholder="Short description" />
               <div className="grid grid-cols-2 gap-2">
@@ -1711,6 +1728,7 @@ export const InventoryPage: React.FC = () => {
                     await api.post("/menus/items", {
                       canteen_id: activeId,
                       category_id: catId,
+                      station_id: newFoodStationId || null,
                       name: newFoodName.trim(),
                       slug,
                       description: newFoodDesc.trim() || null,
@@ -1766,6 +1784,17 @@ export const InventoryPage: React.FC = () => {
               <label className="font-bold text-slate-600 block mb-1">Description</label>
               <Input value={editFoodDesc} onChange={(e) => setEditFoodDesc(e.target.value)} />
             </div>
+            {kitchenStations.length > 0 && (
+              <div>
+                <label className="font-bold text-slate-600 block mb-1">Kitchen Station</label>
+                <Select value={editFoodStationId} onChange={(e) => setEditFoodStationId(e.target.value)}>
+                  <option value="">No specific station (General Kitchen)</option>
+                  {kitchenStations.map((st) => (
+                    <option key={st.id} value={st.id}>{st.name}</option>
+                  ))}
+                </Select>
+              </div>
+            )}
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5 flex items-center justify-between">
               <div>
                 <div className="font-bold text-amber-900">Selling Price: ₹{editFood.base_price}</div>
@@ -1806,6 +1835,7 @@ export const InventoryPage: React.FC = () => {
                     await api.patch(`/menus/items/${editFood.id}`, {
                       name: editFoodName.trim(),
                       category_id: editFoodCatId,
+                      station_id: editFoodStationId || null,
                       description: editFoodDesc.trim() || null,
                       prep_time_minutes: Number(editFoodPrepMins) || 10,
                       is_veg: editFoodVeg,

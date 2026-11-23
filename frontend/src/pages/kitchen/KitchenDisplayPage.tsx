@@ -39,6 +39,9 @@ export const KitchenDisplayPage: React.FC = () => {
   const [delayModalOrder, setDelayModalOrder] = useState<Order | null>(null);
   const [delayMins, setDelayMins] = useState(10);
   const [delayReason, setDelayReason] = useState("High kitchen load");
+  const [assignOrderTarget, setAssignOrderTarget] = useState<Order | null>(null);
+  const [assignStationId, setAssignStationId] = useState("");
+  const [assignStaffId, setAssignStaffId] = useState("");
   const [rejectOrderTarget, setRejectOrderTarget] = useState<Order | null>(null);
   const [busy, setBusy] = useState(false);
   const [showAvailabilityModal, setShowAvailabilityModal] = useState(false);
@@ -93,6 +96,12 @@ export const KitchenDisplayPage: React.FC = () => {
     enabled: Boolean(activeCanteenId),
     queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/stations`)).data,
     refetchInterval: kdsSyncStatus === "live" ? 30000 : 8000,
+  });
+
+  const { data: kitchenStaff = [] } = useQuery<any[]>({
+    queryKey: ["kitchen-staff-list", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/staff`)).data,
   });
 
   const { data: orders = [], refetch } = useQuery<Order[]>({
@@ -469,6 +478,19 @@ export const KitchenDisplayPage: React.FC = () => {
                           Delay
                         </Button>
                       )}
+                      {(stations.length > 0 || kitchenStaff.length > 0) && o.status !== "READY" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setAssignOrderTarget(o);
+                            setAssignStationId(o.items.find((i) => i.station_id)?.station_id || "");
+                            setAssignStaffId("");
+                          }}
+                        >
+                          Assign
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         variant="ghost"
@@ -522,6 +544,65 @@ export const KitchenDisplayPage: React.FC = () => {
             Update ETA & Notify Customer
           </Button>
         </form>
+      </Modal>
+
+      {/* Assign Station / Chef Modal */}
+      <Modal
+        open={Boolean(assignOrderTarget)}
+        onClose={() => setAssignOrderTarget(null)}
+        title={`Assign Station / Chef • ${assignOrderTarget?.pickup_token_code || ""}`}
+      >
+        {assignOrderTarget && (
+          <div className="space-y-4 text-xs">
+            {stations.length > 0 && (
+              <div>
+                <label className="mb-1 block font-bold text-slate-700">Kitchen Station</label>
+                <Select value={assignStationId} onChange={(e) => setAssignStationId(e.target.value)}>
+                  <option value="">General / Unchanged</option>
+                  {stations.map((s: any) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.pending_units} pending items)
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
+            {kitchenStaff.length > 0 && (
+              <div>
+                <label className="mb-1 block font-bold text-slate-700">Assign Chef / Staff</label>
+                <Select value={assignStaffId} onChange={(e) => setAssignStaffId(e.target.value)}>
+                  <option value="">Select staff member (optional)</option>
+                  {kitchenStaff.map((st: any) => (
+                    <option key={st.user_id} value={st.user_id}>
+                      {st.full_name} ({st.designation})
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
+            <Button
+              variant="primary"
+              className="w-full"
+              disabled={!assignStationId && !assignStaffId}
+              onClick={async () => {
+                try {
+                  await api.post(`/kitchen/orders/${assignOrderTarget.id}/assign`, {
+                    station_id: assignStationId || null,
+                    staff_user_id: assignStaffId || null,
+                    role_scope: "kitchen",
+                  });
+                  pushToast(`Assigned ${assignOrderTarget.pickup_token_code || assignOrderTarget.order_number}`, "success");
+                  setAssignOrderTarget(null);
+                  refetch();
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
+              }}
+            >
+              Confirm Assignment
+            </Button>
+          </div>
+        )}
       </Modal>
 
       {/* Unavailable Item & Ingredient Modal */}

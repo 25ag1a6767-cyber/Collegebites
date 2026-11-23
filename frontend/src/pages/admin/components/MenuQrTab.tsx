@@ -64,6 +64,11 @@ export const MenuTab: React.FC<{
     queryFn: async () =>
       (await api.get(`/inventory/canteens/${activeCanteenId}/price-changes?status=pending_approval`)).data,
   });
+  const { data: kitchenStations = [] } = useQuery<any[]>({
+    queryKey: ["menu-kitchen-stations", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/stations`)).data,
+  });
 
   const [catName, setCatName] = useState("");
   const [newDishName, setNewDishName] = useState("");
@@ -71,6 +76,7 @@ export const MenuTab: React.FC<{
   const [newDishPrice, setNewDishPrice] = useState("60.00");
   const [newDishPrep, setNewDishPrep] = useState("10");
   const [newDishCatId, setNewDishCatId] = useState("");
+  const [newDishStationId, setNewDishStationId] = useState("");
   const [isVeg, setIsVeg] = useState(true);
   const [newDishAvailable, setNewDishAvailable] = useState(true);
   const [newDishFile, setNewDishFile] = useState<File | null>(null);
@@ -79,6 +85,7 @@ export const MenuTab: React.FC<{
   const [editItem, setEditItem] = useState<FoodItem | null>(null);
   const [editName, setEditName] = useState("");
   const [editCatId, setEditCatId] = useState("");
+  const [editStationId, setEditStationId] = useState("");
   const [editVeg, setEditVeg] = useState(true);
   const [editPrice, setEditPrice] = useState("");
   const [editPrep, setEditPrep] = useState("10");
@@ -118,6 +125,7 @@ export const MenuTab: React.FC<{
     setEditItem(it);
     setEditName(it.name);
     setEditCatId(it.category_id);
+    setEditStationId(it.station_id || "");
     setEditVeg(Boolean(it.is_veg));
     setEditPrice(String(it.base_price));
     setEditPrep(String(it.prep_time_minutes));
@@ -256,6 +264,21 @@ export const MenuTab: React.FC<{
               <option value="veg">Veg</option>
               <option value="nonveg">Non-Veg</option>
             </Select>
+            {kitchenStations.length > 0 && (
+              <Select
+                value={newDishStationId}
+                onChange={(e) => setNewDishStationId(e.target.value)}
+                className="w-44"
+                aria-label="Kitchen Station"
+              >
+                <option value="">Default Kitchen Station</option>
+                {kitchenStations.map((st) => (
+                  <option key={st.id} value={st.id}>
+                    Station: {st.name}
+                  </option>
+                ))}
+              </Select>
+            )}
             <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-700">
               <input
                 type="checkbox"
@@ -305,6 +328,7 @@ export const MenuTab: React.FC<{
                   const created = await api.post<FoodItem>("/menus/items", {
                     canteen_id: activeCanteenId,
                     category_id: catId,
+                    station_id: newDishStationId || null,
                     name,
                     slug,
                     description: newDishDesc.trim() || null,
@@ -650,6 +674,19 @@ export const MenuTab: React.FC<{
               <label className="mb-1 block font-bold text-slate-600">Description</label>
               <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
             </div>
+            {kitchenStations.length > 0 && (
+              <div>
+                <label className="mb-1 block font-bold text-slate-600">Assigned Kitchen Station</label>
+                <Select value={editStationId} onChange={(e) => setEditStationId(e.target.value)}>
+                  <option value="">No specific station (General Kitchen)</option>
+                  {kitchenStations.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.name} ({st.station_type})
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
             <div className="space-y-1.5">
               <label className="block font-bold text-slate-600">Dish Image URL or File Upload</label>
               <div className="flex gap-2 items-center">
@@ -726,6 +763,7 @@ export const MenuTab: React.FC<{
                   await api.patch(`/menus/items/${editItem.id}`, {
                     name,
                     category_id: editCatId || editItem.category_id,
+                    station_id: editStationId || null,
                     is_veg: editVeg,
                     base_price: priceNum.toFixed(2),
                     prep_time_minutes: Math.min(240, Math.max(1, Number(editPrep) || 10)),

@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.auth import User
+from app.models.auth import StaffProfile, User
 from app.models.college import Kitchen, KitchenStation
 from app.models.engagement import Notification
 from app.models.inventory import InventoryItem, StockBatch, StockMovement
@@ -500,6 +500,28 @@ def list_canteen_stations_with_workload(db: Session, canteen_id: UUID) -> list[d
             "pending_units": wl_map.get(st.id, (0, 0))[1],
         }
         for st, k_name in rows
+    ]
+
+
+def list_canteen_kitchen_staff(db: Session, canteen_id: UUID) -> list[dict]:
+    rows = db.execute(
+        select(User, StaffProfile)
+        .join(StaffProfile, StaffProfile.user_id == User.id)
+        .where(
+            User.is_active.is_(True),
+            StaffProfile.assigned_canteen_id == canteen_id,
+        )
+        .order_by(User.full_name.asc())
+    ).all()
+    return [
+        {
+            "user_id": str(u.id),
+            "full_name": u.full_name,
+            "employee_code": sp.employee_code,
+            "designation": sp.designation,
+            "is_on_duty": sp.is_on_duty,
+        }
+        for u, sp in rows
     ]
 
 

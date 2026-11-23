@@ -79,7 +79,7 @@ export const BrandEmptyState: React.FC<{
   </div>
 );
 
-const FOOTER_HIDDEN_PREFIXES = ["/board", "/kiosk"];
+const FOOTER_HIDDEN_PREFIXES = ["/board", "/display", "/tv", "/kiosk"];
 
 export const BrandFooter: React.FC = () => {
   const { pathname } = useLocation();

@@ -144,3 +144,66 @@ def test_kds_priority_item_prep_delay_guards_and_notification_dedup(client: Test
     )
     assert unsub.status_code == 200
     assert unsub.json()["subscription_count"] == 0
+
+
+def test_background_web_push_dispatch_and_expired_pruning(client: TestClient, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    import pywebpush
+    from app.core.config import settings
+
+    student = login_as(client, "student@collegebites.edu", "Student@12345")
+    kitchen = login_as(client, "kitchen@collegebites.edu", "Staff@12345")
+    main_canteen = next(c for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
+    food = client.get(f"/api/v1/menus/canteens/{main_canteen['id']}/items").json()[0]
+
+    # Subscribe both an active endpoint and a stale 410 endpoint for student + an active one for kitchen
+    assert (
+        client.post(
+            "/api/v1/notifications/web-push/subscribe",
+            headers=student["headers"],
+            json={"endpoint": "https://push.example/valid-cust", "keys": {"p256dh": "k1", "auth": "a1"}},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/notifications/web-push/subscribe",
+            headers=student["headers"],
+            json={"endpoint": "https://push.example/expired-cust", "keys": {"p256dh": "k2", "auth": "a2"}},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/notifications/web-push/subscribe",
+            headers=kitchen["headers"],
+            json={"endpoint": "https://push.example/valid-kitchen", "keys": {"p256dh": "k3", "auth": "a3"}},
+        ).status_code
+        == 200
+    )
+
+    monkeypatch.setattr(settings, "VAPID_PUBLIC_KEY", "test-public-vapid-key")
+    monkeypatch.setattr(settings, "VAPID_PRIVATE_KEY", "test-private-vapid-key")
+
+    sent_calls: list[dict] = []
+
+    def fake_webpush(subscription_info, data, vapid_private_key, vapid_claims, ttl=300):
+        endpoint = subscription_info["endpoint"]
+        if "expired-cust" in endpoint:
+            raise pywebpush.WebPushException("Gone", response=SimpleNamespace(status_code=410))
+        sent_calls.append({"endpoint": endpoint, "payload": json.loads(data), "ttl": ttl})
+
+    monkeypatch.setattr(pywebpush, "webpush", fake_webpush)
+
+    _place_paid_order(client, student["headers"], main_canteen["id"], food["id"])
+
+    sent_endpoints = [c["endpoint"] for c in sent_calls]
+    assert "https://push.example/valid-cust" in sent_endpoints
+    assert "https://push.example/valid-kitchen" in sent_endpoints
+    assert any(c["payload"]["url"].startswith("/orders/") for c in sent_calls if "valid-cust" in c["endpoint"])
+
+    # Stale 410 subscription must have been pruned automatically (only 1 remaining)
+    prefs = client.get("/api/v1/notifications/preferences", headers=student["headers"]).json()
+    assert len(prefs["web_push_subscriptions"]) == 1
+    assert prefs["web_push_subscriptions"][0]["endpoint"] == "https://push.example/valid-cust"
