@@ -571,6 +571,7 @@ def system_health(
     }
 
 
+@router.get("/maintenance/run")
 @router.post("/maintenance/run")
 def run_scheduled_maintenance_endpoint(
     authorization: Optional[str] = Header(default=None),

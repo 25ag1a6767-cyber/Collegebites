@@ -4,10 +4,12 @@ import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
+import QRCode from "react-native-qrcode-svg";
 import { z } from "zod";
 import { authApi } from "../src/api/auth.api";
 import { canteensApi } from "../src/api/canteens.api";
 import { getMobileApiError } from "../src/api/client";
+import { menuApi } from "../src/api/menu.api";
 import { notificationsApi } from "../src/api/notifications.api";
 import { profileApi } from "../src/api/profile.api";
 import { registerExpoPushToken } from "../src/notifications/registerPush";
@@ -84,10 +86,51 @@ export default function ProfileScreen() {
   const [curPw, setCurPw] = useState("");
   const [chgNewPw, setChgNewPw] = useState("");
   const [confirmDeact, setConfirmDeact] = useState(false);
+  const [selectedEventId, setSelectedEventId] = useState("");
+  const [bulkHeadcount, setBulkHeadcount] = useState("25");
+  const [bulkVenue, setBulkVenue] = useState("Main Seminar Hall");
+  const [bulkFoodItemId, setBulkFoodItemId] = useState("");
+  const [bulkFoodQty, setBulkFoodQty] = useState("25");
 
   const { data: college } = useQuery<any>({
     queryKey: ["m-college"],
     queryFn: canteensApi.getCollegeSettings,
+  });
+
+  const { data: canteens = [] } = useQuery<any[]>({
+    queryKey: ["m-canteens"],
+    queryFn: canteensApi.listCanteens,
+  });
+  const primaryCanteenId = canteens[0]?.id;
+
+  const { data: primaryMenuItems = [] } = useQuery<any[]>({
+    queryKey: ["m-primary-menu", primaryCanteenId],
+    enabled: Boolean(user && primaryCanteenId),
+    queryFn: () => menuApi.listItems(primaryCanteenId, {}),
+  });
+
+  const { data: mealPlans = [] } = useQuery<any[]>({
+    queryKey: ["m-meal-plans"],
+    enabled: Boolean(user),
+    queryFn: () => profileApi.listMealPlans(),
+  });
+
+  const { data: myMealSubscriptions = [], refetch: refetchMealSubs } = useQuery<any[]>({
+    queryKey: ["m-my-meal-subs"],
+    enabled: Boolean(user),
+    queryFn: profileApi.listMyMealSubscriptions,
+  });
+
+  const { data: collegeEvents = [] } = useQuery<any[]>({
+    queryKey: ["m-college-events"],
+    enabled: Boolean(user),
+    queryFn: profileApi.listCollegeEvents,
+  });
+
+  const { data: myBulkOrders = [], refetch: refetchBulkOrders } = useQuery<any[]>({
+    queryKey: ["m-my-bulk-orders"],
+    enabled: Boolean(user),
+    queryFn: profileApi.listMyBulkOrders,
   });
 
   const { data: profile } = useQuery<any>({
@@ -330,6 +373,187 @@ export default function ProfileScreen() {
             ))}
           </View>
         )}
+
+        <View style={styles.card}>
+          <Text style={styles.secTitle}>Student Meal Plans &amp; QR Pass ({myMealSubscriptions.length} active)</Text>
+          {myMealSubscriptions.map((sub: any) => (
+            <View
+              key={sub.id}
+              style={{
+                backgroundColor: "#fdf8f0",
+                borderColor: "#76010d",
+                borderWidth: 1,
+                borderRadius: 12,
+                padding: 12,
+                gap: 6,
+              }}
+            >
+              <Text style={{ fontWeight: "800", fontSize: 13, color: "#380106" }}>
+                {sub.meal_plan_name || "Campus Meal Plan"} • {sub.remaining_meals}/{sub.total_meals} meals left
+              </Text>
+              <Text style={{ fontSize: 11, color: "#475569" }}>
+                Status: {sub.status} ({sub.payment_status}) • Pass Code: {sub.redemption_code}
+              </Text>
+              {sub.status === "active" && sub.redemption_code && (
+                <View style={{ alignItems: "center", paddingVertical: 8, backgroundColor: "#fff", borderRadius: 10 }}>
+                  <QRCode value={sub.redemption_qr_payload || sub.redemption_code} size={130} />
+                  <Text style={{ fontSize: 11, fontWeight: "800", color: "#380106", marginTop: 6 }}>
+                    Show at Pickup Counter to redeem 1 meal ({sub.daily_used_count || 0}/{sub.daily_limit || 2} used today)
+                  </Text>
+                </View>
+              )}
+            </View>
+          ))}
+          {mealPlans.length === 0 ? (
+            <Text style={styles.sub}>No student meal plans published yet.</Text>
+          ) : (
+            mealPlans.map((plan: any) => (
+              <View key={plan.id} style={styles.prefRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontWeight: "800", fontSize: 12, color: "#0f172a" }}>
+                    {plan.name} • ₹{plan.price}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: "#64748b" }}>
+                    {plan.total_meals} meals • {plan.validity_days} days • {plan.plan_type}
+                  </Text>
+                </View>
+                <Pressable
+                  disabled={busy}
+                  onPress={async () => {
+                    setBusy(true);
+                    setMsg("");
+                    try {
+                      await profileApi.subscribeMealPlan(plan.id, {
+                        payment_method: "razorpay",
+                        auto_confirm_demo: true,
+                      });
+                      await refetchMealSubs();
+                      setMsg(`Subscribed to ${plan.name}! Your QR meal pass is ready.`);
+                    } catch (e: unknown) {
+                      setMsg(getMobileApiError(e, "Could not subscribe to meal plan"));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  style={[styles.btn, { paddingHorizontal: 12, paddingVertical: 8 }]}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>Subscribe</Text>
+                </Pressable>
+              </View>
+            ))
+          )}
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.secTitle}>College Events &amp; Bulk Ordering ({collegeEvents.length} events)</Text>
+          {collegeEvents.length === 0 ? (
+            <Text style={styles.sub}>No upcoming campus events open for bulk catering right now.</Text>
+          ) : (
+            <>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {collegeEvents.map((ev: any) => {
+                  const active = (selectedEventId || collegeEvents[0]?.id) === ev.id;
+                  return (
+                    <Pressable
+                      key={ev.id}
+                      onPress={() => setSelectedEventId(ev.id)}
+                      style={[styles.prefPill, active && styles.prefPillActive, { marginRight: 6 }]}
+                    >
+                      <Text style={{ fontSize: 11, fontWeight: "700", color: active ? "#fff" : "#0f172a" }}>
+                        {ev.title} ({ev.venue || "Campus"})
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  value={bulkHeadcount}
+                  onChangeText={setBulkHeadcount}
+                  keyboardType="numeric"
+                  placeholder="Headcount"
+                />
+                <TextInput
+                  style={[styles.input, { flex: 2 }]}
+                  value={bulkVenue}
+                  onChangeText={setBulkVenue}
+                  placeholder="Delivery Venue"
+                />
+              </View>
+              {primaryMenuItems.length > 0 && (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  {primaryMenuItems.slice(0, 6).map((fi: any) => {
+                    const active = (bulkFoodItemId || primaryMenuItems[0]?.id) === fi.id;
+                    return (
+                      <Pressable
+                        key={fi.id}
+                        onPress={() => setBulkFoodItemId(fi.id)}
+                        style={[styles.prefPill, active && styles.prefPillActive, { marginRight: 6 }]}
+                      >
+                        <Text style={{ fontSize: 11, fontWeight: "700", color: active ? "#fff" : "#0f172a" }}>
+                          {fi.name} (₹{fi.base_price})
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              )}
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <TextInput
+                  style={[styles.input, { flex: 1 }]}
+                  value={bulkFoodQty}
+                  onChangeText={setBulkFoodQty}
+                  keyboardType="numeric"
+                  placeholder="Item Qty"
+                />
+                <Pressable
+                  disabled={busy || !primaryCanteenId || primaryMenuItems.length === 0}
+                  onPress={async () => {
+                    const evId = selectedEventId || collegeEvents[0]?.id;
+                    const itemId = bulkFoodItemId || primaryMenuItems[0]?.id;
+                    if (!evId || !itemId || !primaryCanteenId) return;
+                    setBusy(true);
+                    setMsg("");
+                    try {
+                      await profileApi.createEventBulkOrder(evId, {
+                        canteen_id: primaryCanteenId,
+                        organizer_name: fullName || user.full_name || "Campus Organizer",
+                        organizer_phone: phoneInput || user.phone || "+919876543210",
+                        organizer_email: user.email || null,
+                        department: department || "Computer Science",
+                        headcount: Math.max(5, Number(bulkHeadcount) || 25),
+                        requested_delivery_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+                        delivery_venue: bulkVenue || "Main Seminar Hall",
+                        payment_method: "razorpay",
+                        items: [{ food_item_id: itemId, quantity: Math.max(5, Number(bulkFoodQty) || 25) }],
+                      });
+                      await refetchBulkOrders();
+                      setMsg("Event bulk order submitted for manager review!");
+                    } catch (e: unknown) {
+                      setMsg(getMobileApiError(e, "Could not submit bulk order"));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  style={[styles.btn, { flex: 2 }]}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>Submit Event Bulk Order</Text>
+                </Pressable>
+              </View>
+            </>
+          )}
+          {myBulkOrders.slice(0, 4).map((bo: any) => (
+            <View key={bo.id} style={styles.notifRow}>
+              <Text style={{ fontWeight: "700", fontSize: 12 }}>
+                {bo.order_reference} • ₹{bo.total_amount} ({bo.headcount} pax)
+              </Text>
+              <Text style={{ fontSize: 11, color: "#475569" }}>
+                Status: {bo.status} • Payment: {bo.payment_status} • Venue: {bo.delivery_venue || "Campus"}
+              </Text>
+            </View>
+          ))}
+        </View>
 
         <View style={styles.card}>
           <Text style={styles.secTitle}>Saved Favourite Dishes ({favourites.length})</Text>

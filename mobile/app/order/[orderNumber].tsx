@@ -6,6 +6,7 @@ import QRCode from "react-native-qrcode-svg";
 import { API_BASE_URL, getMobileApiError } from "../../src/api/client";
 import { ordersApi } from "../../src/api/orders.api";
 import { paymentsApi } from "../../src/api/payments.api";
+import { profileApi } from "../../src/api/profile.api";
 import { tokensApi } from "../../src/api/tokens.api";
 import { StripePayButton } from "../../src/components/StripePayButton";
 import { BrandLogo } from "../../src/components/BrandLogo";
@@ -55,6 +56,12 @@ export default function OrderDetailScreen() {
     queryKey: ["m-receipt", orderNumber],
     enabled: Boolean(order?.payment_status === "CONFIRMED" && orderNumber),
     queryFn: () => tokensApi.getReceipt(String(orderNumber), gToken),
+  });
+
+  const { data: invoice } = useQuery<any>({
+    queryKey: ["m-invoice", order?.id],
+    enabled: Boolean(order?.payment_status === "CONFIRMED" && order?.id),
+    queryFn: () => profileApi.getOrderInvoice(String(order.id), gToken),
   });
 
   useMobileRealtimeWs({
@@ -351,11 +358,33 @@ export default function OrderDetailScreen() {
       {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontWeight: "700", fontSize: 12 }}>{errMsg}</Text>}
 
       {order.payment_status === "CONFIRMED" && (
-        <Pressable onPress={downloadOrShareReceipt} style={styles.pdfBtn}>
-          <Text style={{ color: "#fff", fontWeight: "800" }}>
-            {Platform.OS === "web" || gToken ? "Download Printable PDF Receipt" : "Share / Save Digital Receipt"}
-          </Text>
-        </Pressable>
+        <View style={{ gap: 8 }}>
+          {invoice && (
+            <View style={styles.card}>
+              <Text style={styles.secTitle}>Tax Invoice • {invoice.invoice_number}</Text>
+              <Text style={{ fontSize: 11, color: "#475569" }}>
+                Taxable: ₹{invoice.taxable_subtotal} • CGST: ₹{invoice.cgst_amount} • SGST: ₹{invoice.sgst_amount} •
+                Total: ₹{invoice.grand_total}
+              </Text>
+              <Pressable
+                onPress={() => {
+                  const pdfUrl = `${API_BASE_URL}/invoices/${encodeURIComponent(order.id)}/pdf${suffix}`;
+                  Linking.openURL(pdfUrl);
+                }}
+                style={[styles.pdfBtn, { backgroundColor: "#0f766e", paddingVertical: 10 }]}
+              >
+                <Text style={{ color: "#fff", fontWeight: "800", fontSize: 12 }}>
+                  Download Official Tax Invoice PDF ({invoice.invoice_number})
+                </Text>
+              </Pressable>
+            </View>
+          )}
+          <Pressable onPress={downloadOrShareReceipt} style={styles.pdfBtn}>
+            <Text style={{ color: "#fff", fontWeight: "800" }}>
+              {Platform.OS === "web" || gToken ? "Download Printable PDF Receipt" : "Share / Save Digital Receipt"}
+            </Text>
+          </Pressable>
+        </View>
       )}
 
       <View style={{ flexDirection: "row", gap: 8 }}>

@@ -2,23 +2,33 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.models.college import Canteen
 from app.models.engagement import Notification
 from app.models.auth import OTPVerification, RefreshToken, SessionRecord
+from app.models.meal_plan import StudentMealSubscription
 from app.services.audit_service import record_audit_log
 from app.services.inventory_service import get_inventory_alerts
 from app.services.order_service import release_expired_slot_reservations
 
 
 def cleanup_expired_auth_artifacts(db: Session) -> dict[str, int]:
-    """Remove expired OTP records, expired refresh tokens, and stale unpaid slot reservations."""
+    """Remove expired OTP records, expired refresh tokens, stale unpaid slot reservations, and expire past-due meal plans."""
     now = datetime.now(timezone.utc)
     otp_res = db.execute(delete(OTPVerification).where(OTPVerification.expires_at < now))
     tok_res = db.execute(delete(RefreshToken).where(RefreshToken.expires_at < now))
     sess_res = db.execute(delete(SessionRecord).where(SessionRecord.expires_at < now))
+    meal_res = db.execute(
+        update(StudentMealSubscription)
+        .where(
+            StudentMealSubscription.status == "active",
+            StudentMealSubscription.expires_at.is_not(None),
+            StudentMealSubscription.expires_at <= now,
+        )
+        .values(status="expired")
+    )
     released_slots = release_expired_slot_reservations(db)
     db.commit()
     return {
@@ -26,6 +36,7 @@ def cleanup_expired_auth_artifacts(db: Session) -> dict[str, int]:
         "deleted_refresh_tokens": int(tok_res.rowcount or 0),
         "deleted_sessions": int(sess_res.rowcount or 0),
         "released_expired_slots": int(released_slots),
+        "expired_meal_subscriptions": int(meal_res.rowcount or 0),
     }
 
 

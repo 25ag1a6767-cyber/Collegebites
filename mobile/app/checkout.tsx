@@ -73,9 +73,39 @@ export default function CheckoutScreen() {
   const [otpNotice, setOtpNotice] = useState<string | null>(null);
   const [acceptedPolicy, setAcceptedPolicy] = useState(false);
   const [orderNotes, setOrderNotes] = useState("");
+  const [couponInput, setCouponInput] = useState("");
+  const [couponMsg, setCouponMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [idemKey] = useState(() => `cb-mob-idem-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+  const applyCouponCode = async (codeOverride?: string) => {
+    const code = (codeOverride ?? couponInput).trim().toUpperCase();
+    if (!activeCanteenId || !code) return;
+    setErrorMsg("");
+    setCouponMsg("");
+    try {
+      await cartApi.applyCoupon(activeCanteenId, code);
+      setCouponInput("");
+      setCouponMsg(`Coupon ${code} applied!`);
+      await refetchCart();
+    } catch (e: unknown) {
+      setErrorMsg(getMobileApiError(e, "Invalid or ineligible coupon code"));
+    }
+  };
+
+  const removeCouponCode = async () => {
+    if (!activeCanteenId) return;
+    setErrorMsg("");
+    setCouponMsg("");
+    try {
+      await cartApi.removeCoupon(activeCanteenId);
+      setCouponMsg("Coupon removed.");
+      await refetchCart();
+    } catch (e: unknown) {
+      setErrorMsg(getMobileApiError(e, "Could not remove coupon"));
+    }
+  };
 
   const updateQty = async (cartItemId: string, nextQty: number) => {
     try {
@@ -285,6 +315,35 @@ export default function CheckoutScreen() {
           </ScrollView>
         </View>
       )}
+
+      {/* Promotional Coupon Code */}
+      <View style={styles.box}>
+        <Text style={styles.sub}>Promotional Coupon Code</Text>
+        {cart.coupon_code ? (
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <Text style={{ color: "#047857", fontWeight: "800", fontSize: 12 }}>
+              Applied: {cart.coupon_code} (-₹{cart.discount_amount})
+            </Text>
+            <Pressable onPress={removeCouponCode} style={[styles.btnSec, { backgroundColor: "#dc2626" }]}>
+              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>Remove</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <TextInput
+              style={[styles.input, { flex: 1 }]}
+              value={couponInput}
+              onChangeText={setCouponInput}
+              autoCapitalize="characters"
+              placeholder="Enter coupon (e.g. CAMPUS15)"
+            />
+            <Pressable onPress={() => applyCouponCode()} style={styles.btnSec}>
+              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>Apply</Text>
+            </Pressable>
+          </View>
+        )}
+        {Boolean(couponMsg) && <Text style={{ color: "#047857", fontSize: 11, fontWeight: "700" }}>{couponMsg}</Text>}
+      </View>
 
       {user && (loyalty?.points_balance || 0) > 0 && (
         <View style={styles.box}>

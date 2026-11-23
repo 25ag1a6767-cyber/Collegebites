@@ -28,4 +28,22 @@ export const cartApi = {
       special_instructions?: string | null;
     }
   ) => (await mobileApi.patch(`/carts/items/${cartItemId}`, payload)).data,
+
+  applyCoupon: async (canteenId: string, couponCode: string) =>
+    (
+      await mobileApi.post("/carts/coupon", {
+        canteen_id: canteenId,
+        coupon_code: couponCode.trim().toUpperCase(),
+      })
+    ).data,
+
+  removeCoupon: async (canteenId: string) =>
+    (await mobileApi.delete(`/carts/coupon?canteen_id=${encodeURIComponent(canteenId)}`)).data,
+
+  listActiveCoupons: async (canteenId?: string) =>
+    (
+      await mobileApi.get(
+        `/promotions/coupons${canteenId ? `?canteen_id=${encodeURIComponent(canteenId)}` : ""}`
+      )
+    ).data,
 };

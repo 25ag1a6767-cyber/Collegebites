@@ -11,6 +11,8 @@ const CATEGORIES = [
   { key: "food_quality", label: "Food Quality" },
   { key: "missing_item", label: "Missing Item" },
   { key: "incorrect_order", label: "Wrong Order" },
+  { key: "payment_issue", label: "Payment Issue" },
+  { key: "order_issue", label: "Order Delay / Status" },
   { key: "app_help", label: "App / QR Help" },
   { key: "other", label: "Other" },
 ];
