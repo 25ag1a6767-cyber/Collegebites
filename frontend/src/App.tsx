@@ -9,7 +9,7 @@ import { Button, Card, ToastProvider } from "./components/ui/Primitives";
 import { useAppStore } from "./store/useAppStore";
 import { HomePage } from "./pages/customer/HomePage";
 
-// Route-level code splitting so customers on `/` do not download Admin, Recharts, QR scanner, or Stripe chunks eagerly
+// Route-level code splitting so customers on `/` do not download Admin, Recharts, or QR scanner chunks eagerly
 const AuthPage = lazy(() => import("./pages/auth/AuthPage").then((m) => ({ default: m.AuthPage })));
 const ScanQRPage = lazy(() => import("./pages/customer/ScanQRPage").then((m) => ({ default: m.ScanQRPage })));
 const CheckoutPage = lazy(() => import("./pages/customer/CheckoutPage").then((m) => ({ default: m.CheckoutPage })));

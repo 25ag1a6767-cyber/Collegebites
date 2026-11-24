@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from app.core.time_utils import today_college
 from app.integrations.razorpay_client import razorpay_gateway
-from app.integrations.stripe_client import stripe_gateway
 from app.models.auth import User
 from app.models.college import Canteen
 from app.models.meal_plan import MealPlan, MealPlanRedemption, StudentMealSubscription
@@ -226,7 +225,6 @@ def _serialize_subscription(
         "payment_reference": sub.payment_reference,
         "razorpay_order_id": sub.provider_order_id if sub.payment_method == "razorpay" else None,
         "razorpay_key_id": razorpay_gateway.public_key_id if sub.payment_method == "razorpay" else None,
-        "stripe_payment_intent_id": sub.provider_order_id if sub.payment_method == "stripe" else None,
         "status": sub.status,
         "valid_from": sub.valid_from.isoformat() if sub.valid_from else None,
         "expires_at": sub.expires_at.isoformat() if sub.expires_at else None,
@@ -256,8 +254,8 @@ def subscribe_to_meal_plan(
         raise HTTPException(status_code=400, detail="Meal plan enrollment window has expired")
 
     method = (payment_method or "razorpay").strip().lower()
-    if method not in ("razorpay", "stripe"):
-        raise HTTPException(status_code=400, detail="Only online verified payments (Razorpay or Stripe) are supported for meal plans")
+    if method != "razorpay":
+        raise HTTPException(status_code=400, detail="Only Razorpay online payment is supported for meal plans")
 
     subtotal = _quantize(plan.price)
     tax_amount = Decimal("0.00")
@@ -268,22 +266,12 @@ def subscribe_to_meal_plan(
     redemption_code = f"CBMP-{secrets.token_hex(4).upper()}"
     qr_payload = f"COLLEGEBITES:MEALPLAN:{sub_number}:{redemption_code}"
 
-    provider_order_id = None
-    if method == "razorpay":
-        rzp = razorpay_gateway.create_order(
-            amount_inr=total_amount,
-            receipt_ref=sub_number,
-            notes={"subscription_number": sub_number, "meal_plan": plan.code},
-        )
-        provider_order_id = rzp["id"]
-    elif method == "stripe":
-        pi = stripe_gateway.create_payment_intent(
-            amount_inr=total_amount,
-            order_number=sub_number,
-            idempotency_key=f"cb-mp-{sub_number}",
-            metadata={"subscription_number": sub_number, "meal_plan": plan.code},
-        )
-        provider_order_id = pi["id"]
+    rzp = razorpay_gateway.create_order(
+        amount_inr=total_amount,
+        receipt_ref=sub_number,
+        notes={"subscription_number": sub_number, "meal_plan": plan.code},
+    )
+    provider_order_id = rzp["id"]
 
     sub = StudentMealSubscription(
         subscription_number=sub_number,
@@ -324,7 +312,6 @@ def verify_meal_plan_payment(
     razorpay_order_id: Optional[str] = None,
     razorpay_payment_id: Optional[str] = None,
     razorpay_signature: Optional[str] = None,
-    stripe_payment_intent_id: Optional[str] = None,
 ) -> dict:
     sub = db.scalar(
         select(StudentMealSubscription).where(StudentMealSubscription.id == subscription_id).with_for_update()
@@ -343,30 +330,23 @@ def verify_meal_plan_payment(
     if not plan:
         raise HTTPException(status_code=404, detail="Meal plan not found")
 
-    provider_payment_id: Optional[str] = None
-    if sub.payment_method == "razorpay":
-        ord_id = razorpay_order_id or sub.provider_order_id
-        if not ord_id or not razorpay_payment_id or not razorpay_signature:
-            raise HTTPException(status_code=400, detail="Razorpay order_id, payment_id, and signature are required")
-        if ord_id != sub.provider_order_id:
-            raise HTTPException(status_code=400, detail="Razorpay order_id mismatch")
-        if not razorpay_gateway.verify_payment_signature(
-            razorpay_order_id=ord_id,
-            razorpay_payment_id=razorpay_payment_id,
-            razorpay_signature=razorpay_signature,
-        ):
-            sub.payment_status = "FAILED"
-            db.commit()
-            raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
-        provider_payment_id = razorpay_payment_id
-    elif sub.payment_method == "stripe":
-        pi_id = stripe_payment_intent_id or sub.provider_order_id
-        if not pi_id or pi_id != sub.provider_order_id:
-            raise HTTPException(status_code=400, detail="Stripe payment_intent_id mismatch")
-        pi_data = stripe_gateway.retrieve_payment_intent(pi_id)
-        if pi_data.get("status") != "succeeded":
-            raise HTTPException(status_code=400, detail="Stripe payment intent has not succeeded")
-        provider_payment_id = pi_id
+    if sub.payment_method != "razorpay":
+        raise HTTPException(status_code=400, detail="Only Razorpay online payment verification is supported")
+
+    ord_id = razorpay_order_id or sub.provider_order_id
+    if not ord_id or not razorpay_payment_id or not razorpay_signature:
+        raise HTTPException(status_code=400, detail="Razorpay order_id, payment_id, and signature are required")
+    if ord_id != sub.provider_order_id:
+        raise HTTPException(status_code=400, detail="Razorpay order_id mismatch")
+    if not razorpay_gateway.verify_payment_signature(
+        razorpay_order_id=ord_id,
+        razorpay_payment_id=razorpay_payment_id,
+        razorpay_signature=razorpay_signature,
+    ):
+        sub.payment_status = "FAILED"
+        db.commit()
+        raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
+    provider_payment_id = razorpay_payment_id
 
     if provider_payment_id:
         dup = db.scalar(

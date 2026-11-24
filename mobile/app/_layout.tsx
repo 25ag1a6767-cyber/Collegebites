@@ -19,7 +19,7 @@ const ONBOARDING_SLIDES = [
   {
     icon: "restaurant-outline" as const,
     title: "Discover Campus Canteens",
-    body: "Switch seamlessly across Main Canteen, Snacks & Bakery, and Juice Bar with real-time wait times and crowd levels.",
+    body: "Switch seamlessly across Main Canteen and Snacks & Bakery Counter with real-time wait times and crowd levels.",
   },
   {
     icon: "options-outline" as const,
@@ -29,7 +29,7 @@ const ONBOARDING_SLIDES = [
   {
     icon: "card-outline" as const,
     title: "Pay Online Instantly",
-    body: "Checkout as a student or OTP-verified guest using Razorpay or Stripe — backed by server verification.",
+    body: "Checkout as a student or live OTP-verified guest using Razorpay — backed by cryptographic server verification.",
   },
   {
     icon: "qr-code-outline" as const,

@@ -12,7 +12,6 @@ export default defineConfig({
           "vendor-ui": ["lucide-react", "framer-motion"],
           "vendor-charts": ["recharts"],
           "vendor-qr": ["qrcode.react", "html5-qrcode"],
-          "vendor-stripe": ["@stripe/stripe-js", "@stripe/react-stripe-js"],
         },
       },
     },

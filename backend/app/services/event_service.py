@@ -10,7 +10,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.integrations.razorpay_client import razorpay_gateway
-from app.integrations.stripe_client import stripe_gateway
 from app.models.auth import User
 from app.models.college import Canteen, Counter, Kitchen
 from app.models.event import CollegeEvent, EventBulkOrder, EventBulkOrderItem
@@ -19,7 +18,7 @@ from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.models.payment import Payment
 from app.services.audit_service import record_audit_log
 from app.services.order_service import _generate_order_number
-from app.services.receipt_service import create_receipt_for_order
+from app.services.receipt_service import create_receipt_for_order, ensure_customer_receipt_print_job
 from app.services.token_service import generate_token_and_qr_for_confirmed_order
 from app.websockets import emit_order_event_sync
 
@@ -316,26 +315,16 @@ def create_bulk_order(
 
     total_amount = _quantize(subtotal + tax_total)
     method = (data.get("payment_method") or "razorpay").strip().lower()
-    if method not in ("razorpay", "stripe"):
-        raise HTTPException(status_code=400, detail="Bulk orders require verified online payment (razorpay or stripe)")
+    if method != "razorpay":
+        raise HTTPException(status_code=400, detail="Bulk orders require verified Razorpay online payment")
 
     bo_number = f"EBO-{now.strftime('%Y%m%d')}-{uuid4().hex[:6].upper()}"
-    provider_order_id = None
-    if method == "razorpay":
-        rzp = razorpay_gateway.create_order(
-            amount_inr=total_amount,
-            receipt_ref=bo_number,
-            notes={"bulk_order_number": bo_number, "event_code": ev.event_code},
-        )
-        provider_order_id = rzp["id"]
-    elif method == "stripe":
-        pi = stripe_gateway.create_payment_intent(
-            amount_inr=total_amount,
-            order_number=bo_number,
-            idempotency_key=f"cb-ebo-{bo_number}",
-            metadata={"bulk_order_number": bo_number, "event_code": ev.event_code},
-        )
-        provider_order_id = pi["id"]
+    rzp = razorpay_gateway.create_order(
+        amount_inr=total_amount,
+        receipt_ref=bo_number,
+        notes={"bulk_order_number": bo_number, "event_code": ev.event_code},
+    )
+    provider_order_id = rzp["id"]
 
     bo = EventBulkOrder(
         bulk_order_number=bo_number,
@@ -474,7 +463,8 @@ def _dispatch_bulk_order_to_canteen_pipeline(
     db.flush()
 
     token, qr = generate_token_and_qr_for_confirmed_order(db, order)
-    create_receipt_for_order(db, order, token, qr, pay)
+    receipt = create_receipt_for_order(db, order, token, qr, pay)
+    ensure_customer_receipt_print_job(db, order, receipt, actor_user_id=actor_user_id)
 
     bo.linked_order_id = order.id
     bo.group_pickup_token = token.token_code
@@ -544,7 +534,6 @@ def verify_bulk_order_payment(
     razorpay_order_id: Optional[str] = None,
     razorpay_payment_id: Optional[str] = None,
     razorpay_signature: Optional[str] = None,
-    stripe_payment_intent_id: Optional[str] = None,
 ) -> dict:
     bo = db.scalar(select(EventBulkOrder).where(EventBulkOrder.id == bulk_order_id).with_for_update())
     if not bo:
@@ -554,30 +543,23 @@ def verify_bulk_order_payment(
     if bo.payment_status == "CONFIRMED":
         return _serialize_bulk_order(db, bo)
 
-    provider_payment_id: Optional[str] = None
-    if bo.payment_method == "razorpay":
-        ord_id = razorpay_order_id or bo.provider_order_id
-        if not ord_id or not razorpay_payment_id or not razorpay_signature:
-            raise HTTPException(status_code=400, detail="Razorpay order_id, payment_id, and signature are required")
-        if ord_id != bo.provider_order_id:
-            raise HTTPException(status_code=400, detail="Razorpay order_id mismatch")
-        if not razorpay_gateway.verify_payment_signature(
-            razorpay_order_id=ord_id,
-            razorpay_payment_id=razorpay_payment_id,
-            razorpay_signature=razorpay_signature,
-        ):
-            bo.payment_status = "FAILED"
-            db.commit()
-            raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
-        provider_payment_id = razorpay_payment_id
-    elif bo.payment_method == "stripe":
-        pi_id = stripe_payment_intent_id or bo.provider_order_id
-        if not pi_id or pi_id != bo.provider_order_id:
-            raise HTTPException(status_code=400, detail="Stripe payment_intent_id mismatch")
-        pi_data = stripe_gateway.retrieve_payment_intent(pi_id)
-        if pi_data.get("status") != "succeeded":
-            raise HTTPException(status_code=400, detail="Stripe payment intent has not succeeded")
-        provider_payment_id = pi_id
+    if bo.payment_method != "razorpay":
+        raise HTTPException(status_code=400, detail="Only Razorpay online payment verification is supported")
+
+    ord_id = razorpay_order_id or bo.provider_order_id
+    if not ord_id or not razorpay_payment_id or not razorpay_signature:
+        raise HTTPException(status_code=400, detail="Razorpay order_id, payment_id, and signature are required")
+    if ord_id != bo.provider_order_id:
+        raise HTTPException(status_code=400, detail="Razorpay order_id mismatch")
+    if not razorpay_gateway.verify_payment_signature(
+        razorpay_order_id=ord_id,
+        razorpay_payment_id=razorpay_payment_id,
+        razorpay_signature=razorpay_signature,
+    ):
+        bo.payment_status = "FAILED"
+        db.commit()
+        raise HTTPException(status_code=400, detail="Invalid Razorpay payment signature")
+    provider_payment_id = razorpay_payment_id
 
     bo.payment_status = "CONFIRMED"
     bo.provider_payment_id = provider_payment_id

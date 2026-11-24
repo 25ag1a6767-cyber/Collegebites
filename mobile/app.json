@@ -72,14 +72,7 @@
           "cameraPermission": "Allow CollegeBites to scan canteen and order QR codes."
         }
       ],
-      "expo-notifications",
-      [
-        "@stripe/stripe-react-native",
-        {
-          "merchantIdentifier": "merchant.edu.collegebites.app",
-          "enableGooglePay": true
-        }
-      ]
+      "expo-notifications"
     ]
   }
 }

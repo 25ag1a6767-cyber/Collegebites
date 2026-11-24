@@ -16,7 +16,6 @@ from app.core.redis_client import safe_redis
 from app.core.security import generate_guest_access_token, mask_mobile, sha256_hex
 from app.core.time_utils import get_college_tz, now_college, today_college
 from app.integrations.razorpay_client import razorpay_gateway
-from app.integrations.stripe_client import stripe_gateway
 from app.models.college import Canteen, Counter, DiningTable, Kitchen, LocationQRCode
 from app.models.inventory import InventoryItem
 from app.models.menu import FoodAddon, FoodCategory, FoodItem, FoodItemAddon, FoodVariant, Recipe, RecipeIngredient
@@ -190,20 +189,6 @@ def _serialize_order_with_maps(
     queue_metrics: Optional[dict] = None,
 ) -> OrderOut:
     items_out = [OrderItemOut.model_validate(item) for item in order.items]
-    meta = pay_row.gateway_metadata if (pay_row and isinstance(pay_row.gateway_metadata, dict)) else {}
-    checkout_url = None
-    stripe_client_secret = None
-    stripe_pi_id = None
-    stripe_sess_id = None
-    if pay_row and pay_row.provider == "stripe":
-        checkout_url = meta.get("checkout_url")
-        if order.status == "PAYMENT_PENDING" and pay_row.status == "PENDING":
-            stripe_client_secret = meta.get("client_secret")
-        if pay_row.provider_order_id and pay_row.provider_order_id.startswith("pi_"):
-            stripe_pi_id = pay_row.provider_order_id
-        else:
-            stripe_sess_id = pay_row.provider_order_id
-            stripe_pi_id = meta.get("payment_intent_id")
     return OrderOut(
         id=order.id,
         order_number=order.order_number,
@@ -242,11 +227,6 @@ def _serialize_order_with_maps(
         guest_access_token=raw_guest_token,
         razorpay_order_id=pay_row.provider_order_id if (pay_row and pay_row.provider == "razorpay") else None,
         razorpay_key_id=razorpay_gateway.public_key_id if order.payment_method == "razorpay" else None,
-        stripe_payment_intent_id=stripe_pi_id,
-        stripe_client_secret=stripe_client_secret,
-        stripe_session_id=stripe_sess_id,
-        stripe_checkout_url=checkout_url,
-        stripe_publishable_key=stripe_gateway.publishable_key if order.payment_method == "stripe" else None,
         cancellation_policy_text=policy_text,
         created_at=order.created_at,
         confirmed_at=order.confirmed_at,
@@ -382,16 +362,16 @@ def checkout_order(
     if canteen.auto_throttle_enabled and active_count >= canteen.max_concurrent_orders:
         raise HTTPException(status_code=429, detail="Canteen queue is at full capacity. Please retry shortly.")
 
-    # Strict NO-CASH, ONLINE-ONLY payment policy across all channels
+    # Strict NO-CASH, RAZORPAY-ONLY online payment policy (plus authorized cashier POS terminals)
     if payload.payment_method in ("cash", "pay_at_pickup"):
         raise HTTPException(
             status_code=400,
-            detail="Cash and Pay-at-Pickup are disabled. Only online/digital payments (Razorpay, Stripe, UPI/Card POS) are accepted.",
+            detail="Cash and Pay-at-Pickup are disabled. Only Razorpay online payments (or authorized counter POS) are accepted.",
         )
+    if payload.payment_method not in ("razorpay", "upi_pos", "card_pos"):
+        raise HTTPException(status_code=400, detail="Only Razorpay is supported for online checkout.")
     if payload.payment_method == "razorpay" and not (college.razorpay_enabled and canteen.allow_online_payment):
         raise HTTPException(status_code=400, detail="Razorpay online payment is disabled for this canteen")
-    if payload.payment_method == "stripe" and not (college.stripe_enabled and canteen.allow_online_payment):
-        raise HTTPException(status_code=400, detail="Stripe online payment is disabled for this canteen")
     if payload.payment_method in ("upi_pos", "card_pos") and not cashier_user_id:
         raise HTTPException(status_code=403, detail="POS terminal payment methods require authorized cashier staff")
 
@@ -417,17 +397,19 @@ def checkout_order(
 
     # Validate guest / customer identity
     is_guest = user_id is None
+    matched_guest_otp_target: Optional[str] = None
     if is_guest:
         if not payload.guest_name or not payload.guest_phone:
             raise HTTPException(status_code=400, detail="Guest name and mobile number are required")
         # Walk-in POS / Kiosk orders don't require OTP; Guest web/mobile verifies mobile or email OTP
         if college.guest_otp_required and not cashier_user_id and payload.order_channel != "kiosk":
-            phone_ok = validate_guest_otp_token(db, payload.guest_phone, payload.guest_otp_verification_token)
-            email_ok = bool(
-                payload.guest_email
-                and validate_guest_otp_token(db, payload.guest_email, payload.guest_otp_verification_token)
-            )
-            if not (phone_ok or email_ok):
+            if validate_guest_otp_token(db, payload.guest_phone, payload.guest_otp_verification_token, consume=False):
+                matched_guest_otp_target = payload.guest_phone
+            elif payload.guest_email and validate_guest_otp_token(
+                db, payload.guest_email, payload.guest_otp_verification_token, consume=False
+            ):
+                matched_guest_otp_target = payload.guest_email
+            if not matched_guest_otp_target:
                 raise HTTPException(status_code=400, detail="Guest OTP verification (email or mobile) is required before checkout")
 
     # Gather line items from cart or direct payload
@@ -720,19 +702,13 @@ def checkout_order(
         db.add(OrderStatusHistory(order_id=order.id, from_status="CREATED", to_status="PAYMENT_PENDING", changed_by_user_id=user_id or cashier_user_id, reason="Order created and awaiting payment"))
 
         if pickup_slot:
-            slot_exp = (now + timedelta(minutes=15)) if payload.payment_method in ("razorpay", "stripe") else None
+            slot_exp = (now + timedelta(minutes=15)) if payload.payment_method == "razorpay" else None
             db.add(SlotReservation(pickup_slot_id=pickup_slot.id, order_id=order.id, status="reserved", expires_at=slot_exp))
 
-        # Create payment request (online/digital only)
-        if payload.payment_method == "razorpay":
-            provider = "razorpay"
-        elif payload.payment_method == "stripe":
-            provider = "stripe"
-        else:
-            provider = "counter_pos"
-
+        # Create payment request (Razorpay online or authorized counter POS)
+        provider = "razorpay" if payload.payment_method == "razorpay" else "counter_pos"
         provider_order_id = None
-        stripe_gateway_meta: dict[str, Any] = {}
+        gateway_meta: dict = {}
         if provider == "razorpay":
             rzp_order = razorpay_gateway.create_order(
                 amount_inr=total_amount,
@@ -740,18 +716,10 @@ def checkout_order(
                 notes={"order_number": order.order_number, "canteen": canteen.code},
             )
             provider_order_id = rzp_order["id"]
-        elif provider == "stripe":
-            pi = stripe_gateway.create_payment_intent(
-                amount_inr=total_amount,
-                order_number=order.order_number,
-                customer_email=payload.guest_email,
-                idempotency_key=f"cb-pi-{order.id}",
-                metadata={"order_id": str(order.id), "canteen_code": canteen.code},
-            )
-            provider_order_id = pi["id"]
-            stripe_gateway_meta = {
-                "payment_intent_id": pi["id"],
-                "client_secret": pi.get("client_secret"),
+            gateway_meta = {
+                "razorpay_order_id": rzp_order["id"],
+                "amount_paise": rzp_order.get("amount"),
+                "currency": rzp_order.get("currency", "INR"),
             }
 
         payment = Payment(
@@ -762,7 +730,7 @@ def checkout_order(
             amount=total_amount,
             currency="INR",
             status="PENDING",
-            gateway_metadata=stripe_gateway_meta,
+            gateway_metadata=gateway_meta,
         )
         db.add(payment)
         db.flush()
@@ -776,6 +744,15 @@ def checkout_order(
                 external_reference=provider_order_id,
             )
         )
+
+        if matched_guest_otp_target:
+            if not validate_guest_otp_token(
+                db, matched_guest_otp_target, payload.guest_otp_verification_token, consume=True
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Guest OTP verification token has expired or was already used",
+                )
 
         if cart:
             cart.status = "converted"
@@ -1012,13 +989,24 @@ def get_order_authorized(
 def lookup_guest_orders(
     db: Session, *, guest_phone: str, otp_verification_token: str
 ) -> list[OrderOut]:
-    clean_phone = guest_phone.strip()
-    if not validate_guest_otp_token(db, clean_phone, otp_verification_token):
-        raise HTTPException(status_code=403, detail="Valid guest mobile OTP verification is required")
+    clean_target = guest_phone.strip()
+    if not validate_guest_otp_token(db, clean_target, otp_verification_token, consume=False):
+        raise HTTPException(status_code=403, detail="Valid guest OTP verification is required")
+    digits = "".join(ch for ch in clean_target if ch.isdigit())
+    phone_candidates = {clean_target}
+    if len(digits) == 10:
+        phone_candidates.update({digits, f"+91{digits}", f"91{digits}"})
+    elif len(digits) == 12 and digits.startswith("91"):
+        phone_candidates.update({f"+{digits}", digits, digits[-10:]})
+    where_clause = (
+        Order.guest_email == clean_target.lower()
+        if "@" in clean_target
+        else Order.guest_phone.in_(phone_candidates)
+    )
     orders = db.scalars(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
-        .where(Order.is_guest.is_(True), Order.guest_phone == clean_phone)
+        .where(Order.is_guest.is_(True), where_clause)
         .order_by(Order.created_at.desc())
         .limit(20)
     ).all()

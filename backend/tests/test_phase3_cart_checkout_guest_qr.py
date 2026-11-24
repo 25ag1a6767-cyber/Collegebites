@@ -31,7 +31,7 @@ def test_qr_location_resolve_revoke_and_replace(client: TestClient):
     assert client.get(f"/api/v1/qr/locations/resolve/{new_code}").status_code == 410
 
 
-def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: TestClient):
+def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: TestClient, otp_capture):
     main = next(c for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
     cid = main["id"]
     items = client.get(f"/api/v1/menus/canteens/{cid}/items").json()
@@ -96,9 +96,10 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
 
     # Verify Guest OTP and checkout
     otp_req = client.post("/api/v1/auth/otp/request", json={"target": "+919900112233", "purpose": "guest_checkout"}).json()
+    assert "dev_otp" not in otp_req
     otp_ver = client.post(
         "/api/v1/auth/otp/verify",
-        json={"target": "+919900112233", "purpose": "guest_checkout", "code": otp_req["dev_otp"]},
+        json={"target": "+919900112233", "purpose": "guest_checkout", "code": otp_capture.latest_code("+919900112233")},
     ).json()
 
     co = client.post(

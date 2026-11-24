@@ -79,7 +79,10 @@ export function buildRazorpayOptions(opts: RazorpayModalOptions): Record<string,
       razorpay_signature: string;
     }) => {
       try {
-        const verified = await api.post<Order>("/payments/razorpay/verify", {
+        const gTok = order.guest_access_token
+          ? `?guest_token=${encodeURIComponent(order.guest_access_token)}`
+          : "";
+        const verified = await api.post<Order>(`/payments/razorpay/verify${gTok}`, {
           order_id: order.id,
           razorpay_order_id: response.razorpay_order_id,
           razorpay_payment_id: response.razorpay_payment_id,

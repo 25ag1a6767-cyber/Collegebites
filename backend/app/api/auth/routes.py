@@ -12,7 +12,10 @@ from app.core.permissions import (
     AuthenticatedPrincipal,
     client_ip_from_request,
     get_current_principal,
+    get_optional_principal,
 )
+from app.integrations.email_provider import resolve_email_otp_provider
+from app.integrations.sms_provider import resolve_sms_otp_provider
 from app.models.auth import SessionRecord
 from app.schemas.auth import (
     ChangePasswordRequest,
@@ -83,27 +86,45 @@ def logout(
 
 @router.get("/otp/capabilities")
 def get_otp_capabilities():
-    sms_prov = (settings.SMS_PROVIDER or "").strip().lower()
-    sms_ok = (sms_prov == "twilio" and bool(settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN)) or (
-        sms_prov == "webhook" and bool(settings.SMS_WEBHOOK_URL)
-    )
     return {
-        "email_otp_enabled": bool((settings.SMTP_HOST or "").strip()),
-        "sms_otp_enabled": bool(sms_ok),
-        "dev_echo_enabled": bool(not settings.is_production and settings.OTP_TEST_ECHO),
+        "email_otp_enabled": bool(resolve_email_otp_provider()),
+        "sms_otp_enabled": bool(resolve_sms_otp_provider()),
+        "otp_expiry_seconds": settings.effective_otp_expiry_seconds,
+        "resend_cooldown_seconds": settings.OTP_RESEND_COOLDOWN_SECONDS,
+        "max_attempts": settings.OTP_MAX_ATTEMPTS,
     }
 
 
 @router.post("/otp/request", response_model=OTPRequestResponse)
 @limiter.limit("8/minute")
-def request_otp(payload: OTPRequest, request: Request, db: Session = Depends(get_db)):
-    return auth_service.request_otp(db, payload)
+def request_otp(
+    payload: OTPRequest,
+    request: Request,
+    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
+    db: Session = Depends(get_db),
+):
+    return auth_service.request_otp(
+        db,
+        payload,
+        ip_address=client_ip_from_request(request),
+        actor_user_id=principal.user.id if principal else None,
+    )
 
 
 @router.post("/otp/verify", response_model=OTPVerifyResponse)
 @limiter.limit("15/minute")
-def verify_otp(payload: OTPVerifyRequest, request: Request, db: Session = Depends(get_db)):
-    return auth_service.verify_otp(db, payload)
+def verify_otp(
+    payload: OTPVerifyRequest,
+    request: Request,
+    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
+    db: Session = Depends(get_db),
+):
+    return auth_service.verify_otp(
+        db,
+        payload,
+        actor_user_id=principal.user.id if principal else None,
+        ip_address=client_ip_from_request(request),
+    )
 
 
 @router.get("/me", response_model=UserOut)
@@ -116,7 +137,12 @@ def get_me(
 
 class PhoneVerifyCompleteIn(BaseModel):
     target: Optional[str] = None
-    code: str = Field(min_length=6, max_length=6)
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class EmailVerifyCompleteIn(BaseModel):
+    target: Optional[str] = None
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
 @router.post("/otp/login", response_model=TokenResponse)
@@ -143,10 +169,33 @@ def otp_login(payload: OTPLoginRequest, request: Request, db: Session = Depends(
 @router.post("/phone/verify", response_model=UserOut)
 def verify_phone(
     payload: PhoneVerifyCompleteIn,
+    request: Request,
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
-    return auth_service.verify_phone_with_otp(db, principal.user, payload.code, target=payload.target)
+    return auth_service.verify_phone_with_otp(
+        db,
+        principal.user,
+        payload.code,
+        target=payload.target,
+        ip_address=client_ip_from_request(request),
+    )
+
+
+@router.post("/email/verify", response_model=UserOut)
+def verify_email(
+    payload: EmailVerifyCompleteIn,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    return auth_service.verify_email_with_otp(
+        db,
+        principal.user,
+        payload.code,
+        target=payload.target,
+        ip_address=client_ip_from_request(request),
+    )
 
 
 @router.post("/change-password", response_model=MessageResponse)

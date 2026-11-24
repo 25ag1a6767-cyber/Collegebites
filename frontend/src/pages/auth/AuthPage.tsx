@@ -4,6 +4,7 @@ import { ShieldCheck, Sparkles } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import { BrandLogo } from "../../components/branding/BrandLogo";
+import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 const DEMO_USERS = import.meta.env.DEV
@@ -24,21 +25,18 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [otpCode, setOtpCode] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpStatusMsg, setOtpStatusMsg] = useState<string | null>(null);
-  const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [collegeId, setCollegeId] = useState("");
   const [department, setDepartment] = useState("");
   const [referralCode, setReferralCode] = useState("");
+  const [regOtpToken, setRegOtpToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState("");
   const [resetCode, setResetCode] = useState("");
   const [resetNewPw, setResetNewPw] = useState("");
-  const [resetSent, setResetSent] = useState(false);
 
   const navigate = useNavigate();
   const { setAuth } = useAppStore();
@@ -68,29 +66,14 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
     }
   };
 
-  const requestLoginOtp = async () => {
-    if (!identifier.trim()) return pushToast("Enter your email or mobile number first", "error");
-    setLoading(true);
-    setOtpStatusMsg(null);
-    try {
-      const res = await api.post("/auth/otp/request", { target: identifier.trim(), purpose: "login" });
-      setOtpSent(true);
-      setDevOtpHint(res.data.dev_otp || null);
-      setOtpStatusMsg(res.data.message || "Login OTP sent!");
-      pushToast(res.data.message || "Login OTP sent!", "success");
-    } catch (err) {
-      const msg = getApiError(err, "Could not request OTP");
-      setOtpStatusMsg(msg);
-      pushToast(msg, "error");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (mode === "login") {
       if (loginMethod === "otp") {
+        if (otpCode.trim().length !== 6) {
+          pushToast("Enter your 6-digit verification code first", "error");
+          return;
+        }
         setLoading(true);
         try {
           const res = await api.post("/auth/otp/login", { target: identifier.trim(), code: otpCode.trim() });
@@ -117,6 +100,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
         college_id_number: collegeId || null,
         department: department || null,
         referral_code: referralCode.trim() || null,
+        otp_verification_token: regOtpToken || null,
       });
       setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
       pushToast("Account created! Happy ordering.", "success");
@@ -169,13 +153,40 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="mb-1 block text-xs font-bold text-slate-700">Email</label>
-                    <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@college.edu" />
+                    <Input
+                      type="email"
+                      value={email}
+                      onChange={(e) => {
+                        setEmail(e.target.value);
+                        setRegOtpToken(null);
+                      }}
+                      placeholder="you@college.edu"
+                    />
                   </div>
                   <div>
                     <label className="mb-1 block text-xs font-bold text-slate-700">Mobile Number</label>
-                    <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+919876543210" />
+                    <Input
+                      value={phone}
+                      onChange={(e) => {
+                        setPhone(e.target.value);
+                        if (!email.trim()) setRegOtpToken(null);
+                      }}
+                      placeholder="+919876543210"
+                    />
                   </div>
                 </div>
+                {(email.trim() || phone.trim()) && (
+                  <OtpVerificationBox
+                    target={email.trim() || phone.trim()}
+                    purpose="register"
+                    verifiedToken={regOtpToken}
+                    onVerified={(tok) => {
+                      setRegOtpToken(tok);
+                      pushToast("Email/contact verified for registration!", "success");
+                    }}
+                    verifyButtonLabel="Verify Email / Phone"
+                  />
+                )}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="mb-1 block text-xs font-bold text-slate-700">Roll / ID (Optional)</label>
@@ -232,8 +243,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                       type="button"
                       onClick={() => {
                         setResetTarget(identifier);
-                        setResetSent(false);
-                        setDevOtpHint(null);
+                        setResetCode("");
                         setResetOpen(true);
                       }}
                       className="text-xs font-bold text-[#76010d] hover:underline"
@@ -253,31 +263,13 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
               </div>
             ) : (
               <div className="space-y-2">
-                <div className="flex gap-2">
-                  <Input
-                    required
-                    maxLength={6}
-                    value={otpCode}
-                    onChange={(e) => setOtpCode(e.target.value)}
-                    placeholder="Enter 6-digit OTP"
-                  />
-                  <Button type="button" variant="outline" onClick={requestLoginOtp} disabled={loading}>
-                    {otpSent ? "Resend" : "Send OTP"}
-                  </Button>
-                </div>
-                {otpStatusMsg && (
-                  <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-1.5 text-xs text-amber-900">
-                    {otpStatusMsg}
-                  </div>
-                )}
-                {devOtpHint && (
-                  <div className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs text-slate-700">
-                    Dev/Test OTP: <strong className="font-mono">{devOtpHint}</strong>
-                  </div>
-                )}
-                <p className="text-[11px] text-slate-500">
-                  Email OTP delivers directly via SMTP. Requesting with a registered phone falls back to your linked account email unless SMS gateway is enabled.
-                </p>
+                <OtpVerificationBox
+                  target={identifier}
+                  purpose="login"
+                  hideVerifyButton
+                  codeValue={otpCode}
+                  onCodeChange={setOtpCode}
+                />
               </div>
             )}
 
@@ -289,44 +281,27 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
           {resetOpen && (
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-2.5 text-xs">
               <div className="flex items-center justify-between font-bold text-slate-900">
-                <span>Reset Password via OTP</span>
+                <span>Reset Password via Live OTP</span>
                 <button type="button" onClick={() => setResetOpen(false)} className="text-slate-400 hover:text-slate-700">
                   Close
                 </button>
               </div>
-              <div className="flex gap-2">
-                <Input value={resetTarget} onChange={(e) => setResetTarget(e.target.value)} placeholder="Registered Email or Mobile" />
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={loading || !resetTarget.trim()}
-                  onClick={async () => {
-                    setLoading(true);
-                    try {
-                      const r = await api.post("/auth/otp/request", { target: resetTarget.trim(), purpose: "password_reset" });
-                      setResetSent(true);
-                      setDevOtpHint(r.data.dev_otp || null);
-                      pushToast("Reset OTP sent!", "success");
-                    } catch (err) {
-                      pushToast(getApiError(err), "error");
-                    } finally {
-                      setLoading(false);
-                    }
-                  }}
-                >
-                  {resetSent ? "Resend" : "Send OTP"}
-                </Button>
-              </div>
-              {devOtpHint && (
-                <div className="rounded-lg bg-white px-2.5 py-1 border border-slate-200">
-                  Dev OTP: <strong className="font-mono">{devOtpHint}</strong>
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-2">
-                <Input value={resetCode} onChange={(e) => setResetCode(e.target.value)} placeholder="6-digit OTP" maxLength={6} />
-                <Input type="password" value={resetNewPw} onChange={(e) => setResetNewPw(e.target.value)} placeholder="New password (8+ chars)" />
-              </div>
+              <OtpVerificationBox
+                target={resetTarget}
+                onTargetChange={setResetTarget}
+                targetPlaceholder="Registered Email or Mobile"
+                purpose="password_reset"
+                hideVerifyButton
+                codeValue={resetCode}
+                onCodeChange={setResetCode}
+                compact
+              />
+              <Input
+                type="password"
+                value={resetNewPw}
+                onChange={(e) => setResetNewPw(e.target.value)}
+                placeholder="New password (8+ chars)"
+              />
               <Button
                 type="button"
                 size="sm"

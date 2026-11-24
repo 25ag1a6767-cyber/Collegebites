@@ -3,6 +3,9 @@ import logging
 from pathlib import Path
 import smtplib
 from email.message import EmailMessage
+from typing import Optional
+
+import httpx
 
 from app.core.config import settings
 
@@ -42,7 +45,7 @@ def _build_branded_html_email(subject: str, body_text: str, logo_cid: str | None
       </tr>
       <tr>
         <td style="padding:14px 22px;background:#fdf8f0;border-top:1px solid #f1e3d3;font-size:11px;color:#5d010a;">
-          CollegeBites Smart Campus Canteen &bull; Strict Online Payments &bull; Verified QR Pickup
+          CollegeBites Smart Campus Canteen &bull; Razorpay Verified Payments &bull; Live QR Pickup
         </td>
       </tr>
     </table>
@@ -50,17 +53,31 @@ def _build_branded_html_email(subject: str, body_text: str, logo_cid: str | None
 </html>"""
 
 
-def send_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
-    """Send a branded CollegeBites email via configured SMTP (SSL port 465 or STARTTLS port 587)."""
-    if not to_email:
-        return False, "missing_recipient"
+def resolve_email_otp_provider() -> Optional[str]:
+    """Return the active configured transactional email provider (`smtp` | `resend` | `sendgrid`) or None."""
+    explicit = (settings.OTP_PROVIDER or "").strip().lower()
+    if explicit:
+        if explicit == "resend":
+            return "resend" if settings.RESEND_API_KEY.strip() else None
+        if explicit == "sendgrid":
+            return "sendgrid" if settings.SENDGRID_API_KEY.strip() else None
+        if explicit == "smtp":
+            return "smtp" if (settings.SMTP_HOST or "").strip() else None
+        return None
+
+    if settings.RESEND_API_KEY.strip():
+        return "resend"
+    if settings.SENDGRID_API_KEY.strip():
+        return "sendgrid"
+    if (settings.SMTP_HOST or "").strip():
+        return "smtp"
+    return None
+
+
+def _dispatch_via_smtp(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
     host = (settings.SMTP_HOST or "").strip()
     if not host:
-        if settings.is_production:
-            logger.error("SMTP_HOST is not configured in production; cannot deliver email to %s", to_email)
-            return False, "smtp_not_configured"
-        logger.info("Email provider not configured; logged email to %s: %s", to_email, subject)
-        return True, "pending"
+        return False, "smtp_not_configured"
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -101,7 +118,97 @@ def send_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
                 if smtp_user and settings.SMTP_PASSWORD:
                     smtp.login(smtp_user, settings.SMTP_PASSWORD)
                 smtp.send_message(msg)
-        return True, "sent"
+        return True, "smtp"
     except (smtplib.SMTPException, OSError) as exc:
-        logger.error("SMTP delivery failed for %s: %s", to_email, exc)
-        return False, str(exc)
+        logger.error("SMTP delivery failed (subject=%s): %s", subject, type(exc).__name__)
+        return False, f"smtp_error:{type(exc).__name__}"
+
+
+def _dispatch_via_resend(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
+    api_key = settings.RESEND_API_KEY.strip()
+    if not api_key:
+        return False, "resend_not_configured"
+    html_body = _build_branded_html_email(subject, body_text, None)
+    try:
+        resp = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "from": settings.effective_smtp_from,
+                "to": [to_email],
+                "subject": subject,
+                "text": body_text,
+                "html": html_body,
+            },
+            timeout=12.0,
+        )
+        resp.raise_for_status()
+        return True, "resend"
+    except httpx.HTTPError as exc:
+        logger.error("Resend email delivery failed (subject=%s): %s", subject, type(exc).__name__)
+        return False, f"resend_error:{type(exc).__name__}"
+
+
+def _dispatch_via_sendgrid(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
+    api_key = settings.SENDGRID_API_KEY.strip()
+    if not api_key:
+        return False, "sendgrid_not_configured"
+    html_body = _build_branded_html_email(subject, body_text, None)
+    try:
+        resp = httpx.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": settings.effective_smtp_from, "name": "CollegeBites"},
+                "subject": subject,
+                "content": [
+                    {"type": "text/plain", "value": body_text},
+                    {"type": "text/html", "value": html_body},
+                ],
+            },
+            timeout=12.0,
+        )
+        resp.raise_for_status()
+        return True, "sendgrid"
+    except httpx.HTTPError as exc:
+        logger.error("SendGrid email delivery failed (subject=%s): %s", subject, type(exc).__name__)
+        return False, f"sendgrid_error:{type(exc).__name__}"
+
+
+def deliver_otp_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
+    """
+    Deliver a live OTP email strictly via an active transactional email provider.
+    Never logs plaintext OTPs and never fakes success when no provider is configured.
+    """
+    if not to_email:
+        return False, "missing_recipient"
+    provider = resolve_email_otp_provider()
+    if not provider:
+        return False, "otp_email_provider_not_configured"
+    if provider == "resend":
+        return _dispatch_via_resend(to_email, subject, body_text)
+    if provider == "sendgrid":
+        return _dispatch_via_sendgrid(to_email, subject, body_text)
+    return _dispatch_via_smtp(to_email, subject, body_text)
+
+
+def send_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
+    """Send non-OTP transactional notifications via configured email provider (never logs message body)."""
+    if not to_email:
+        return False, "missing_recipient"
+    provider = resolve_email_otp_provider()
+    if provider == "resend":
+        ok, detail = _dispatch_via_resend(to_email, subject, body_text)
+        return (True, "sent") if ok else (False, detail)
+    if provider == "sendgrid":
+        ok, detail = _dispatch_via_sendgrid(to_email, subject, body_text)
+        return (True, "sent") if ok else (False, detail)
+    if provider == "smtp":
+        ok, detail = _dispatch_via_smtp(to_email, subject, body_text)
+        return (True, "sent") if ok else (False, detail)
+
+    if settings.is_production:
+        logger.error("No email provider configured in production; cannot deliver notification (%s)", subject)
+        return False, "email_provider_not_configured"
+    return False, "email_provider_not_configured"

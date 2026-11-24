@@ -8,6 +8,7 @@ import { useOfflineStore } from "../../store/useOfflineStore";
 import { fetchWithOfflineCache } from "../../utils/offlineSync";
 import type { Order } from "../../types";
 import { BrandEmptyState, BrandLoadingState } from "../../components/branding/BrandLogo";
+import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 export const MyOrdersPage: React.FC = () => {
@@ -18,11 +19,7 @@ export const MyOrdersPage: React.FC = () => {
   const [lookupOrderNum, setLookupOrderNum] = useState("");
   const [lookupToken, setLookupToken] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
-  const [guestOtp, setGuestOtp] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [recoveredOrders, setRecoveredOrders] = useState<Order[]>([]);
-  const [busyRecover, setBusyRecover] = useState(false);
   const [historyFilter, setHistoryFilter] = useState<"all" | "active" | "completed" | "cancelled">("all");
   const [historySearch, setHistorySearch] = useState("");
 
@@ -152,80 +149,30 @@ export const MyOrdersPage: React.FC = () => {
         )}
 
         <div className="mt-4 border-t border-slate-100 pt-3 space-y-2">
-          <div className="text-[11px] font-bold uppercase text-slate-500">Lost your guest token? Recover orders by Mobile OTP</div>
-          <div className="flex flex-wrap gap-2 items-center">
-            <Input
-              value={guestPhone}
-              onChange={(e) => setGuestPhone(e.target.value)}
-              placeholder="+919876543210"
-              className="w-44"
-            />
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busyRecover || !guestPhone.trim()}
-              onClick={async () => {
-                setBusyRecover(true);
-                try {
-                  const res = await api.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
-                  setOtpSent(true);
-                  setDevOtpHint(res.data.dev_otp || null);
-                  pushToast("Recovery OTP sent", "success");
-                } catch (err) {
-                  pushToast(getApiError(err), "error");
-                } finally {
-                  setBusyRecover(false);
-                }
-              }}
-            >
-              {otpSent ? "Resend OTP" : "Send Recovery OTP"}
-            </Button>
-            {otpSent && (
-              <>
-                <Input
-                  value={guestOtp}
-                  onChange={(e) => setGuestOtp(e.target.value)}
-                  placeholder="6-digit OTP"
-                  maxLength={6}
-                  className="w-32"
-                />
-                <Button
-                  size="sm"
-                  disabled={busyRecover || guestOtp.trim().length < 6}
-                  onClick={async () => {
-                    setBusyRecover(true);
-                    try {
-                      const ver = await api.post("/auth/otp/verify", {
-                        target: guestPhone.trim(),
-                        purpose: "guest_checkout",
-                        code: guestOtp.trim(),
-                      });
-                      const list = await api.post<Order[]>("/orders/guest/lookup", {
-                        guest_phone: guestPhone.trim(),
-                        otp_verification_token: ver.data.verification_token,
-                      });
-                      list.data.forEach((o) => {
-                        if (o.guest_access_token) saveGuestOrderToken(o.order_number, o.guest_access_token);
-                      });
-                      setRecoveredOrders(list.data);
-                      pushToast(`Found ${list.data.length} guest order(s)`, "success");
-                    } catch (err) {
-                      pushToast(getApiError(err), "error");
-                    } finally {
-                      setBusyRecover(false);
-                    }
-                  }}
-                >
-                  Find My Orders
-                </Button>
-              </>
-            )}
-          </div>
-          {devOtpHint && (
-            <div className="text-xs text-slate-600">
-              Dev OTP: <strong className="font-mono">{devOtpHint}</strong>
-            </div>
-          )}
+          <div className="text-[11px] font-bold uppercase text-slate-500">Lost your guest token? Recover orders via Live OTP</div>
+          <OtpVerificationBox
+            target={guestPhone}
+            onTargetChange={setGuestPhone}
+            targetPlaceholder="Guest Email or +919876543210"
+            purpose="guest_checkout"
+            verifyButtonLabel="Verify & Find Orders"
+            compact
+            onVerified={async (verToken) => {
+              try {
+                const list = await api.post<Order[]>("/orders/guest/lookup", {
+                  guest_phone: guestPhone.trim(),
+                  otp_verification_token: verToken,
+                });
+                list.data.forEach((o) => {
+                  if (o.guest_access_token) saveGuestOrderToken(o.order_number, o.guest_access_token);
+                });
+                setRecoveredOrders(list.data);
+                pushToast(`Found ${list.data.length} guest order(s)`, "success");
+              } catch (err) {
+                pushToast(getApiError(err), "error");
+              }
+            }}
+          />
           {recoveredOrders.length > 0 && (
             <div className="flex flex-wrap gap-2 pt-1">
               {recoveredOrders.map((ro) => (

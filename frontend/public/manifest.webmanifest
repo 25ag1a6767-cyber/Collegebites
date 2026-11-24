@@ -2,7 +2,7 @@
   "id": "/",
   "name": "CollegeBites",
   "short_name": "CollegeBites",
-  "description": "Order food from your college canteens, pay online with Razorpay or Stripe, receive instant QR pickup tokens, and track preparation live.",
+  "description": "Order food from your college canteens, pay online securely with Razorpay, receive instant QR pickup tokens, and track preparation live.",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",

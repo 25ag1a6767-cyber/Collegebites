@@ -1,17 +1,19 @@
 # External Credentials & Hardware Dependencies
 
-Per strict engineering honesty rules, the following features include full integration code and local test modes, and **require real credentials or physical hardware before certifying live production operation**:
+Per strict engineering honesty rules, the following features include complete integration code and **require real external credentials or physical hardware before certifying live production operation**:
 
-1. **Razorpay & Stripe Live Payments (`RAZORPAY_*`, `STRIPE_*`)**
-   - Local development & automated tests verify genuine HMAC-SHA256 signatures and mock/test-mode Stripe & Razorpay SDK flows (`RAZORPAY_TEST_MODE=true`, `STRIPE_TEST_MODE=true`).
-   - Live charges and real webhook delivery require setting `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` and/or `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`, plus registering `/api/v1/payments/razorpay/webhook` and `/api/v1/payments/stripe/webhook` in the merchant dashboards.
-   - Native mobile Stripe PaymentSheet (`@stripe/stripe-react-native`) requires a custom Expo dev client / EAS native build rather than stock Expo Go.
+1. **Razorpay Live Payments (`RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`)**
+   - Razorpay is the **sole** online payment gateway supported by CollegeBites.
+   - Backend independently verifies HMAC-SHA256 payment signatures, fetches/validates payment status, amount (exact paise), and currency (`INR`) with Razorpay, and processes `X-Razorpay-Signature` webhooks (`payment.captured`, `order.paid`, `payment.failed`) idempotently.
+   - Live production operation requires setting `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET` on the backend server and registering `POST /api/v1/payments/razorpay/webhook` in the Razorpay Dashboard.
 
-2. **Email / SMS / WhatsApp Providers (`SMTP_*`, `SMS_PROVIDER`, `TWILIO_*`, `WHATSAPP_PROVIDER`)**
-   - OTP and order notifications dispatch via SMTP when `SMTP_HOST` is configured; SMS OTP in production requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` (with `SMS_PROVIDER=twilio`) or `SMS_WEBHOOK_URL` (`SMS_PROVIDER=webhook`), returning HTTP `503` otherwise rather than faking delivery.
+2. **Live Transactional OTP Providers (`OTP_*`, `SMTP_*`, `RESEND_API_KEY`, `SENDGRID_API_KEY`, `TWILIO_*`)**
+   - OTP codes are cryptographically random 6-digit codes stored strictly as HMAC-SHA256 hashes (`otp_hash`) with 300s expiry, 60s resend cooldown, 5 max attempts, single-use consumption, and destination/IP/account rate limits.
+   - Plaintext OTPs are never logged and never returned in API responses (`dev_otp` removed).
+   - Real external delivery requires configuring `SMTP_HOST`/`SMTP_USERNAME`/`SMTP_PASSWORD`, `RESEND_API_KEY`, or `SENDGRID_API_KEY` for Email OTP, and `OTP_SMS_ENABLED=true` + Twilio/Webhook + Indian DLT compliance for SMS OTP. When unconfigured, `/api/v1/auth/otp/request` honestly returns HTTP `503 Service Unavailable`.
 
 3. **Thermal Printers (58mm / 80mm ESC/POS)**
-   - Browser Print (`window.print()`), downloadable A4 / 80mm PDF (`ReportLab`), and raw ESC/POS binary byte generation (`GS ( k` QR + double-height token) are fully built and tested.
+   - Customer digital receipts and customer `ReceiptPrintJob` records are generated automatically after verified payment confirmation; Kitchen Order Tickets (`kot` print jobs and ESC/POS payloads) are generated **only after** the order is accepted (`ACCEPTED`+) by kitchen staff.
    - Direct USB/Serial printing requires browser WebUSB/WebSerial permissions and compatible ESC/POS hardware; Network TCP/IP printing (`port 9100`) requires an accessible LAN thermal printer (`NETWORK_PRINTER_ENABLED=true`).
 
 4. **Mobile Push & Camera Scanning**

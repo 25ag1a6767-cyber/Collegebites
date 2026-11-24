@@ -49,7 +49,12 @@ PICKUP_INSTRUCTIONS = [
 
 
 def create_receipt_for_order(db: Session, order: Order, pickup_token: PickupToken, qr_row: OrderQRCode, payment: Payment) -> Receipt:
-    """Create a complete immutable historical receipt snapshot after payment confirmation."""
+    """Create a complete immutable historical receipt snapshot strictly after payment confirmation."""
+    if order.payment_status != "CONFIRMED" or payment.status != "CONFIRMED":
+        raise HTTPException(
+            status_code=409,
+            detail="Digital customer receipt can only be generated after trusted payment verification",
+        )
     existing = db.scalar(select(Receipt).where(Receipt.order_id == order.id))
     if existing:
         return existing
@@ -417,6 +422,64 @@ def get_escpos_payload(
     }
 
 
+def ensure_customer_receipt_print_job(
+    db: Session,
+    order: Order,
+    receipt: Receipt,
+    *,
+    actor_user_id: Optional[UUID] = None,
+) -> ReceiptPrintJob:
+    """
+    Idempotently create the customer receipt print job immediately after payment verification.
+    Never increments `reprint_count`; network printer unreachable errors are recorded on the job
+    without rolling back the verified payment.
+    """
+    existing_job = db.scalar(
+        select(ReceiptPrintJob).where(
+            ReceiptPrintJob.order_id == order.id,
+            ReceiptPrintJob.job_type == "customer_receipt",
+            ReceiptPrintJob.is_reprint.is_(False),
+        )
+    )
+    if existing_job:
+        return existing_job
+
+    target = "network_escpos" if settings.NETWORK_PRINTER_ENABLED else "browser"
+    job = ReceiptPrintJob(
+        receipt_id=receipt.id,
+        order_id=order.id,
+        job_type="customer_receipt",
+        printer_target=target,
+        printer_name="Counter Receipt Printer" if settings.NETWORK_PRINTER_ENABLED else "Digital Customer Receipt",
+        paper_width="80mm",
+        network_host=settings.DEFAULT_PRINTER_IP if settings.NETWORK_PRINTER_ENABLED else None,
+        network_port=settings.DEFAULT_PRINTER_PORT if settings.NETWORK_PRINTER_ENABLED else None,
+        is_reprint=False,
+        status="queued",
+        requested_by_user_id=actor_user_id,
+    )
+    db.add(job)
+    db.flush()
+
+    if settings.NETWORK_PRINTER_ENABLED and settings.DEFAULT_PRINTER_IP:
+        try:
+            esc_bytes = build_escpos_receipt_bytes(
+                receipt.receipt_snapshot,
+                paper_width="80mm",
+                is_reprint=False,
+                reprint_number=0,
+            )
+            send_escpos_network_tcp(settings.DEFAULT_PRINTER_IP, settings.DEFAULT_PRINTER_PORT, esc_bytes)
+            job.status = "completed"
+        except Exception as exc:
+            job.status = "failed"
+            job.error_message = f"Auto customer receipt print failed: {str(exc)[:200]}"
+    return job
+
+
+KOT_ALLOWED_STATUSES = ("ACCEPTED", "PREPARING", "READY", "COMPLETED")
+
+
 def get_kitchen_ticket_escpos_payload(
     db: Session,
     order_id_or_number: str,
@@ -436,7 +499,12 @@ def get_kitchen_ticket_escpos_payload(
     if staff_canteen_id and order.canteen_id != staff_canteen_id:
         raise HTTPException(status_code=403, detail="Staff user is not authorized for this canteen")
     if order.payment_status != "CONFIRMED":
-        raise HTTPException(status_code=409, detail="Kitchen ticket available only after payment confirmation")
+        raise HTTPException(status_code=409, detail="Kitchen Order Ticket available only after payment confirmation")
+    if order.status not in KOT_ALLOWED_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Kitchen Order Ticket (KOT) is generated only after the order is accepted by the kitchen",
+        )
 
     canteen = db.get(Canteen, order.canteen_id)
     counter = db.get(Counter, order.counter_id)
@@ -486,6 +554,73 @@ def get_kitchen_ticket_escpos_payload(
         "escpos_base64": base64.b64encode(raw_bytes).decode("ascii"),
         "byte_length": len(raw_bytes),
     }
+
+
+def ensure_kot_print_job_for_accepted_order(
+    db: Session,
+    order: Order,
+    *,
+    actor_user_id: Optional[UUID] = None,
+) -> Optional[ReceiptPrintJob]:
+    """
+    Generate the Kitchen Order Ticket (KOT) print job ONLY after payment is CONFIRMED
+    AND the order has been ACCEPTED by kitchen staff. Idempotent across retries.
+    """
+    if order.payment_status != "CONFIRMED" or order.status not in KOT_ALLOWED_STATUSES:
+        return None
+
+    existing_kot = db.scalar(
+        select(ReceiptPrintJob).where(
+            ReceiptPrintJob.order_id == order.id,
+            ReceiptPrintJob.job_type == "kot",
+            ReceiptPrintJob.is_reprint.is_(False),
+        )
+    )
+    if existing_kot:
+        return existing_kot
+
+    receipt = db.scalar(select(Receipt).where(Receipt.order_id == order.id))
+    if not receipt:
+        return None
+
+    target = "network_escpos" if settings.NETWORK_PRINTER_ENABLED else "80mm"
+    kot_job = ReceiptPrintJob(
+        receipt_id=receipt.id,
+        order_id=order.id,
+        job_type="kot",
+        printer_target=target,
+        printer_name="Kitchen Thermal KOT Printer",
+        paper_width="80mm",
+        network_host=settings.DEFAULT_PRINTER_IP if settings.NETWORK_PRINTER_ENABLED else None,
+        network_port=settings.DEFAULT_PRINTER_PORT if settings.NETWORK_PRINTER_ENABLED else None,
+        is_reprint=False,
+        status="queued",
+        requested_by_user_id=actor_user_id,
+    )
+    db.add(kot_job)
+    db.flush()
+
+    if settings.NETWORK_PRINTER_ENABLED and settings.DEFAULT_PRINTER_IP:
+        try:
+            kot_data = get_kitchen_ticket_escpos_payload(db, str(order.id), paper_width="80mm")
+            raw_kot = base64.b64decode(kot_data["escpos_base64"])
+            send_escpos_network_tcp(settings.DEFAULT_PRINTER_IP, settings.DEFAULT_PRINTER_PORT, raw_kot)
+            kot_job.status = "completed"
+        except Exception as exc:
+            kot_job.status = "failed"
+            kot_job.error_message = f"Auto KOT print failed: {str(exc)[:200]}"
+    else:
+        kot_job.status = "completed"
+
+    record_audit_log(
+        db,
+        action="kitchen.kot_generated",
+        entity_type="order",
+        entity_id=order.order_number,
+        actor_user_id=actor_user_id,
+        details={"print_job_id": str(kot_job.id), "status": kot_job.status},
+    )
+    return kot_job
 
 
 def _validate_printer_host(host: str) -> str:
@@ -543,6 +678,7 @@ def trigger_print_job(
     job = ReceiptPrintJob(
         receipt_id=receipt.id,
         order_id=order.id,
+        job_type="customer_receipt",
         printer_target=payload.printer_target,
         printer_name=payload.printer_name,
         paper_width=payload.paper_width,

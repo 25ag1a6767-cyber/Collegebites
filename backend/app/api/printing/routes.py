@@ -115,13 +115,19 @@ def retry_print_job(
 
 @router.get("/jobs", response_model=list[PrintJobOut])
 def list_print_jobs(
-    principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_PRINT_ROLES)),
+    job_type: Optional[str] = Query(default=None, pattern="^(customer_receipt|kot)$"),
+    order_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KOT_PRINT_ROLES)),
     db: Session = Depends(get_db),
 ):
     scoped_cid = scoped_canteen_for_principal(principal, None)
     stmt = select(ReceiptPrintJob).order_by(ReceiptPrintJob.created_at.desc()).limit(100)
     if scoped_cid:
         stmt = stmt.join(Order, Order.id == ReceiptPrintJob.order_id).where(Order.canteen_id == scoped_cid)
+    if job_type:
+        stmt = stmt.where(ReceiptPrintJob.job_type == job_type)
+    if order_id:
+        stmt = stmt.where(ReceiptPrintJob.order_id == order_id)
     return list(db.scalars(stmt).all())
 
 

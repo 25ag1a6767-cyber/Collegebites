@@ -103,7 +103,6 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
             default_tax_rate_percent=Decimal("0.00"),
             kiosk_enabled=False,
             razorpay_enabled=True,
-            stripe_enabled=True,
             cash_at_counter_enabled=False,
             pay_at_pickup_enabled=False,
         )

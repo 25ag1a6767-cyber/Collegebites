@@ -12,7 +12,7 @@ export const ordersApi = {
       pickup_slot_id?: string | null;
       order_type?: "pickup" | "dine_in" | "walk_in" | "kiosk" | "qr_table";
       order_channel?: "web" | "mobile" | "qr" | "pos" | "kiosk";
-      payment_method: "razorpay" | "stripe";
+      payment_method: "razorpay";
       redeem_loyalty_points?: number;
       idempotency_key: string;
       guest_name?: string | null;

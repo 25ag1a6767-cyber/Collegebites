@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
@@ -18,10 +18,16 @@ export default function OrdersScreen() {
   const [recoverPhone, setRecoverPhone] = useState("");
   const [recoverOtp, setRecoverOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
-  const [devOtp, setDevOtp] = useState<string | null>(null);
+  const [otpCooldown, setOtpCooldown] = useState(0);
   const [recovered, setRecovered] = useState<any[]>([]);
   const [statusMsg, setStatusMsg] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (otpCooldown <= 0) return;
+    const id = setInterval(() => setOtpCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
+    return () => clearInterval(id);
+  }, [otpCooldown]);
 
   const reorder = async (o: any) => {
     setStatusMsg("");
@@ -133,14 +139,14 @@ export default function OrdersScreen() {
                 placeholder="+919876543210"
               />
               <Pressable
-                disabled={busy || !recoverPhone.trim()}
+                disabled={busy || otpCooldown > 0 || !recoverPhone.trim()}
                 onPress={async () => {
                   setBusy(true);
                   setStatusMsg("");
                   try {
                     const r = await authApi.requestOtp({ target: recoverPhone.trim(), purpose: "guest_checkout" });
                     setOtpSent(true);
-                    setDevOtp(r.dev_otp || null);
+                    setOtpCooldown(Number(r.resend_cooldown_seconds ?? 60));
                   } catch (e: unknown) {
                     setStatusMsg(getMobileApiError(e, "Failed to send OTP"));
                   } finally {
@@ -149,10 +155,11 @@ export default function OrdersScreen() {
                 }}
                 style={styles.goBtn}
               >
-                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>{otpSent ? "Resend" : "Send OTP"}</Text>
+                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>
+                  {otpCooldown > 0 ? `Wait ${otpCooldown}s` : otpSent ? "Resend" : "Send OTP"}
+                </Text>
               </Pressable>
             </View>
-            {devOtp && <Text style={{ fontSize: 11, color: "#b45309" }}>Dev OTP: {devOtp}</Text>}
             {otpSent && (
               <View style={{ flexDirection: "row", gap: 6 }}>
                 <TextInput

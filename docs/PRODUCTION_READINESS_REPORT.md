@@ -26,13 +26,13 @@
 | 13 | Lock-Free Sequences & Correlation IDs (`X-Request-ID`) | **PASS** | `test_01` & `test_06` passed; `pg_advisory_xact_lock` replaced with `order_number_seq` & `invoice_number_seq`. |
 | 14 | Isolated Backup, SHA-256 Integrity & Dry-Run Restore | **PASS** | `test_06` passed against isolated test DB. |
 | 15 | Staging Load & Breaking-Point Testing (Grafana k6) | **PARTIAL** | Measured locally up to breaking point (25 VU = **91.67 RPS**, 0.0% error, p95 433.88 ms; 50 VU = breaking point on 1-worker SQLite). Multi-worker PostgreSQL + Redis 100–1,000 VU tiers **NOT TESTED** in local sandbox (local Windows PG18 crashes with `0xC0000409`; live Vercel production intentionally protected). |
-| 16 | Production Live Razorpay/Stripe Bank Settlement & Production DB Migration | **NOT TESTED** | Intentionally excluded to protect live production data and avoid real financial charges without user approval. |
+| 16 | Production Live Razorpay Bank Settlement & Production DB Migration | **NOT TESTED** | Intentionally excluded to protect live production data and avoid real financial charges without user approval. |
 
 ---
 
 ## 2. Pre-Deployment Checklist Before Promoting to Production
 1. Take a Neon PostgreSQL branch snapshot / `pg_dump --format=custom` backup.
-2. Run `alembic upgrade head` (`e5f6a7b8c9d0`) on a staging PostgreSQL branch first and execute `pytest` against PostgreSQL.
-3. Verify external SMTP, SMS/WhatsApp, Redis (`REDIS_URL`), Razorpay, and Stripe environment variables in Vercel Project Settings.
+2. Run `alembic upgrade head` (`f6a7b8c9d0e1`) on a staging PostgreSQL branch first and execute `pytest` against PostgreSQL.
+3. Verify external Email OTP (`OTP_PROVIDER`, `OTP_EMAIL_FROM`, `SMTP_*` / `RESEND_API_KEY`), SMS OTP (`OTP_SMS_ENABLED`), Redis (`REDIS_URL`), and Razorpay (`RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`) environment variables in Vercel Project Settings.
 4. Execute a staging multi-worker PostgreSQL + Redis k6 verification run for 100–1,000 VUs before campus peak-hour cutover.
 5. Merge `enterprise-platform-upgrade` to `main` and deploy only upon explicit user approval.

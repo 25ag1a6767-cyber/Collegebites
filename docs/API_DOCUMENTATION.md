@@ -19,33 +19,31 @@ Authentication: Bearer JWT access token (`Authorization: Bearer <access_token>`)
 - `GET /api/v1/menus/canteens/{canteen_id}/items` — Search/filter food items with variants, addons, allergens, and active menu schedules.
 - `GET /api/v1/menus/items/{item_id}` — Single dish detail.
 
-## 2. Authentication & OTP (`/api/v1/auth`)
-- `POST /api/v1/auth/register` — Universal account signup (`customer` role).
+## 2. Authentication & Live OTP (`/api/v1/auth`)
+- `POST /api/v1/auth/register` — Universal account signup (`customer` role; accepts optional single-use `otp_verification_token` from `purpose="register"`).
 - `POST /api/v1/auth/login` — Password login with email or phone.
-- `GET /api/v1/auth/otp/capabilities` — Reports live Email SMTP OTP, SMS OTP, and dev-echo availability booleans.
-- `POST /api/v1/auth/otp/request` — Request 6-digit OTP (`login`, `guest_checkout`, `password_reset`, `phone_verify`). Dispatches SMTP email OTP for email targets; phone targets dispatch via SMS gateway if configured or fall back to registered account email (`400`/`503` in production if neither channel is configured).
-- `POST /api/v1/auth/otp/verify` — Verify OTP and receive signed `OTPVER.*` verification token.
-- `POST /api/v1/auth/otp/login` — Passwordless OTP login returning JWT tokens.
+- `GET /api/v1/auth/otp/capabilities` — Reports live `email_otp_enabled`, `sms_otp_enabled`, `otp_expiry_seconds`, `resend_cooldown_seconds`, and `max_attempts` (no browser OTP echo).
+- `POST /api/v1/auth/otp/request` — Request 6-digit CSPRNG OTP (`register`, `login`, `guest_checkout`, `password_reset`, `phone_verify`, `email_verify`). Enforces 60s resend cooldown, 15m destination/IP/account rate limits, invalidates prior unverified OTPs, and returns HTTP `503` if the real email/SMS provider is unconfigured or fails.
+- `POST /api/v1/auth/otp/verify` — Constant-time HMAC verification returning single-use `OTPVER.*` token bound to target & purpose.
+- `POST /api/v1/auth/otp/login` — Passwordless OTP login (consumes OTP single-use and returns JWT tokens).
 - `POST /api/v1/auth/refresh` — Refresh token rotation with replay revocation.
-- `POST /api/v1/auth/logout`, `GET /api/v1/auth/me`, `POST /api/v1/auth/phone/verify`, `POST /api/v1/auth/change-password`, `POST /api/v1/auth/password-reset/confirm`, `GET /api/v1/auth/sessions`, `DELETE /api/v1/auth/sessions/{session_id}`.
+- `POST /api/v1/auth/logout`, `GET /api/v1/auth/me`, `POST /api/v1/auth/phone/verify`, `POST /api/v1/auth/email/verify`, `POST /api/v1/auth/change-password`, `POST /api/v1/auth/password-reset/confirm`, `GET /api/v1/auth/sessions`, `DELETE /api/v1/auth/sessions/{session_id}`.
 
 ## 3. Customer Cart, Profile, Orders & Tracking
 - `GET /api/v1/customers/profile`, `PATCH /api/v1/customers/profile`, `DELETE /api/v1/customers/me`
 - `GET /api/v1/customers/favourites`, `POST /api/v1/customers/favourites/{food_item_id}`, `DELETE /api/v1/customers/favourites/{food_item_id}`
 - `GET /api/v1/carts`, `POST /api/v1/carts/items`, `PATCH /api/v1/carts/items/{cart_item_id}`
 - `GET /api/v1/orders/slots/{canteen_id}` — Available pickup slots with remaining capacity.
-- `POST /api/v1/orders/checkout` — Idempotent server-calculated order creation (`razorpay` or `stripe`; supports registered users and OTP-verified guests via `guest_phone` / `guest_email`).
+- `POST /api/v1/orders/checkout` — Idempotent server-calculated order creation (`razorpay` online checkout or cashier `upi_pos`/`card_pos`; supports registered users and single-use OTP-verified guests).
 - `GET /api/v1/orders/my`, `POST /api/v1/orders/guest/lookup`, `GET /api/v1/orders/{order_id_or_number}`, `POST /api/v1/orders/{order_id}/cancel`.
 
-## 4. Payments & Webhooks (`/api/v1/payments`)
-- `GET /api/v1/payments/stripe/config` — Public Stripe publishable key and gateway readiness status for Web Elements & Mobile PaymentSheet.
-- `POST /api/v1/payments/razorpay/verify` — HMAC-SHA256 verification of `razorpay_order_id|razorpay_payment_id` + atomic token/QR/receipt generation & stock deduction.
-- `POST /api/v1/payments/razorpay/fail` — Record Razorpay payment failure/cancellation.
-- `POST /api/v1/payments/razorpay/webhook` — Verify `X-Razorpay-Signature` idempotently.
-- `POST /api/v1/payments/stripe/verify` — Verify Stripe PaymentIntent (`stripe_payment_intent_id` / `payment_intent_id`) or Checkout Session (`stripe_session_id`) via official `stripe` Python SDK in live mode or HMAC verification in dev/test.
-- `POST /api/v1/payments/stripe/fail` — Record Stripe failure/cancellation.
-- `POST /api/v1/payments/stripe/webhook` — Verify `Stripe-Signature` (`t=...,v1=...`) idempotently via official Stripe webhook SDK (with HMAC fallback in dev/test).
-- `POST /api/v1/payments/retry/{order_id}` — Re-initiate online checkout for `PAYMENT_PENDING` / `PAYMENT_FAILED` orders (`razorpay` or `stripe`).
+## 4. Payments & Webhooks (`/api/v1/payments` — Razorpay Only)
+- `GET /api/v1/payments/razorpay/config` — Public Razorpay Key ID and gateway readiness status (never exposes secrets).
+- `POST /api/v1/payments/razorpay/verify` — HMAC-SHA256 verification of `razorpay_order_id|razorpay_payment_id` + live Razorpay amount/currency/status validation + atomic token/QR/digital receipt/customer print job generation & stock deduction.
+- `POST /api/v1/payments/razorpay/sync/{order_id}` — Reconciles delayed/interrupted Razorpay Checkout payments directly against Razorpay Orders API.
+- `POST /api/v1/payments/razorpay/fail` — Record Razorpay payment failure/cancellation and release reserved slot/inventory.
+- `POST /api/v1/payments/razorpay/webhook` — Verify `X-Razorpay-Signature` idempotently (`payment.captured`, `order.paid`, `payment.failed`).
+- `POST /api/v1/payments/retry/{order_id}` — Re-initiate Razorpay online checkout for `PAYMENT_PENDING` / `PAYMENT_FAILED` orders (`razorpay` only).
 - `POST /api/v1/payments/counter/collect` — Staff digital counter collection (`upi_pos` or `card_pos` only).
 - `GET /api/v1/payments`, `POST /api/v1/payments/reconcile`, `GET /api/v1/payments/reconciliations`.
 

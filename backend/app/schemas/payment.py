@@ -22,21 +22,6 @@ class RazorpayFailureRequest(BaseModel):
     reason: str = Field(default="Payment cancelled or failed at gateway", max_length=255)
 
 
-class StripeVerifyRequest(BaseModel):
-    order_id: UUID
-    stripe_payment_intent_id: Optional[str] = Field(default=None, min_length=4, max_length=160)
-    stripe_session_id: Optional[str] = Field(default=None, min_length=4, max_length=160)
-    stripe_signature: Optional[str] = Field(default=None, max_length=256)
-    payment_method: Optional[str] = Field(default="card")
-
-
-class StripeFailureRequest(BaseModel):
-    order_id: UUID
-    stripe_payment_intent_id: Optional[str] = None
-    stripe_session_id: Optional[str] = None
-    reason: str = Field(default="Stripe checkout cancelled or failed", max_length=255)
-
-
 class CounterPaymentCollectRequest(BaseModel):
     order_id: UUID
     payment_method: str = Field(default="upi_pos", pattern="^(upi_pos|card_pos|cash|pay_at_pickup)$")
@@ -105,6 +90,7 @@ class PrintJobOut(ORMModel):
     id: UUID
     receipt_id: UUID
     order_id: UUID
+    job_type: str = "customer_receipt"
     printer_target: str
     printer_name: Optional[str]
     paper_width: str

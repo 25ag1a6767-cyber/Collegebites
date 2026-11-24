@@ -68,25 +68,23 @@ describe("Phase 1: Offline Mode, Sync Queue & Payment Guardrails", () => {
       id: "ord-1",
       order_number: "CB-101",
       total_amount: "120.00",
-      stripe_client_secret: "pi_secret_should_never_persist",
-      razorpay_key_id: "rzp_live_secret_key",
-      stripe_publishable_key: "pk_live_123",
+      razorpay_signature: "sig_should_never_persist",
+      razorpay_key_id: "rzp_live_public_key",
       guest_access_token: "CBG_secret",
       card_number: "4111",
     };
 
     const clean = stripSensitivePaymentFields(rawOrder);
     expect(clean.order_number).toBe("CB-101");
-    expect("stripe_client_secret" in clean).toBe(false);
+    expect("razorpay_signature" in clean).toBe(false);
     expect("razorpay_key_id" in clean).toBe(false);
-    expect("stripe_publishable_key" in clean).toBe(false);
     expect("guest_access_token" in clean).toBe(false);
     expect("card_number" in clean).toBe(false);
 
     saveOfflineCache("order:CB-101", rawOrder);
     const loaded = readOfflineCache<any>("order:CB-101");
     expect(loaded?.data?.order_number).toBe("CB-101");
-    expect(loaded?.data?.stripe_client_secret).toBeUndefined();
+    expect(loaded?.data?.razorpay_signature).toBeUndefined();
   });
 
   it("blocks financial, payment, and token-issuing routes from being queued offline", async () => {

@@ -47,7 +47,6 @@ class CollegeSettings(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     kiosk_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     guest_otp_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     razorpay_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    stripe_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     cash_at_counter_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     pay_at_pickup_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     college_timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Asia/Kolkata")

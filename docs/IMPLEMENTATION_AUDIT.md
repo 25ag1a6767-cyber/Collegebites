@@ -17,24 +17,19 @@ All operational KPIs, order histories, inventory balances, low-stock alerts, pri
 - **Frontend & Mobile Cleanup**:
   - Removed Cash at Counter and Pay at Pickup selection buttons from Web [`CheckoutPage.tsx`](../frontend/src/pages/customer/CheckoutPage.tsx), [`KioskPage.tsx`](../frontend/src/pages/kiosk/KioskPage.tsx), [`PromotionsSystemTab.tsx`](../frontend/src/pages/admin/components/PromotionsSystemTab.tsx), [`CashierPOSPage.tsx`](../frontend/src/pages/cashier/CashierPOSPage.tsx) (digital `upi_pos` / `card_pos` terminals only), and Mobile [`checkout.tsx`](../mobile/app/checkout.tsx) + onboarding copy in [`_layout.tsx`](../mobile/app/_layout.tsx).
 
-### B. Payment Gateway Security & Real Integrations (Razorpay & Stripe)
-- **Removed Client-Side Test Signing & Fallback Secrets**:
-  - Removed `signHmacHex`, `hmacSha256Hex`, `mobile/src/utils/hmacSha256.ts`, `"test_mode_signature"`, `"rzp_test_secret_collegebites_local"`, and `"sk_test_collegebites_local"` from frontend and mobile bundles.
-  - Added shared [`frontend/src/utils/razorpay.ts`](../frontend/src/utils/razorpay.ts) modal launcher and [`frontend/src/components/payments/StripePaymentModal.tsx`](../frontend/src/components/payments/StripePaymentModal.tsx) (`@stripe/stripe-js` & `@stripe/react-stripe-js` Elements) across Checkout, Order Tracking retry, and [`KioskPage.tsx`](../frontend/src/pages/kiosk/KioskPage.tsx), plus [`StripePayButton.native.tsx`](../mobile/src/components/StripePayButton.native.tsx) (`@stripe/stripe-react-native` PaymentSheet) and [`StripePayButton.web.tsx`](../mobile/src/components/StripePayButton.web.tsx) in Mobile.
+### B. Payment Gateway Security & Real Razorpay-Only Integration
+- **Removed Client-Side Test Signing & Non-Razorpay Online Gateways**:
+  - Removed `signHmacHex`, `hmacSha256Hex`, `mobile/src/utils/hmacSha256.ts`, `"test_mode_signature"`, and `"rzp_test_secret_collegebites_local"` from frontend and mobile bundles.
+  - Standardized online checkout exclusively on Razorpay via [`frontend/src/utils/razorpay.ts`](../frontend/src/utils/razorpay.ts) across Checkout, Order Tracking retry, [`KioskPage.tsx`](../frontend/src/pages/kiosk/KioskPage.tsx), and Mobile [`checkout.tsx`](../mobile/app/checkout.tsx) + [`order/[orderNumber].tsx`](../mobile/app/order/[orderNumber].tsx).
 - **Production Safety**:
-  - [`RazorpayGateway`](../backend/app/integrations/razorpay_client.py) and [`StripeGateway`](../backend/app/integrations/stripe_client.py) (official `stripe==14.4.2` SDK) invoke real gateway APIs whenever real credentials are configured (`GET /api/v1/payments/stripe/config` + PaymentIntent + Checkout Session + Webhook verification), omit dummy public keys when unconfigured, and raise HTTP `503` in `ENVIRONMENT=production` if gateway secrets are missing.
+  - [`RazorpayGateway`](../backend/app/integrations/razorpay_client.py) invokes real Razorpay Orders & Payments APIs whenever server-side credentials are configured (`GET /api/v1/payments/razorpay/config` + `POST /api/v1/payments/razorpay/{verify,fail,webhook,sync/{order_id}}`), validates exact paise amount & INR currency, never exposes `RAZORPAY_KEY_SECRET` or `RAZORPAY_WEBHOOK_SECRET`, and raises HTTP `503` in `ENVIRONMENT=production` if gateway secrets are missing.
 - **Bug Fix**: Added missing `OrderStatusHistory` import in [`payment_service.py`](../backend/app/services/payment_service.py) (`retry_online_payment`).
 
-### C. Production OTP Generation & Delivery Fix
-- **Root Cause Found**:
-  1. `auth_service.request_otp` never invoked `send_email` or `send_sms_or_whatsapp` to deliver generated OTP codes.
-  2. `config.py` read `SMTP_USER`, ignoring Vercel's configured `SMTP_USERNAME` and `SMTP_SECURE`.
-  3. Production (`ENVIRONMENT=production`) suppressed `dev_otp` (even with `OTP_TEST_ECHO=true`) without configured SMS credentials (`SMS_PROVIDER=log`), returning `200` with `dev_otp: null` and zero delivery.
-- **Fix**:
-  - Added `SMTP_USERNAME`, `SMTP_SECURE`, `effective_smtp_user`, and `effective_smtp_from` to [`config.py`](../backend/app/core/config.py) and real SSL/STARTTLS SMTP dispatch in [`email_provider.py`](../backend/app/integrations/email_provider.py).
-  - Updated [`sms_provider.py`](../backend/app/integrations/sms_provider.py) so unconfigured/`log`/`none` providers fail honestly in production instead of reporting fake log delivery.
-  - Updated [`auth_service.py`](../backend/app/services/auth_service.py) (`request_otp`) to dispatch email OTPs via SMTP, check user's linked email fallback if a login phone target is requested without SMS configured, and raise explicit `503` errors when neither Email SMTP nor SMS gateway can deliver in production.
-  - Added Guest Email OTP support in [`CheckoutPage.tsx`](../frontend/src/pages/customer/CheckoutPage.tsx), [`mobile/app/checkout.tsx`](../mobile/app/checkout.tsx), [`orders.api.ts`](../mobile/src/api/orders.api.ts), and backend [`OrderCheckoutIn`](../backend/app/schemas/order.py).
+### C. Live OTP Generation, Delivery & Verification
+- **Security Controls Implemented**:
+  - Cryptographically secure 6-digit OTP (`secrets.randbelow(1_000_000)`) stored exclusively as HMAC-SHA256 (`otp_hash`), with `OTP_EXPIRY_SECONDS=300`, `OTP_RESEND_COOLDOWN_SECONDS=60`, `OTP_MAX_ATTEMPTS=5`, 15-minute IP/destination/user rate limits, prior-OTP invalidation, constant-time `hmac.compare_digest` verification, single-use consumption (`consumed_at`), and zero plaintext OTP logging or browser echo.
+  - Real provider delivery via [`email_provider.py`](../backend/app/integrations/email_provider.py) (`smtp`, `resend`, `sendgrid`) and [`sms_provider.py`](../backend/app/integrations/sms_provider.py) (`twilio`, `webhook` when `OTP_SMS_ENABLED=true`), returning HTTP `503` whenever no real provider is configured or delivery fails.
+  - Added unified [`OtpVerificationBox.tsx`](../frontend/src/components/auth/OtpVerificationBox.tsx) across Registration, OTP Login, Password Reset, Guest Checkout, Profile Verification, Guest Order Recovery, and Guest Support Ticket Lookup.
 
 ### D. Zero Coupons Policy
 - Removed coupon APIs, UI inputs, promo coupon fields, and `CAMPUS10` seed data; backend rejects non-empty `coupon_code` with `400` and migration `3b2c4d5e7f8a` deletes legacy coupon rows while preserving Loyalty Points and non-coupon Announcements/Banners.

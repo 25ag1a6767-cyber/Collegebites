@@ -20,6 +20,7 @@ from app.core.permissions import (
     require_roles,
     scoped_canteen_for_principal,
 )
+from app.integrations.razorpay_client import razorpay_gateway
 from app.models.order import Order
 from app.models.payment import Payment, PaymentReconciliation
 from app.schemas.order import OrderOut
@@ -31,22 +32,55 @@ from app.schemas.payment import (
     RazorpayVerifyRequest,
     ReconcileRequest,
     ReconciliationOut,
-    StripeFailureRequest,
-    StripeVerifyRequest,
 )
 from app.services import payment_service, reconciliation_service
 
-router = APIRouter(prefix="/payments", tags=["Payments (No Refunds)"])
+router = APIRouter(prefix="/payments", tags=["Payments (Razorpay Only • No Refunds)"])
+
+
+@router.get("/razorpay/config")
+def razorpay_config():
+    """Return non-sensitive Razorpay client configuration (never exposes secret or webhook keys)."""
+    return {
+        "key_id": razorpay_gateway.public_key_id,
+        "configured": razorpay_gateway.is_configured,
+        "live_api_enabled": razorpay_gateway.use_live_api,
+    }
 
 
 @router.post("/razorpay/verify", response_model=OrderOut)
 def verify_razorpay(
     payload: RazorpayVerifyRequest,
+    guest_token: Optional[str] = Query(default=None),
+    x_guest_token: Optional[str] = Header(default=None),
     principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
     db: Session = Depends(get_db),
 ):
     return payment_service.verify_razorpay_checkout_payment(
-        db, payload, actor_user_id=principal.user.id if principal else None
+        db,
+        payload,
+        actor_user_id=principal.user.id if principal else None,
+        guest_access_token=guest_token or x_guest_token,
+    )
+
+
+@router.post("/razorpay/sync/{order_id}", response_model=OrderOut)
+def sync_razorpay_payment(
+    order_id: UUID,
+    guest_token: Optional[str] = Query(default=None),
+    x_guest_token: Optional[str] = Header(default=None),
+    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
+    db: Session = Depends(get_db),
+):
+    is_staff = bool(principal and principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_CASHIER))
+    staff_cid = None if (not is_staff or principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)) else principal.assigned_canteen_id
+    return payment_service.sync_razorpay_order_payment(
+        db,
+        order_id,
+        user_id=principal.user.id if principal else None,
+        is_staff=is_staff,
+        staff_canteen_id=staff_cid,
+        guest_access_token=guest_token or x_guest_token,
     )
 
 
@@ -80,81 +114,29 @@ async def razorpay_webhook(
     return payment_service.handle_razorpay_webhook(db, raw_body, x_razorpay_signature)
 
 
-@router.get("/stripe/config")
-def stripe_config():
-    """Return non-sensitive Stripe client configuration (never exposes secret or webhook keys)."""
-    from app.integrations.stripe_client import stripe_gateway
-
-    return {
-        "publishable_key": stripe_gateway.publishable_key,
-        "configured": bool(stripe_gateway.publishable_key),
-        "live_api_enabled": stripe_gateway.use_live_api,
-    }
-
-
-@router.post("/stripe/verify", response_model=OrderOut)
-def verify_stripe(
-    payload: StripeVerifyRequest,
-    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
-    db: Session = Depends(get_db),
-):
-    return payment_service.verify_stripe_checkout_payment(
-        db, payload, actor_user_id=principal.user.id if principal else None
-    )
-
-
-@router.post("/stripe/fail", response_model=OrderOut)
-def fail_stripe(
-    payload: StripeFailureRequest,
-    guest_token: Optional[str] = Query(default=None),
-    x_guest_token: Optional[str] = Header(default=None),
-    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
-    db: Session = Depends(get_db),
-):
-    is_staff = bool(principal and principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_CASHIER))
-    staff_cid = None if (not is_staff or principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)) else principal.assigned_canteen_id
-    return payment_service.record_stripe_failure(
-        db,
-        payload,
-        user_id=principal.user.id if principal else None,
-        is_staff=is_staff,
-        staff_canteen_id=staff_cid,
-        guest_access_token=guest_token or x_guest_token,
-    )
-
-
 class RetryPaymentRequest(BaseModel):
-    payment_method: str = Field(default="razorpay", pattern="^(razorpay|stripe)$")
+    payment_method: str = Field(default="razorpay", pattern="^razorpay$")
 
 
 @router.post("/retry/{order_id}", response_model=OrderOut)
 def retry_payment(
     order_id: UUID,
-    payload: RetryPaymentRequest,
+    payload: Optional[RetryPaymentRequest] = None,
     guest_token: Optional[str] = Query(default=None),
     x_guest_token: Optional[str] = Header(default=None),
     principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
     db: Session = Depends(get_db),
 ):
     is_staff = bool(principal and principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_CASHIER))
+    method = payload.payment_method if payload else "razorpay"
     return payment_service.retry_online_payment(
         db,
         order_id,
-        payload.payment_method,
+        method,
         user_id=principal.user.id if principal else None,
         is_staff=is_staff,
         guest_access_token=guest_token or x_guest_token,
     )
-
-
-@router.post("/stripe/webhook")
-async def stripe_webhook(
-    request: Request,
-    stripe_signature: Optional[str] = Header(default=None, alias="Stripe-Signature"),
-    db: Session = Depends(get_db),
-):
-    raw_body = await request.body()
-    return payment_service.handle_stripe_webhook(db, raw_body, stripe_signature)
 
 
 @router.post("/counter/collect", response_model=OrderOut)

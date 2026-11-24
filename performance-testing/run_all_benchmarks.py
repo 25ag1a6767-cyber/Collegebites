@@ -66,7 +66,9 @@ def setup_isolated_staging_db() -> None:
     env["DATABASE_URL"] = STAGING_DB_URL
     env["REDIS_URL"] = "memory://"
     env["RATE_LIMIT_ENABLED"] = "false"
-    env["OTP_TEST_ECHO"] = "true"
+    env["RAZORPAY_TEST_MODE"] = "true"
+    env["RAZORPAY_KEY_ID"] = ""
+    env["RAZORPAY_KEY_SECRET"] = ""
 
     seed_code = """
 import os
@@ -246,7 +248,9 @@ def start_uvicorn_server(*, rate_limit_enabled: bool = False, port: int = STAGIN
     env["RATE_LIMIT_ENABLED"] = "true" if rate_limit_enabled else "false"
     env["DB_POOL_SIZE"] = "20"
     env["DB_MAX_OVERFLOW"] = "30"
-    env["OTP_TEST_ECHO"] = "true"
+    env["RAZORPAY_TEST_MODE"] = "true"
+    env["RAZORPAY_KEY_ID"] = ""
+    env["RAZORPAY_KEY_SECRET"] = ""
 
     proc = subprocess.Popen(
         [

@@ -60,10 +60,11 @@ def test_universal_customer_registration_login_refresh_logout(client: TestClient
     assert p_login2.status_code == 200, p_login2.text
 
 
-def test_otp_request_and_verification(client: TestClient):
+def test_otp_request_and_verification(client: TestClient, otp_capture):
     req = client.post("/api/v1/auth/otp/request", json={"target": "+919988776655", "purpose": "guest_checkout"})
     assert req.status_code == 200
-    otp = req.json()["dev_otp"]
+    assert "dev_otp" not in req.json()
+    otp = otp_capture.latest_code("+919988776655")
     assert len(otp) == 6
 
     bad = client.post("/api/v1/auth/otp/verify", json={"target": "+919988776655", "purpose": "guest_checkout", "code": "000000"})
@@ -135,13 +136,17 @@ def test_email_otp_delivery_and_prod_sms_guard(client: TestClient, monkeypatch):
     from app.services import auth_service
 
     sent_emails = []
+    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(settings, "OTP_PROVIDER", "smtp")
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.collegebites.edu")
+    monkeypatch.setattr(settings, "OTP_EMAIL_FROM", "noreply@collegebites.edu")
+    monkeypatch.setattr(settings, "OTP_SMS_ENABLED", False)
+    monkeypatch.setattr(settings, "SMS_PROVIDER", "none")
     monkeypatch.setattr(
         auth_service,
-        "send_email",
-        lambda to_email, subject, body: sent_emails.append((to_email, subject, body)) or (True, "sent_smtp"),
+        "deliver_otp_email",
+        lambda to_email, subject, body: sent_emails.append((to_email, subject)) or (True, "smtp"),
     )
-    monkeypatch.setattr(settings, "ENVIRONMENT", "production")
-    monkeypatch.setattr(settings, "SMS_PROVIDER", "none")
 
     email_res = client.post(
         "/api/v1/auth/otp/request",
@@ -150,7 +155,7 @@ def test_email_otp_delivery_and_prod_sms_guard(client: TestClient, monkeypatch):
     assert email_res.status_code == 200, email_res.text
     payload = email_res.json()
     assert payload["delivery_channel"] == "email"
-    assert payload["dev_otp"] is None
+    assert "dev_otp" not in payload
     assert len(sent_emails) == 1
     assert sent_emails[0][0] == "student@collegebites.edu"
 
@@ -164,4 +169,4 @@ def test_email_otp_delivery_and_prod_sms_guard(client: TestClient, monkeypatch):
     caps = client.get("/api/v1/auth/otp/capabilities")
     assert caps.status_code == 200
     assert caps.json()["sms_otp_enabled"] is False
-    assert caps.json()["dev_echo_enabled"] is False
+    assert "dev_echo_enabled" not in caps.json()

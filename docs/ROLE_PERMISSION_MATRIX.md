@@ -45,4 +45,4 @@ Source of truth: [`backend/app/core/permissions.py`](../backend/app/core/permiss
    - `POST /api/v1/pickup/handover` performs atomic `WITH FOR UPDATE` transition from `READY` to `COMPLETED` and blocks duplicate handovers (`ALREADY_COLLECTED`).
 6. **Strict No-Cash / No-Refunds Policy**:
    - No role has refund permissions or refund endpoints (all refund attempts return `404`/`405`).
-   - Online-only payments (`razorpay`, `stripe`) for customer/kiosk orders; POS walk-in supports digital counter methods (`upi_pos`, `card_pos`) only.
+   - Online-only payments via Razorpay (`razorpay`) for customer/kiosk orders; POS walk-in supports digital counter methods (`upi_pos`, `card_pos`) only.

@@ -5,7 +5,6 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from app.integrations.razorpay_client import razorpay_gateway
-from app.integrations.stripe_client import stripe_gateway
 from tests.conftest import login_as
 
 
@@ -42,12 +41,12 @@ def test_webhook_tamper_logging_amount_mismatch_retry_preservation_and_auto_reco
         headers={"X-Razorpay-Signature": "forged_signature"},
     )
     assert bad_wh.status_code == 400
-    bad_stripe_wh = client.post(
-        "/api/v1/payments/stripe/webhook",
-        content=b'{"type":"payment_intent.succeeded","id":"evt_st_bad"}',
-        headers={"Stripe-Signature": "t=123,v1=forged"},
+    bad_wh_2 = client.post(
+        "/api/v1/payments/razorpay/webhook",
+        content=b'{"event":"order.paid","event_id":"evt_tamper_2"}',
+        headers={"X-Razorpay-Signature": "forged_signature_2"},
     )
-    assert bad_stripe_wh.status_code == 400
+    assert bad_wh_2.status_code == 400
 
     webhooks = client.get("/api/v1/payments/webhooks?signature_verified=false", headers=admin["headers"]).json()
     assert len(webhooks) >= 2
@@ -103,12 +102,12 @@ def test_webhook_tamper_logging_amount_mismatch_retry_preservation_and_auto_reco
     )
     assert ver.status_code == 200
 
-    # Retried order keeps previous provider_order_id history on gateway switch
+    # Retried order keeps previous provider_order_id history on fresh Razorpay order generation
     retry_ord = _create_order(client, student["headers"], main_canteen["id"], food["id"], "razorpay")
     client.post(
         f"/api/v1/payments/retry/{retry_ord['id']}",
         headers=student["headers"],
-        json={"payment_method": "stripe"},
+        json={"payment_method": "razorpay"},
     )
     # Run Auto-Reconciliation -> matches paid_ord, classifies pending & underpaid discrepancy
     run_resp = client.post(

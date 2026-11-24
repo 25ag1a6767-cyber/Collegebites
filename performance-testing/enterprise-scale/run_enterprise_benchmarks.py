@@ -132,11 +132,9 @@ from decimal import Decimal
 os.environ["DATABASE_URL"] = {STAGING_DB_URL!r}
 os.environ["REDIS_URL"] = {REDIS_URL!r}
 os.environ["RATE_LIMIT_ENABLED"] = "true"
-os.environ["OTP_TEST_ECHO"] = "true"
 os.environ["RAZORPAY_TEST_MODE"] = "true"
 os.environ["RAZORPAY_KEY_ID"] = ""
 os.environ["RAZORPAY_KEY_SECRET"] = ""
-os.environ["STRIPE_SECRET_KEY"] = ""
 
 from sqlalchemy import select, text
 from app.core.database import engine, SessionLocal
@@ -506,11 +504,9 @@ def start_uvicorn_multiworker() -> list[subprocess.Popen]:
     env["RATE_LIMIT_ENABLED"] = "true"
     env["RATE_LIMIT_DEFAULT"] = "600/minute"
     env["CACHE_ENABLED"] = "true"
-    env["OTP_TEST_ECHO"] = "true"
     env["RAZORPAY_TEST_MODE"] = "true"
     env["RAZORPAY_KEY_ID"] = ""
     env["RAZORPAY_KEY_SECRET"] = ""
-    env["STRIPE_SECRET_KEY"] = ""
     env["ANYIO_THREADPOOL_TOKENS"] = "100"
     env["PYTHONPATH"] = str(BACKEND_DIR)
 

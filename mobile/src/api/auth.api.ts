@@ -17,12 +17,12 @@ export const authApi = {
 
   requestOtp: async (payload: {
     target: string;
-    purpose: "guest_checkout" | "login" | "phone_verify" | "password_reset";
+    purpose: "register" | "guest_checkout" | "login" | "phone_verify" | "email_verify" | "password_reset";
   }) => (await mobileApi.post("/auth/otp/request", payload)).data,
 
   verifyOtp: async (payload: {
     target: string;
-    purpose: "guest_checkout" | "login" | "phone_verify" | "password_reset";
+    purpose: "register" | "guest_checkout" | "login" | "phone_verify" | "email_verify" | "password_reset";
     code: string;
   }) => (await mobileApi.post("/auth/otp/verify", payload)).data,
 

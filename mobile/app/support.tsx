@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
@@ -27,8 +27,14 @@ export default function SupportScreen() {
   const [guestPhone, setGuestPhone] = useState("");
   const [guestOtp, setGuestOtp] = useState("");
   const [guestOtpTok, setGuestOtpTok] = useState("");
-  const [devOtp, setDevOtp] = useState<string | null>(null);
+  const [otpCooldown, setOtpCooldown] = useState(0);
   const [guestTickets, setGuestTickets] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (otpCooldown <= 0) return;
+    const id = setInterval(() => setOtpCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
+    return () => clearInterval(id);
+  }, [otpCooldown]);
   const [guestMessages, setGuestMessages] = useState<any[]>([]);
   const [statusMsg, setStatusMsg] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -155,12 +161,13 @@ export default function SupportScreen() {
           <View style={{ flexDirection: "row", gap: 6 }}>
             <TextInput style={[styles.input, { flex: 1 }]} value={guestPhone} onChangeText={setGuestPhone} placeholder="Guest Phone" />
             <Pressable
-              disabled={busy || !guestPhone.trim()}
+              disabled={busy || otpCooldown > 0 || !guestPhone.trim()}
               onPress={async () => {
                 setBusy(true);
                 try {
                   const r = await authApi.requestOtp({ target: guestPhone.trim(), purpose: "guest_checkout" });
-                  setDevOtp(r.dev_otp || null);
+                  setOtpCooldown(Number(r.resend_cooldown_seconds ?? 60));
+                  if (r.message) setStatusMsg(r.message);
                 } catch (e: unknown) {
                   setStatusMsg(getMobileApiError(e));
                 } finally {
@@ -169,10 +176,9 @@ export default function SupportScreen() {
               }}
               style={[styles.btn, { paddingHorizontal: 12 }]}
             >
-              <Text style={styles.btnTxt}>Send OTP</Text>
+              <Text style={styles.btnTxt}>{otpCooldown > 0 ? `Wait ${otpCooldown}s` : "Send OTP"}</Text>
             </Pressable>
           </View>
-          {devOtp && <Text style={{ fontSize: 11, color: "#b45309" }}>Dev OTP: {devOtp}</Text>}
           <View style={{ flexDirection: "row", gap: 6 }}>
             <TextInput style={[styles.input, { flex: 1 }]} value={guestOtp} onChangeText={setGuestOtp} placeholder="6-digit OTP" maxLength={6} />
             <Pressable

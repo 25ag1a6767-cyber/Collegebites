@@ -60,14 +60,13 @@ class MealPlanUpdateIn(BaseModel):
 
 
 class MealPlanSubscribeIn(BaseModel):
-    payment_method: str = Field(default="razorpay", pattern="^(razorpay|stripe)$")
+    payment_method: str = Field(default="razorpay", pattern="^razorpay$")
 
 
 class MealPlanVerifyPaymentIn(BaseModel):
     razorpay_order_id: Optional[str] = None
     razorpay_payment_id: Optional[str] = None
     razorpay_signature: Optional[str] = None
-    stripe_payment_intent_id: Optional[str] = None
 
 
 class MealPlanRedeemIn(BaseModel):
@@ -141,7 +140,6 @@ def verify_subscription_payment(
         razorpay_order_id=payload.razorpay_order_id,
         razorpay_payment_id=payload.razorpay_payment_id,
         razorpay_signature=payload.razorpay_signature,
-        stripe_payment_intent_id=payload.stripe_payment_intent_id,
     )
 
 

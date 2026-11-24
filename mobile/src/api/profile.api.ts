@@ -40,7 +40,7 @@ export const profileApi = {
 
   subscribeMealPlan: async (
     planId: string,
-    payload: { payment_method: "razorpay" | "stripe" }
+    payload: { payment_method: "razorpay" }
   ) => (await mobileApi.post(`/meal-plans/${encodeURIComponent(planId)}/subscribe`, payload)).data,
 
   listMyMealSubscriptions: async () => (await mobileApi.get("/meal-plans/my-subscriptions")).data,
@@ -54,7 +54,7 @@ export const profileApi = {
       scheduled_prep_at: string;
       scheduled_pickup_at: string;
       pickup_arrangement?: "grouped_token" | "individual_tokens";
-      payment_method: "razorpay" | "stripe";
+      payment_method: "razorpay";
       notes?: string | null;
       items: Array<{ food_item_id: string; quantity: number }>;
     }

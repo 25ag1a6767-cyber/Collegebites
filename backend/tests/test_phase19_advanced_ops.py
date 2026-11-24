@@ -127,7 +127,19 @@ def test_multi_station_routing_kot_escpos_and_queue_controls(client: TestClient)
     )
     assert assign.status_code == 200 and assign.json()["station_id"] == st_main_id
 
-    # KOT thermal ESC/POS ticket
+    # KOT thermal ESC/POS ticket is blocked BEFORE kitchen accepts the order, then generated after acceptance
+    kot_before = client.get(
+        f"/api/v1/printing/kitchen-ticket/{order['order_number']}/escpos?width=80mm&station_id={st_main_id}",
+        headers=kitchen["headers"],
+    )
+    assert kot_before.status_code == 409
+
+    acc = client.post(
+        f"/api/v1/kitchen/orders/{order['id']}/accept",
+        headers=kitchen["headers"],
+    )
+    assert acc.status_code == 200
+
     kot = client.get(
         f"/api/v1/printing/kitchen-ticket/{order['order_number']}/escpos?width=80mm&station_id={st_main_id}",
         headers=kitchen["headers"],

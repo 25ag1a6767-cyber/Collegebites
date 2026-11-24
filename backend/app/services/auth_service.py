@@ -1,3 +1,5 @@
+import hmac
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -5,7 +7,7 @@ from uuid import UUID
 
 import jwt
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -24,8 +26,8 @@ from app.core.security import (
     sha256_hex,
     verify_password,
 )
-from app.integrations.email_provider import send_email
-from app.integrations.sms_provider import send_sms_or_whatsapp
+from app.integrations.email_provider import deliver_otp_email, resolve_email_otp_provider
+from app.integrations.sms_provider import deliver_otp_sms, resolve_sms_otp_provider
 from app.models.auth import (
     CustomerProfile,
     OTPVerification,
@@ -147,6 +149,36 @@ def register_customer(
     if not customer_role:
         raise HTTPException(status_code=500, detail="System roles not initialized")
 
+    pre_verified = False
+    if data.otp_verification_token:
+        email_ok = bool(
+            data.email
+            and validate_otp_verification_token(
+                db,
+                target=str(data.email),
+                purpose="register",
+                raw_verification_token=data.otp_verification_token,
+                consume=True,
+            )
+        )
+        phone_ok = bool(
+            not email_ok
+            and data.phone
+            and validate_otp_verification_token(
+                db,
+                target=data.phone,
+                purpose="register",
+                raw_verification_token=data.otp_verification_token,
+                consume=True,
+            )
+        )
+        if not (email_ok or phone_ok):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid, expired, or already-used registration OTP verification token",
+            )
+        pre_verified = True
+
     user = User(
         email=data.email.lower() if data.email else None,
         phone=data.phone.strip() if data.phone else None,
@@ -154,7 +186,7 @@ def register_customer(
         password_hash=hash_password(data.password),
         user_kind="customer",
         is_active=True,
-        is_verified=False,
+        is_verified=pre_verified,
     )
     db.add(user)
     db.flush()
@@ -285,7 +317,7 @@ def refresh_user_session(db: Session, raw_refresh_token: str, ip_address: Option
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token reuse detected; session revoked")
 
-    if token_rec.expires_at <= now:
+    if (_as_utc(token_rec.expires_at) or now) <= now:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
     session_rec = db.get(SessionRecord, token_rec.session_id)
@@ -345,6 +377,35 @@ def logout_session(db: Session, session_id: UUID, user_id: UUID, ip_address: Opt
     invalidate_auth_session(session_id)
 
 
+_EMAIL_RX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
+def _normalize_otp_target(raw_target: str) -> tuple[str, str]:
+    clean = (raw_target or "").strip()
+    if "@" in clean:
+        norm_email = clean.lower()
+        if not _EMAIL_RX.match(norm_email):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter a valid email address")
+        return norm_email, "email"
+
+    digits = "".join(ch for ch in clean if ch.isdigit())
+    if len(digits) == 10:
+        return f"+91{digits}", "sms"
+    if len(digits) == 12 and digits.startswith("91"):
+        return f"+{digits}", "sms"
+    if clean.startswith("+") and 8 <= len(digits) <= 15:
+        return f"+{digits}", "sms"
+    if 8 <= len(digits) <= 15:
+        return f"+{digits}", "sms"
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter a valid email address or mobile number")
+
+
 def _mask_otp_destination(dest: str) -> str:
     if "@" in dest:
         local, dom = dest.split("@", 1)
@@ -355,133 +416,316 @@ def _mask_otp_destination(dest: str) -> str:
     return f"{'*' * (len(dest) - 4)}{dest[-4:]}"
 
 
-def request_otp(db: Session, data: OTPRequest) -> OTPRequestResponse:
-    code = generate_otp_code()
-    target = data.target.strip()
+def _find_user_by_identifier(db: Session, target: str) -> Optional[User]:
+    ident = target.strip()
+    if "@" in ident:
+        return db.scalar(select(User).where(User.email == ident.lower()))
+    digits = "".join(ch for ch in ident if ch.isdigit())
+    candidates = {ident}
+    if len(digits) == 10:
+        candidates.update({digits, f"+91{digits}", f"91{digits}"})
+    elif len(digits) == 12 and digits.startswith("91"):
+        candidates.update({f"+{digits}", digits, digits[-10:]})
+    elif digits:
+        candidates.update({digits, f"+{digits}"})
+    return db.scalar(select(User).where(User.phone.in_(candidates)))
+
+
+def request_otp(
+    db: Session,
+    data: OTPRequest,
+    *,
+    ip_address: Optional[str] = None,
+    actor_user_id: Optional[UUID] = None,
+) -> OTPRequestResponse:
+    norm_target, channel = _normalize_otp_target(data.target)
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
+    expiry_secs = settings.effective_otp_expiry_seconds
+    cooldown_secs = max(0, int(settings.OTP_RESEND_COOLDOWN_SECONDS))
+
+    matched_user = _find_user_by_identifier(db, norm_target)
+    resolved_user_id = actor_user_id or (matched_user.id if matched_user else None)
+
+    if data.purpose in ("login", "password_reset"):
+        if not matched_user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No registered account found for this email or mobile number",
+            )
+        if not matched_user.is_active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is deactivated")
+    elif data.purpose == "register" and matched_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email or mobile number already exists",
+        )
+
+    # 1. Enforce resend cooldown on active / recently issued OTP for (target, purpose)
+    latest_rec = db.scalar(
+        select(OTPVerification)
+        .where(OTPVerification.target == norm_target, OTPVerification.purpose == data.purpose)
+        .order_by(OTPVerification.created_at.desc())
+    )
+    if latest_rec and cooldown_secs > 0:
+        avail_at = _as_utc(latest_rec.resend_available_at) or (
+            (_as_utc(latest_rec.created_at) or now) + timedelta(seconds=cooldown_secs)
+        )
+        if avail_at > now and latest_rec.verified_at is None:
+            wait_secs = max(1, int((avail_at - now).total_seconds() + 0.999))
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {wait_secs}s before requesting another OTP.",
+                headers={"Retry-After": str(wait_secs)},
+            )
+
+    # 2. Enforce 15-minute sliding window rate limits by destination, IP, and account
+    window_since = now - timedelta(minutes=15)
+    dest_count = (
+        db.scalar(
+            select(func.count(OTPVerification.id)).where(
+                OTPVerification.target == norm_target,
+                OTPVerification.created_at >= window_since,
+            )
+        )
+        or 0
+    )
+    if dest_count >= settings.OTP_RATE_LIMIT_PER_DEST_15M:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many OTP requests for this destination. Please wait 15 minutes before trying again.",
+        )
+
+    if ip_address and ip_address not in ("unknown", ""):
+        ip_count = (
+            db.scalar(
+                select(func.count(OTPVerification.id)).where(
+                    OTPVerification.ip_address == ip_address,
+                    OTPVerification.created_at >= window_since,
+                )
+            )
+            or 0
+        )
+        if ip_count >= settings.OTP_RATE_LIMIT_PER_IP_15M:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many OTP requests from this network address. Please try again later.",
+            )
+
+    if resolved_user_id:
+        user_count = (
+            db.scalar(
+                select(func.count(OTPVerification.id)).where(
+                    OTPVerification.user_id == resolved_user_id,
+                    OTPVerification.created_at >= window_since,
+                )
+            )
+            or 0
+        )
+        if user_count >= settings.OTP_RATE_LIMIT_PER_USER_15M:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many OTP requests for this account. Please try again later.",
+            )
+
+    # 3. Verify live provider configuration BEFORE generating or storing an OTP
+    if channel == "email":
+        active_provider = resolve_email_otp_provider()
+        if not active_provider:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email OTP delivery is temporarily unavailable because no transactional email provider is configured.",
+            )
+    else:
+        active_provider = resolve_sms_otp_provider()
+        if not active_provider:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="SMS OTP delivery is currently disabled. Please use your email address for verification.",
+            )
+
+    # 4. Generate cryptographically secure 6-digit OTP and deliver via real provider
+    code = generate_otp_code()
+    expiry_mins_display = max(1, round(expiry_secs / 60))
+    purpose_label = data.purpose.replace("_", " ")
+
+    if channel == "email":
+        subject = "CollegeBites Verification Code (OTP)"
+        body = (
+            f"Your CollegeBites verification code for {purpose_label} is: {code}\n\n"
+            f"This one-time code expires in {expiry_mins_display} minute(s). "
+            "Never share this verification code with anyone."
+        )
+        delivered, provider_detail = deliver_otp_email(norm_target, subject, body)
+    else:
+        sms_text = (
+            f"Your CollegeBites verification code for {purpose_label} is {code}. "
+            f"Valid for {expiry_mins_display} min. Do not share."
+        )
+        delivered, provider_detail = deliver_otp_sms(norm_target, sms_text)
+
+    masked = _mask_otp_destination(norm_target)
+    if not delivered:
+        record_audit_log(
+            db,
+            action="otp.delivery_failed",
+            entity_type="otp_verification",
+            entity_id=masked,
+            actor_user_id=resolved_user_id,
+            ip_address=ip_address,
+            details={"purpose": data.purpose, "channel": channel, "reason": provider_detail},
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not deliver verification code via provider. Please verify the address or try again shortly.",
+        )
+
+    # 5. Invalidate any previous active unverified OTPs for this (target, purpose)
+    prior_unverified = db.scalars(
+        select(OTPVerification).where(
+            OTPVerification.target == norm_target,
+            OTPVerification.purpose == data.purpose,
+            OTPVerification.verified_at.is_(None),
+            OTPVerification.invalidated_at.is_(None),
+        )
+    ).all()
+    for prev in prior_unverified:
+        prev.invalidated_at = now
 
     otp_rec = OTPVerification(
-        target=target,
+        user_id=resolved_user_id,
+        target=norm_target,
         purpose=data.purpose,
-        otp_hash=hash_otp(target, data.purpose, code),
+        channel=channel,
+        provider=provider_detail,
+        ip_address=ip_address,
+        otp_hash=hash_otp(norm_target, data.purpose, code),
         attempts=0,
         max_attempts=settings.OTP_MAX_ATTEMPTS,
-        expires_at=expires_at,
+        resend_available_at=now + timedelta(seconds=cooldown_secs),
+        expires_at=now + timedelta(seconds=expiry_secs),
     )
     db.add(otp_rec)
-    db.flush()
-
-    subject = "CollegeBites Verification Code (OTP)"
-    body = (
-        f"Your CollegeBites verification code for {data.purpose.replace('_', ' ')} is: {code}\n\n"
-        f"This code expires in {settings.OTP_EXPIRY_MINUTES} minutes. Never share your OTP with anyone."
+    record_audit_log(
+        db,
+        action="otp.sent",
+        entity_type="otp_verification",
+        entity_id=masked,
+        actor_user_id=resolved_user_id,
+        ip_address=ip_address,
+        details={"purpose": data.purpose, "channel": channel, "provider": provider_detail},
     )
-    allow_dev_echo = bool(not settings.is_production and settings.OTP_TEST_ECHO)
+    db.commit()
 
-    if "@" in target:
-        ok, status_detail = send_email(target, subject, body)
-        if not ok:
-            db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Could not deliver OTP email ({status_detail}). Verify email address or SMTP settings.",
-            )
-        db.commit()
-        masked = _mask_otp_destination(target)
-        email_sent = status_detail in ("sent", "sent_smtp")
-        return OTPRequestResponse(
-            message=f"Verification code sent to email {masked}" if email_sent else "Verification code generated (dev log)",
-            expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
-            dev_otp=code if (allow_dev_echo and not email_sent) else None,
-            delivery_channel="email" if email_sent else "dev_echo",
-            masked_destination=masked,
-        )
-
-    # Mobile phone target: try live SMS provider first
-    if settings.SMS_PROVIDER in ("twilio", "webhook"):
-        ok, status_detail = send_sms_or_whatsapp(target, f"CollegeBites OTP: {code} (valid {settings.OTP_EXPIRY_MINUTES} min)", channel="sms")
-        if ok and status_detail.startswith("dispatched"):
-            db.commit()
-            masked = _mask_otp_destination(target)
-            return OTPRequestResponse(
-                message=f"Verification code sent via SMS to {masked}",
-                expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
-                dev_otp=None,
-                delivery_channel="sms",
-                masked_destination=masked,
-            )
-        if settings.is_production or status_detail != "logged":
-            db.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"SMS OTP delivery failed ({status_detail}). Try using your email address instead.",
-            )
-
-    # Fallback: if a registered user with this phone has an email & SMTP is configured, send real Email OTP
-    matched_user = _find_user_by_identifier(db, target)
-    if matched_user and matched_user.email and settings.SMTP_HOST:
-        ok, status_detail = send_email(matched_user.email, subject, body)
-        if ok and status_detail == "sent":
-            db.commit()
-            masked = _mask_otp_destination(matched_user.email)
-            return OTPRequestResponse(
-                message=f"SMS unavailable; verification code sent to registered email {masked}",
-                expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
-                dev_otp=None,
-                delivery_channel="email",
-                masked_destination=masked,
-            )
-
-    if allow_dev_echo:
-        send_sms_or_whatsapp(target, f"CollegeBites OTP: {code}", channel="sms")
-        db.commit()
-        return OTPRequestResponse(
-            message="Verification code generated (dev test mode)",
-            expires_in_seconds=settings.OTP_EXPIRY_MINUTES * 60,
-            dev_otp=code,
-            delivery_channel="dev_echo",
-            masked_destination=_mask_otp_destination(target),
-        )
-
-    db.rollback()
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="SMS OTP delivery is not configured for phone numbers in production. Please enter an Email address to receive your real verification code.",
+    return OTPRequestResponse(
+        message=f"Verification code sent via {channel.upper()} to {masked}",
+        expires_in_seconds=expiry_secs,
+        resend_cooldown_seconds=cooldown_secs,
+        delivery_channel=channel,
+        masked_destination=masked,
     )
 
 
-def verify_otp(db: Session, data: OTPVerifyRequest) -> OTPVerifyResponse:
-    target = data.target.strip()
+def verify_otp(
+    db: Session,
+    data: OTPVerifyRequest,
+    *,
+    consume_immediately: bool = False,
+    actor_user_id: Optional[UUID] = None,
+    ip_address: Optional[str] = None,
+) -> OTPVerifyResponse:
+    norm_target, _channel = _normalize_otp_target(data.target)
     now = datetime.now(timezone.utc)
+    masked = _mask_otp_destination(norm_target)
+
     otp_rec = db.scalar(
         select(OTPVerification)
         .where(
-            OTPVerification.target == target,
+            OTPVerification.target == norm_target,
             OTPVerification.purpose == data.purpose,
-            OTPVerification.verified_at.is_(None),
         )
         .order_by(OTPVerification.created_at.desc())
         .with_for_update()
     )
-    if not otp_rec:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No pending OTP request found")
+    if (
+        not otp_rec
+        or otp_rec.verified_at is not None
+        or otp_rec.consumed_at is not None
+        or otp_rec.invalidated_at is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active pending OTP found or code was already used. Please request a new OTP.",
+        )
 
-    if otp_rec.expires_at <= now:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP has expired")
+    exp_at = _as_utc(otp_rec.expires_at)
+    if exp_at is not None and exp_at <= now:
+        otp_rec.invalidated_at = now
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP has expired. Please request a new verification code.",
+        )
 
     if otp_rec.attempts >= otp_rec.max_attempts:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Maximum OTP attempts exceeded")
+        otp_rec.invalidated_at = otp_rec.invalidated_at or now
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Maximum OTP verification attempts exceeded. Please request a new code.",
+        )
+
+    if otp_rec.user_id and actor_user_id and otp_rec.user_id != actor_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="OTP does not belong to this account")
 
     otp_rec.attempts += 1
-    expected_hash = hash_otp(target, data.purpose, data.code.strip())
-    if otp_rec.otp_hash != expected_hash:
+    expected_hash = hash_otp(norm_target, data.purpose, data.code.strip())
+    if not hmac.compare_digest(otp_rec.otp_hash, expected_hash):
+        exhausted = otp_rec.attempts >= otp_rec.max_attempts
+        if exhausted:
+            otp_rec.invalidated_at = now
+        record_audit_log(
+            db,
+            action="otp.verify_failed",
+            entity_type="otp_verification",
+            entity_id=masked,
+            actor_user_id=actor_user_id or otp_rec.user_id,
+            ip_address=ip_address,
+            details={"purpose": data.purpose, "attempts": otp_rec.attempts, "exhausted": exhausted},
+        )
         db.commit()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid OTP code")
+        if exhausted:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Maximum OTP verification attempts exceeded. Code invalidated; please request a new OTP.",
+            )
+        remaining = max(0, otp_rec.max_attempts - otp_rec.attempts)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid OTP code ({remaining} attempt(s) remaining).",
+        )
 
-    verification_token = f"OTPVER.{secrets.token_urlsafe(24)}"
     otp_rec.verified_at = now
-    otp_rec.verification_token = sha256_hex(verification_token)
+    if actor_user_id and not otp_rec.user_id:
+        otp_rec.user_id = actor_user_id
+
+    if consume_immediately:
+        otp_rec.consumed_at = now
+        otp_rec.verification_token = None
+        verification_token = ""
+    else:
+        verification_token = f"OTPVER.{secrets.token_urlsafe(24)}"
+        otp_rec.verification_token = sha256_hex(verification_token)
+
+    record_audit_log(
+        db,
+        action="otp.verified",
+        entity_type="otp_verification",
+        entity_id=masked,
+        actor_user_id=actor_user_id or otp_rec.user_id,
+        ip_address=ip_address,
+        details={"purpose": data.purpose, "consumed_immediately": consume_immediately},
+    )
     db.commit()
 
     return OTPVerifyResponse(
@@ -491,30 +735,79 @@ def verify_otp(db: Session, data: OTPVerifyRequest) -> OTPVerifyResponse:
     )
 
 
-def validate_guest_otp_token(db: Session, target: str, raw_verification_token: Optional[str]) -> bool:
-    if not raw_verification_token:
+def validate_otp_verification_token(
+    db: Session,
+    *,
+    target: str,
+    purpose: str,
+    raw_verification_token: Optional[str],
+    user_id: Optional[UUID] = None,
+    consume: bool = False,
+) -> bool:
+    if not raw_verification_token or not target:
         return False
+    try:
+        norm_target, _ = _normalize_otp_target(target)
+    except HTTPException:
+        return False
+
     token_hash = sha256_hex(raw_verification_token.strip())
-    rec = db.scalar(
-        select(OTPVerification).where(
-            OTPVerification.target == target.strip(),
-            OTPVerification.purpose == "guest_checkout",
-            OTPVerification.verification_token == token_hash,
+    stmt = (
+        select(OTPVerification)
+        .where(
+            OTPVerification.target == norm_target,
+            OTPVerification.purpose == purpose,
             OTPVerification.verified_at.is_not(None),
+            OTPVerification.consumed_at.is_(None),
+            OTPVerification.invalidated_at.is_(None),
         )
+        .order_by(OTPVerification.verified_at.desc())
     )
-    if not rec or not rec.verified_at:
+    if consume:
+        stmt = stmt.with_for_update()
+
+    rec = db.scalar(stmt)
+    if not rec or not rec.verification_token or not rec.verified_at:
         return False
-    return (datetime.now(timezone.utc) - rec.verified_at) <= timedelta(minutes=30)
+    if not hmac.compare_digest(rec.verification_token, token_hash):
+        return False
+    if rec.user_id and user_id and rec.user_id != user_id:
+        return False
+
+    now = datetime.now(timezone.utc)
+    ver_at = _as_utc(rec.verified_at) or now
+    if (now - ver_at) > timedelta(minutes=30):
+        return False
+
+    if consume:
+        rec.consumed_at = now
+        rec.verification_token = None
+    return True
 
 
-def _find_user_by_identifier(db: Session, target: str) -> Optional[User]:
-    ident = target.strip()
-    return db.scalar(select(User).where(or_(User.email == ident.lower(), User.phone == ident)))
+def validate_guest_otp_token(
+    db: Session,
+    target: str,
+    raw_verification_token: Optional[str],
+    *,
+    consume: bool = False,
+) -> bool:
+    return validate_otp_verification_token(
+        db,
+        target=target,
+        purpose="guest_checkout",
+        raw_verification_token=raw_verification_token,
+        consume=consume,
+    )
 
 
 def login_with_otp(db: Session, data: OTPLoginRequest, ip_address: Optional[str] = None) -> TokenResponse:
-    verify_otp(db, OTPVerifyRequest(target=data.target, purpose="login", code=data.code))
+    verify_otp(
+        db,
+        OTPVerifyRequest(target=data.target, purpose="login", code=data.code),
+        consume_immediately=True,
+        ip_address=ip_address,
+    )
     user = _find_user_by_identifier(db, data.target)
     if not user:
         raise HTTPException(status_code=404, detail="No account registered with this email or mobile number")
@@ -533,16 +826,62 @@ def login_with_otp(db: Session, data: OTPLoginRequest, ip_address: Optional[str]
     return _issue_session_tokens(db, user, device_info=data.device_info, ip_address=ip_address)
 
 
-def verify_phone_with_otp(db: Session, user: User, code: str, target: Optional[str] = None) -> UserOut:
+def verify_phone_with_otp(
+    db: Session,
+    user: User,
+    code: str,
+    target: Optional[str] = None,
+    ip_address: Optional[str] = None,
+) -> UserOut:
     phone_target = (target or user.phone or "").strip()
     if not phone_target:
         raise HTTPException(status_code=400, detail="Mobile number is required to verify phone")
-    verify_otp(db, OTPVerifyRequest(target=phone_target, purpose="phone_verify", code=code))
-    if phone_target != user.phone:
-        conflict = db.scalar(select(User).where(User.phone == phone_target, User.id != user.id))
+    norm_phone, ch = _normalize_otp_target(phone_target)
+    if ch != "sms":
+        raise HTTPException(status_code=400, detail="Enter a valid mobile number for phone verification")
+    verify_otp(
+        db,
+        OTPVerifyRequest(target=norm_phone, purpose="phone_verify", code=code),
+        consume_immediately=True,
+        actor_user_id=user.id,
+        ip_address=ip_address,
+    )
+    if norm_phone != user.phone:
+        conflict = db.scalar(select(User).where(User.phone.in_({norm_phone, phone_target}), User.id != user.id))
         if conflict:
             raise HTTPException(status_code=409, detail="Mobile number already linked to another account")
-        user.phone = phone_target
+        user.phone = norm_phone
+    user.is_verified = True
+    db.commit()
+    db.refresh(user)
+    return build_user_out(db, user)
+
+
+def verify_email_with_otp(
+    db: Session,
+    user: User,
+    code: str,
+    target: Optional[str] = None,
+    ip_address: Optional[str] = None,
+) -> UserOut:
+    email_target = (target or user.email or "").strip().lower()
+    if not email_target:
+        raise HTTPException(status_code=400, detail="Email address is required to verify email")
+    norm_email, ch = _normalize_otp_target(email_target)
+    if ch != "email":
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    verify_otp(
+        db,
+        OTPVerifyRequest(target=norm_email, purpose="email_verify", code=code),
+        consume_immediately=True,
+        actor_user_id=user.id,
+        ip_address=ip_address,
+    )
+    if norm_email != user.email:
+        conflict = db.scalar(select(User).where(User.email == norm_email, User.id != user.id))
+        if conflict:
+            raise HTTPException(status_code=409, detail="Email address already linked to another account")
+        user.email = norm_email
     user.is_verified = True
     db.commit()
     db.refresh(user)
@@ -594,7 +933,12 @@ def change_user_password(
 
 
 def confirm_password_reset(db: Session, data: PasswordResetConfirmRequest, ip_address: Optional[str] = None) -> None:
-    verify_otp(db, OTPVerifyRequest(target=data.target, purpose="password_reset", code=data.code))
+    verify_otp(
+        db,
+        OTPVerifyRequest(target=data.target, purpose="password_reset", code=data.code),
+        consume_immediately=True,
+        ip_address=ip_address,
+    )
     user = _find_user_by_identifier(db, data.target)
     if not user:
         raise HTTPException(status_code=404, detail="No matching account found")

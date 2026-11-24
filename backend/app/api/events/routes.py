@@ -71,7 +71,7 @@ class BulkOrderCreateIn(BaseModel):
     scheduled_prep_at: datetime
     scheduled_pickup_at: datetime
     pickup_arrangement: str = Field(default="grouped_token", pattern="^(grouped_token|individual_tokens)$")
-    payment_method: str = Field(default="razorpay", pattern="^(razorpay|stripe)$")
+    payment_method: str = Field(default="razorpay", pattern="^razorpay$")
     notes: Optional[str] = Field(default=None, max_length=500)
     items: list[BulkOrderItemIn] = Field(min_length=1)
 
@@ -85,7 +85,6 @@ class BulkOrderVerifyPaymentIn(BaseModel):
     razorpay_order_id: Optional[str] = None
     razorpay_payment_id: Optional[str] = None
     razorpay_signature: Optional[str] = None
-    stripe_payment_intent_id: Optional[str] = None
 
 
 class BulkOrderStatusIn(BaseModel):
@@ -199,7 +198,6 @@ def verify_bulk_order_payment(
         razorpay_order_id=payload.razorpay_order_id,
         razorpay_payment_id=payload.razorpay_payment_id,
         razorpay_signature=payload.razorpay_signature,
-        stripe_payment_intent_id=payload.stripe_payment_intent_id,
     )
 
 

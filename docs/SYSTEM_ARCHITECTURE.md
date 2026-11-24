@@ -5,7 +5,7 @@
 - **Zero Fake Data Policy:** Every dashboard metric, analytics figure, compliance statistic, queue wait estimate, forecast, and AI assistant response is backed strictly by real database records, explicitly classified as `actual`, `calculated`, `estimated`, `ai_predicted`, `unavailable`, or `policy_restricted`.
 - **Financial & Pricing Invariants:**
   - Exact listed item pricing (`subtotal == total`, zero discounts, zero coupons, zero additional checkout tax; statutory tax-inclusive notice on receipts & invoices).
-  - Online-only payments (`razorpay`, `stripe`) and digital counter terminals (`upi_pos`, `card_pos`); cash and pay-at-pickup are disabled.
+  - Online-only payments via Razorpay (`razorpay`) and digital counter terminals (`upi_pos`, `card_pos`); cash and pay-at-pickup are disabled.
   - Strict no-refund policy; confirmed orders preserve immutable payment & ledger records.
   - Automated reordering generates **Draft** Purchase Orders only and never auto-approves or transfers money.
 
@@ -19,7 +19,7 @@
                           │
                           ▼
 [FastAPI Application (35 Routers, 407 Routes under /api/v1)]
- ├── Core Ordering, Exact Pricing & Online Payments (Razorpay / Stripe HMAC & Webhooks)
+ ├── Core Ordering, Exact Pricing & Online Payments (Razorpay HMAC, Status Sync & Webhooks)
  ├── QR/Token Engine, Digital Token Board & Thermal ESC/POS Printing
  ├── Smart Queue Prediction & Accuracy History Engine
  ├── Notification & Communication Center (In-App, Email SMTP, SMS/WhatsApp, Web Push, Delivery Audit)
@@ -44,7 +44,7 @@ All enterprise modules extend existing authoritative entities rather than duplic
 - **Production:** Extends `Recipe` (`is_verified`, `verified_by_user_id`, `verified_at`) and connects `ProductionPlan`, `ProductionBatch`, `ProductionBatchIngredient`, and `ProductionQualityCheck` directly to existing `FoodItem`, `StockBatch`, and `WastageRecord`.
 - **Notifications:** Extends `Notification` (`event_id`, `category`, `priority`, `last_error`, `delivered_at`) and adds `NotificationDelivery` for per-channel masked-PII tracking and retries.
 - **Queue Accuracy, ML & Assistant:** Adds `QueueEstimateHistory`, `ForecastModel`, `DemandForecast`, `ForecastEvaluation`, `AIAssistantConversation`, `AIAssistantMessage`, and `AIAssistantAuditLog`.
-- **Alembic Migration Head:** `e5f6a7b8c9d0` (`e5f6a7b8c9d0_enterprise_modules_and_sequences.py`), chaining cleanly off `d4e5f6a7b8c9`.
+- **Alembic Migration Head:** `f6a7b8c9d0e1` (`f6a7b8c9d0e1_razorpay_only_and_live_otp.py`), chaining cleanly off `e5f6a7b8c9d0`.
 
 ## 4. Connected 15-Step End-to-End Operational Workflow
-1. Vendor registered (`Supplier`) → 2. Purchase Order created (`draft`) → 3. Manager approves & orders PO → 4. Verified Goods Receipt (`GRN`) creates traceable `StockBatch` + `TraceabilityRecord` → 5. Batch expiry & quality tracked under Food Safety → 6. Verified `Recipe` linked to `FoodItem` → 7. Production Planning compares confirmed orders, event bulk orders, and AI forecast separately (no double-counting) → 8. `ProductionBatch` atomically allocates ingredients via FIFO/FEFO (blocking expired/recalled batches) → 9. Mandatory Quality Control check recorded before completion → 10. Customer checks out at exact listed price via Razorpay/Stripe → 11. Lock-free order/invoice sequence + QR token + `QueueEstimateHistory` snapshot + notifications → 12. Kitchen prepares via Order/Item-Grouped KDS and marks `READY` (finalizing queue accuracy) → 13. Pickup staff verifies QR & hands over → 14. Reordering & ML Demand Forecasting detect upcoming deficits and generate Draft POs → 15. BI Analytics & Role-Aware AI Assistant report verified revenue, direct costs, safety compliance, and forecasts.
+1. Vendor registered (`Supplier`) → 2. Purchase Order created (`draft`) → 3. Manager approves & orders PO → 4. Verified Goods Receipt (`GRN`) creates traceable `StockBatch` + `TraceabilityRecord` → 5. Batch expiry & quality tracked under Food Safety → 6. Verified `Recipe` linked to `FoodItem` → 7. Production Planning compares confirmed orders, event bulk orders, and AI forecast separately (no double-counting) → 8. `ProductionBatch` atomically allocates ingredients via FIFO/FEFO (blocking expired/recalled batches) → 9. Mandatory Quality Control check recorded before completion → 10. Customer checks out at exact listed price via Razorpay → 11. Lock-free order/invoice sequence + QR token + customer receipt & print job + `QueueEstimateHistory` snapshot + notifications → 12. Kitchen accepts order (generating KOT print job), prepares via Order/Item-Grouped KDS, and marks `READY` (finalizing queue accuracy) → 13. Pickup staff verifies QR & confirmed payment and hands over → 14. Reordering & ML Demand Forecasting detect upcoming deficits and generate Draft POs → 15. BI Analytics & Role-Aware AI Assistant report verified revenue, direct costs, safety compliance, and forecasts.

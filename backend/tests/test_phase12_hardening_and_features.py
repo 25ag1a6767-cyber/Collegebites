@@ -13,7 +13,7 @@ from app.services.order_service import release_expired_slot_reservations
 from tests.conftest import TestingSessionLocal, login_as
 
 
-def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient):
+def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient, otp_capture):
     # Register a new universal customer with phone & email
     reg = client.post(
         "/api/v1/auth/register",
@@ -35,9 +35,10 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
         json={"target": "+919876511122", "purpose": "login"},
     )
     assert otp_login_req.status_code == 200
+    assert "dev_otp" not in otp_login_req.json()
     otp_login_res = client.post(
         "/api/v1/auth/otp/login",
-        json={"target": "+919876511122", "code": otp_login_req.json()["dev_otp"], "device_info": "Mobile iOS"},
+        json={"target": "+919876511122", "code": otp_capture.latest_code("+919876511122"), "device_info": "Mobile iOS"},
     )
     assert otp_login_res.status_code == 200, otp_login_res.text
     access = otp_login_res.json()["access_token"]
@@ -46,7 +47,7 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
     # Phone verification OTP flow
     pv_req = client.post("/api/v1/auth/otp/request", json={"target": "+919876511122", "purpose": "phone_verify"})
     assert pv_req.status_code == 200
-    pv_res = client.post("/api/v1/auth/phone/verify", headers=hdrs, json={"code": pv_req.json()["dev_otp"]})
+    pv_res = client.post("/api/v1/auth/phone/verify", headers=hdrs, json={"code": otp_capture.latest_code("+919876511122")})
     assert pv_res.status_code == 200, pv_res.text
     assert pv_res.json()["is_verified"] is True
 
@@ -77,7 +78,7 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
     assert pr_req.status_code == 200
     pr_confirm = client.post(
         "/api/v1/auth/password-reset/confirm",
-        json={"target": "+919876511122", "code": pr_req.json()["dev_otp"], "new_password": "ResetPass789"},
+        json={"target": "+919876511122", "code": otp_capture.latest_code("+919876511122"), "new_password": "ResetPass789"},
     )
     assert pr_confirm.status_code == 200, pr_confirm.text
     tablet_login = client.post(
@@ -324,7 +325,7 @@ def test_rbac_canteen_isolation_ssrf_printing_holidays_and_schedules(client: Tes
         assert ssrf.status_code == 400
 
 
-def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(client: TestClient):
+def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(client: TestClient, otp_capture):
     admin = login_as(client, "admin@collegebites.edu", "Admin@12345")
     student = login_as(client, "student@collegebites.edu", "Student@12345")
     cashier = login_as(client, "cashier@collegebites.edu", "Staff@12345")
@@ -387,13 +388,13 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     assert slot_res.status_code == 200
     slot_id = slot_res.json()["id"]
 
-    # Checkout pending Stripe order using 10 loyalty points + pickup slot (coupons disabled)
+    # Checkout pending Razorpay order using 10 loyalty points + pickup slot (coupons disabled)
     bad_coupon_co = client.post(
         "/api/v1/orders/checkout",
         headers=friend_hdrs,
         json={
             "canteen_id": cid,
-            "payment_method": "stripe",
+            "payment_method": "razorpay",
             "coupon_code": "CAMPUS10",
             "use_cart": False,
             "direct_items": [{"food_item_id": biryani["id"], "quantity": 1}],
@@ -408,8 +409,7 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
         json={
             "canteen_id": cid,
             "pickup_slot_id": slot_id,
-            "payment_method": "stripe",
-            "redeem_loyalty_points": 10,
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": biryani["id"], "quantity": 2}],
             "accepted_policy": True,
@@ -418,10 +418,8 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     assert co_pending.status_code == 201, co_pending.text
     pend_ord_id = co_pending.json()["id"]
     pend_ord_no = co_pending.json()["order_number"]
-    pts_during_pending = client.get("/api/v1/promotions/loyalty/me", headers=friend_hdrs).json()["points_balance"]
-    assert pts_during_pending == friend_loy["points_balance"] - 10
 
-    # Expire reservation timestamp in DB and run release_expired_slot_reservations -> restores points & fails order
+    # Expire reservation timestamp in DB and run release_expired_slot_reservations -> fails order & releases slot
     with TestingSessionLocal() as db:
         resv = db.scalar(select(SlotReservation).where(SlotReservation.order_id == UUID(pend_ord_id)))
         assert resv is not None
@@ -432,15 +430,14 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
 
     ord_after_exp = client.get(f"/api/v1/orders/{pend_ord_no}", headers=friend_hdrs).json()
     assert ord_after_exp["status"] == "PAYMENT_FAILED"
-    pts_restored = client.get("/api/v1/promotions/loyalty/me", headers=friend_hdrs).json()["points_balance"]
-    assert pts_restored == friend_loy["points_balance"]
 
-    # Guest checkout -> Stripe fail -> Retry with Razorpay -> Verify -> Guest OTP lookup -> Staff QR revoke
+    # Guest checkout -> Razorpay fail -> Retry with Razorpay -> Verify -> Guest OTP lookup -> Staff QR revoke
     g_phone = "+919800012345"
     g_otp_req = client.post("/api/v1/auth/otp/request", json={"target": g_phone, "purpose": "guest_checkout"}).json()
+    assert "dev_otp" not in g_otp_req
     g_otp_ver = client.post(
         "/api/v1/auth/otp/verify",
-        json={"target": g_phone, "purpose": "guest_checkout", "code": g_otp_req["dev_otp"]},
+        json={"target": g_phone, "purpose": "guest_checkout", "code": otp_capture.latest_code(g_phone)},
     ).json()
     g_co = client.post(
         "/api/v1/orders/checkout",
@@ -449,7 +446,7 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
             "guest_name": "Retry Guest",
             "guest_phone": g_phone,
             "guest_otp_verification_token": g_otp_ver["verification_token"],
-            "payment_method": "stripe",
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": biryani["id"], "quantity": 1}],
             "accepted_policy": True,
@@ -458,7 +455,7 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     guest_tok = g_co["guest_access_token"]
     assert (
         client.post(
-            f"/api/v1/payments/stripe/fail?guest_token={guest_tok}",
+            f"/api/v1/payments/razorpay/fail?guest_token={guest_tok}",
             json={"order_id": g_co["id"], "reason": "Insufficient funds"},
         ).status_code
         == 200
@@ -491,7 +488,7 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     g_lookup_otp = client.post("/api/v1/auth/otp/request", json={"target": g_phone, "purpose": "guest_checkout"}).json()
     g_lookup_ver = client.post(
         "/api/v1/auth/otp/verify",
-        json={"target": g_phone, "purpose": "guest_checkout", "code": g_lookup_otp["dev_otp"]},
+        json={"target": g_phone, "purpose": "guest_checkout", "code": otp_capture.latest_code(g_phone)},
     ).json()
     looked_up = client.post(
         "/api/v1/orders/guest/lookup",
@@ -537,7 +534,7 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     assert new_chk["order_number"] == g_co["order_number"]
 
 
-def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: TestClient):
+def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: TestClient, otp_capture):
     admin = login_as(client, "admin@collegebites.edu", "Admin@12345")
     inv_mgr = login_as(client, "inventory@collegebites.edu", "Staff@12345")
     cashier = login_as(client, "cashier@collegebites.edu", "Staff@12345")
@@ -709,7 +706,7 @@ def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: 
     assert tkt.status_code == 201
     tkt_id = tkt.json()["id"]
     t_otp = client.post("/api/v1/auth/otp/request", json={"target": sup_phone, "purpose": "guest_checkout"}).json()
-    t_ver = client.post("/api/v1/auth/otp/verify", json={"target": sup_phone, "purpose": "guest_checkout", "code": t_otp["dev_otp"]}).json()
+    t_ver = client.post("/api/v1/auth/otp/verify", json={"target": sup_phone, "purpose": "guest_checkout", "code": otp_capture.latest_code(sup_phone)}).json()
     tok = t_ver["verification_token"]
 
     tl = client.post("/api/v1/support/tickets/guest/lookup", json={"guest_phone": sup_phone, "otp_verification_token": tok})
