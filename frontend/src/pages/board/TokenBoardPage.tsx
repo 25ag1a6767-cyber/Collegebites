@@ -79,7 +79,13 @@ export const TokenBoardPage: React.FC = () => {
     },
     staleTime: 0,
     retry: false,
-    refetchInterval: () => (typeof navigator !== "undefined" && navigator.onLine === false ? false : 1000),
+    // Keep instant <1s updates via SSE push when live (with 5s safety sync), and 1s polling fallback if SSE drops
+    refetchInterval: () =>
+      typeof navigator !== "undefined" && navigator.onLine === false
+        ? false
+        : syncStatus === "live"
+        ? 5000
+        : 1000,
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,

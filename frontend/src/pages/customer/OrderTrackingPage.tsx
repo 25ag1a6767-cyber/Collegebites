@@ -67,8 +67,12 @@ export const OrderTrackingPage: React.FC = () => {
   const realtimeLiveRef = useRef(false);
   const prevTrackStateRef = useRef<{ status: string; delayed: number } | null>(null);
 
+  const terminalStatusRef = useRef(false);
+
   useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    const id = setInterval(() => {
+      if (!terminalStatusRef.current) setNowMs(Date.now());
+    }, 1000);
     return () => clearInterval(id);
   }, []);
   const effectiveToken = guestToken || manualGuestToken || undefined;
@@ -81,12 +85,21 @@ export const OrderTrackingPage: React.FC = () => {
       fetchWithOfflineCache(`order:${orderNumber}`, async () =>
         (await api.get(`/orders/${orderNumber}${querySuffix}`)).data
       ),
-    refetchInterval: () => (!isOnline ? false : realtimeLiveRef.current ? 30000 : 5000),
-    refetchIntervalInBackground: true,
+    refetchInterval: (query) => {
+      const st = query.state.data?.status;
+      if (st && ["COMPLETED", "CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(st)) return false;
+      return !isOnline ? false : realtimeLiveRef.current ? 30000 : 5000;
+    },
+    refetchIntervalInBackground: false,
   });
 
+  const isTerminalOrder = Boolean(
+    order?.status && ["COMPLETED", "CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(order.status)
+  );
+  terminalStatusRef.current = isTerminalOrder;
+
   const { status: orderSyncStatus, lastSyncedAt: orderLastSyncedAt } = useRealtimeSync<{ order?: Order }>({
-    enabled: Boolean(order?.id && (accessToken || effectiveToken)),
+    enabled: Boolean(order?.id && !isTerminalOrder && (accessToken || effectiveToken)),
     ssePath: order?.id ? `/realtime/orders/${order.id}/stream${querySuffix}` : null,
     wsPath: order?.id ? `/ws/orders/${order.id}` : null,
     wsGuestToken: effectiveToken,

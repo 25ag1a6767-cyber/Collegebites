@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ClipboardList, Flame, PackageCheck, Play, Search, ShieldCheck } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
+import { useDebouncedValue } from "../../../hooks/useDebouncedValue";
 import { useRealtimeSync } from "../../../hooks/useRealtimeSync";
 import { useAppStore } from "../../../store/useAppStore";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../../components/ui/Primitives";
@@ -14,6 +15,7 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
   const { user } = useAppStore();
   const [statusFilter, setStatusFilter] = useState("");
   const [orderSearch, setOrderSearch] = useState("");
+  const debouncedOrderSearch = useDebouncedValue(orderSearch, 300);
   const [userKindFilter, setUserKindFilter] = useState("");
   const [scopeCanteenOnly, setScopeCanteenOnly] = useState(false);
   const [roleEdits, setRoleEdits] = useState<Record<string, string>>({});
@@ -34,7 +36,7 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
   const streamParams = new URLSearchParams();
   if (effectiveStreamCanteen) streamParams.set("canteen_id", effectiveStreamCanteen);
   if (statusFilter) streamParams.set("status", statusFilter);
-  if (orderSearch.trim()) streamParams.set("q", orderSearch.trim());
+  if (debouncedOrderSearch.trim()) streamParams.set("q", debouncedOrderSearch.trim());
   const streamSuffix = streamParams.toString() ? `?${streamParams.toString()}` : "";
 
   const { status: syncStatus, lastSyncedAt, triggerSync } = useRealtimeSync<{ orders?: any[] }>({
@@ -45,7 +47,7 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
     onSnapshot: (snap) => {
       if (snap?.orders) {
         qc.setQueryData(
-          ["admin-all-orders", activeCanteenId, statusFilter, orderSearch, scopeCanteenOnly],
+          ["admin-all-orders", activeCanteenId, statusFilter, debouncedOrderSearch, scopeCanteenOnly],
           snap.orders
         );
       }
@@ -55,17 +57,17 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
   });
 
   const { data: orders = [], refetch: refetchOrders } = useQuery<any[]>({
-    queryKey: ["admin-all-orders", activeCanteenId, statusFilter, orderSearch, scopeCanteenOnly],
+    queryKey: ["admin-all-orders", activeCanteenId, statusFilter, debouncedOrderSearch, scopeCanteenOnly],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (scopeCanteenOnly && activeCanteenId) params.set("canteen_id", activeCanteenId);
       if (statusFilter) params.set("status", statusFilter);
-      if (orderSearch.trim()) params.set("q", orderSearch.trim());
+      if (debouncedOrderSearch.trim()) params.set("q", debouncedOrderSearch.trim());
       params.set("limit", "100");
       return (await api.get(`/admin/orders?${params.toString()}`)).data;
     },
     refetchInterval: syncStatus === "live" ? 30000 : 5000,
-    refetchIntervalInBackground: true,
+    refetchIntervalInBackground: false,
   });
 
   const runOrderStage = async (

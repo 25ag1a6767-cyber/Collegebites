@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.cache import NS_BOARD, cache_manager
 from app.core.security import sha256_hex, verify_signed_qr_token_format
 from app.core.time_utils import today_college
 from app.models.auth import User
@@ -373,6 +374,12 @@ def _build_board_item_summaries(db: Session, order_ids: list[UUID]) -> dict[UUID
 
 def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> DigitalBoardResponse:
     """Publicly safe display board for TV/Monitor — preserves token sequence and never exposes PII."""
+    cache_ns = f"{NS_BOARD}:{canteen_id}" if canteen_id is not None else NS_BOARD
+    cache_key = f"digital:{canteen_id or 'all'}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=1.0)
+    if hit and isinstance(cached, dict):
+        return DigitalBoardResponse.model_validate(cached)
+
     canteen_name = "All Campus Canteens"
     if canteen_id is not None:
         canteen = db.get(Canteen, canteen_id)
@@ -478,7 +485,7 @@ def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> D
         fingerprint_parts.append(f"{row[5]}:{row[7]}:{row[10]}:{upd}:{row[0]}")
     version = sha256_hex("|".join(fingerprint_parts))[:16]
 
-    return DigitalBoardResponse(
+    board_out = DigitalBoardResponse(
         canteen_id=canteen_id,
         canteen_name=canteen_name,
         now_preparing=preparing,
@@ -487,10 +494,18 @@ def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> D
         updated_at=datetime.now(timezone.utc),
         version=version,
     )
+    cache_manager.set_json(cache_ns, cache_key, board_out.model_dump(mode="json"), ttl_seconds=3, l1_ttl=1.0)
+    return board_out
 
 
 def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) -> OperationalTokenBoardResponse:
     """Real-time 5-section operational Token Board for Canteen Managers, Kitchen & Pickup Staff."""
+    cache_ns = f"{NS_BOARD}:{canteen_id}" if canteen_id is not None else NS_BOARD
+    cache_key = f"ops:{canteen_id or 'all'}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=1.0)
+    if hit and isinstance(cached, dict):
+        return OperationalTokenBoardResponse.model_validate(cached)
+
     canteen_name = "All Campus Canteens"
     if canteen_id is not None:
         canteen = db.get(Canteen, canteen_id)
@@ -575,12 +590,17 @@ def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) 
         if customer_ids
         else {}
     )
-    stations = {s.id: s.name for s in db.scalars(select(KitchenStation)).all()}
     items_by_order: dict[UUID, list[TokenBoardOrderItemDetail]] = {}
     if order_ids:
         item_rows = db.scalars(
             select(OrderItem).where(OrderItem.order_id.in_(order_ids)).order_by(OrderItem.id.asc())
         ).all()
+        used_station_ids = list({it.station_id for it in item_rows if getattr(it, "station_id", None)})
+        stations = (
+            {s.id: s.name for s in db.scalars(select(KitchenStation).where(KitchenStation.id.in_(used_station_ids))).all()}
+            if used_station_ids
+            else {}
+        )
         for it in item_rows:
             items_by_order.setdefault(it.order_id, []).append(
                 TokenBoardOrderItemDetail(
@@ -657,7 +677,7 @@ def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) 
             completed_orders.append(card)
 
     version = sha256_hex("|".join(fp_parts))[:16]
-    return OperationalTokenBoardResponse(
+    ops_out = OperationalTokenBoardResponse(
         canteen_id=canteen_id,
         canteen_name=canteen_name,
         new_orders=new_orders,
@@ -675,3 +695,5 @@ def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) 
         updated_at=datetime.now(timezone.utc),
         version=version,
     )
+    cache_manager.set_json(cache_ns, cache_key, ops_out.model_dump(mode="json"), ttl_seconds=3, l1_ttl=1.0)
+    return ops_out

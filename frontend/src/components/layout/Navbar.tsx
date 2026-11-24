@@ -28,6 +28,19 @@ import { Badge, Button, Modal, crowdBadgeTone, useToast } from "../ui/Primitives
 
 export const Navbar: React.FC = () => {
   const location = useLocation();
+  if (
+    location.pathname.startsWith("/board") ||
+    location.pathname.startsWith("/display") ||
+    location.pathname.startsWith("/tv") ||
+    location.pathname.startsWith("/kiosk")
+  ) {
+    return null;
+  }
+  return <NavbarContent />;
+};
+
+const NavbarContent: React.FC = () => {
+  const location = useLocation();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { pushToast } = useToast();
@@ -69,7 +82,7 @@ export const Navbar: React.FC = () => {
     seededNotifsRef.current = false;
   }, [user?.id]);
 
-  useRealtimeSync<{ notifications?: any[] }>({
+  const { status: notifSyncStatus } = useRealtimeSync<{ notifications?: any[] }>({
     enabled: Boolean(user?.id && accessToken),
     ssePath: user?.id ? "/realtime/notifications/stream" : null,
     wsPath: user?.id ? `/ws/notifications/${user.id}` : null,
@@ -84,11 +97,13 @@ export const Navbar: React.FC = () => {
 
   const { data: college } = useQuery<CollegeSettings>({
     queryKey: ["college-settings"],
+    staleTime: 300_000,
     queryFn: async () => (await api.get("/canteens/college")).data,
   });
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
+    staleTime: 15_000,
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
@@ -108,22 +123,18 @@ export const Navbar: React.FC = () => {
       handleIncomingNotifications(list);
       return list;
     },
-    refetchInterval: 20000,
+    refetchInterval: () =>
+      typeof navigator !== "undefined" && navigator.onLine === false
+        ? false
+        : notifSyncStatus === "live"
+        ? 60_000
+        : 20_000,
   });
 
   const unreadCount = notifications.filter((n) => !n.is_read).length;
   const cartQty = cart?.items?.reduce((s, i) => s + i.quantity, 0) || 0;
   const roles = new Set(user?.roles || []);
   const isStaff = (r: string[]) => roles.has("super_admin") || r.some((x) => roles.has(x));
-
-  if (
-    location.pathname.startsWith("/board") ||
-    location.pathname.startsWith("/display") ||
-    location.pathname.startsWith("/tv") ||
-    location.pathname.startsWith("/kiosk")
-  ) {
-    return null;
-  }
 
   return (
     <>

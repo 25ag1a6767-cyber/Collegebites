@@ -62,6 +62,8 @@ def checkout(
 
 @router.get("/my", response_model=list[OrderOut])
 def my_orders(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
@@ -70,7 +72,8 @@ def my_orders(
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
         .where(Order.customer_id == principal.user.id)
         .order_by(Order.created_at.desc())
-        .limit(50)
+        .offset(offset)
+        .limit(limit)
     ).all()
     return order_service.serialize_orders_batch(db, list(orders))
 

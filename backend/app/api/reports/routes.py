@@ -212,7 +212,17 @@ def get_operations_control_center(
     from app.models.promotion import Coupon
     from app.services import inventory_service
 
+    from app.core.cache import NS_REPORTS, cache_manager
+
     scoped_cid = scoped_canteen_for_principal(principal, canteen_id)
+    cache_ns = f"{NS_REPORTS}:{scoped_cid}" if scoped_cid else NS_REPORTS
+    cache_key = (
+        f"occ:{scoped_cid or 'all'}:{start_date}:{end_date}:{order_status}:"
+        f"{product_id}:{(product_q or '').strip().lower()}:{operational_category}"
+    )
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=2.0)
+    if hit and isinstance(cached, dict):
+        return cached
 
     # 1. Orders query with date, status, and product filters
     ord_stmt = select(Order).where(Order.payment_status == "CONFIRMED")
@@ -361,7 +371,7 @@ def get_operations_control_center(
     invoices_count = db.scalar(inv_cnt_stmt) or 0
     active_coupons_count = db.scalar(select(func.count(Coupon.id)).where(Coupon.is_active.is_(True))) or 0
 
-    return {
+    occ_payload = {
         "filters_applied": {
             "canteen_id": str(scoped_cid) if scoped_cid else None,
             "start_date": start_date.isoformat() if start_date else None,
@@ -477,4 +487,6 @@ def get_operations_control_center(
             "active_promotional_campaigns_count": int(active_coupons_count),
         },
     }
+    cache_manager.set_json(cache_ns, cache_key, occ_payload, ttl_seconds=10, l1_ttl=2.0)
+    return occ_payload
 

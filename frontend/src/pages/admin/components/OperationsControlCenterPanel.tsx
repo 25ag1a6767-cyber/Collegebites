@@ -14,6 +14,8 @@ import {
   Utensils,
 } from "lucide-react";
 import { api } from "../../../api/client";
+import { useDebouncedValue } from "../../../hooks/useDebouncedValue";
+import { useOfflineStore } from "../../../store/useOfflineStore";
 import { Badge, Button, Card, Input, Select } from "../../../components/ui/Primitives";
 
 interface OperationsControlCenterPanelProps {
@@ -29,7 +31,9 @@ export const OperationsControlCenterPanel: React.FC<OperationsControlCenterPanel
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [orderStatus, setOrderStatus] = useState("all");
+  const isOnline = useOfflineStore((s) => s.isOnline);
   const [productQuery, setProductQuery] = useState("");
+  const debouncedProductQuery = useDebouncedValue(productQuery, 300);
   const [opCategory, setOpCategory] = useState<
     "all" | "orders" | "meal_plans" | "inventory" | "procurement" | "events" | "support" | "sales"
   >("all");
@@ -42,7 +46,7 @@ export const OperationsControlCenterPanel: React.FC<OperationsControlCenterPanel
       startDate,
       endDate,
       orderStatus,
-      productQuery,
+      debouncedProductQuery,
       opCategory,
     ],
     queryFn: async () => {
@@ -51,11 +55,12 @@ export const OperationsControlCenterPanel: React.FC<OperationsControlCenterPanel
       if (startDate) qs.set("start_date", startDate);
       if (endDate) qs.set("end_date", endDate);
       if (orderStatus !== "all") qs.set("order_status", orderStatus);
-      if (productQuery.trim()) qs.set("product_q", productQuery.trim());
+      if (debouncedProductQuery.trim()) qs.set("product_q", debouncedProductQuery.trim());
       qs.set("operational_category", opCategory);
       return (await api.get(`/reports/operations-control-center?${qs.toString()}`)).data;
     },
-    refetchInterval: 8000,
+    staleTime: 10_000,
+    refetchInterval: isOnline ? 25_000 : false,
   });
 
   const showSection = (sec: typeof opCategory) => opCategory === "all" || opCategory === sec;

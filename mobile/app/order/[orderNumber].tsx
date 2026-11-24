@@ -363,12 +363,13 @@ export default function OrderDetailScreen() {
             <View style={styles.card}>
               <Text style={styles.secTitle}>Tax Invoice • {invoice.invoice_number}</Text>
               <Text style={{ fontSize: 11, color: "#475569" }}>
-                Taxable: ₹{invoice.taxable_subtotal} • CGST: ₹{invoice.cgst_amount} • SGST: ₹{invoice.sgst_amount} •
-                Total: ₹{invoice.grand_total}
+                Subtotal: ₹{invoice.subtotal_amount} • CGST: ₹{invoice.tax_breakdown?.cgst_amount || "0.00"} • SGST: ₹
+                {invoice.tax_breakdown?.sgst_amount || "0.00"} • Total: ₹{invoice.total_amount}
               </Text>
               <Pressable
                 onPress={() => {
-                  const pdfUrl = `${API_BASE_URL}/invoices/${encodeURIComponent(order.id)}/pdf${suffix}`;
+                  const invSuffix = gToken ? `?guest_access_token=${encodeURIComponent(gToken)}` : "";
+                  const pdfUrl = `${API_BASE_URL}/invoices/${encodeURIComponent(invoice.id || order.id)}/pdf${invSuffix}`;
                   Linking.openURL(pdfUrl);
                 }}
                 style={[styles.pdfBtn, { backgroundColor: "#0f766e", paddingVertical: 10 }]}

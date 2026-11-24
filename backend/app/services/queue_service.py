@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.cache import NS_QUEUE, cache_manager, invalidate_board_and_queue
 from app.core.redis_client import safe_redis
 from app.core.time_utils import today_college
 from app.models.auth import StaffProfile, User
@@ -33,6 +34,10 @@ def _queue_sort_key(order: Order) -> tuple:
 
 
 def _canteen_on_duty_staff_count(db: Session, canteen_id: UUID) -> int:
+    cache_ns = f"{NS_QUEUE}:{canteen_id}"
+    hit, cached = cache_manager.get_json(cache_ns, "on_duty_staff", l1_ttl=2.0)
+    if hit and isinstance(cached, int):
+        return cached
     local_today = today_college()
     on_duty_ids = set(
         db.scalars(
@@ -51,10 +56,16 @@ def _canteen_on_duty_staff_count(db: Session, canteen_id: UUID) -> int:
             )
         ).all()
     )
-    return len(on_duty_ids | checked_in_ids)
+    count = len(on_duty_ids | checked_in_ids)
+    cache_manager.set_json(cache_ns, "on_duty_staff", count, ttl_seconds=15, l1_ttl=2.0)
+    return count
 
 
 def _canteen_avg_prep_minutes(db: Session, canteen_id: UUID, default_prep: float = 10.0) -> float:
+    cache_ns = f"{NS_QUEUE}:{canteen_id}"
+    hit, cached = cache_manager.get_json(cache_ns, "avg_prep", l1_ttl=2.0)
+    if hit and isinstance(cached, (int, float)):
+        return float(cached)
     ready_orders = db.execute(
         select(Order.confirmed_at, Order.ready_at)
         .where(Order.canteen_id == canteen_id, Order.confirmed_at.is_not(None), Order.ready_at.is_not(None))
@@ -62,45 +73,69 @@ def _canteen_avg_prep_minutes(db: Session, canteen_id: UUID, default_prep: float
         .limit(50)
     ).all()
     if not ready_orders:
-        return float(default_prep or 10.0)
-    durations = [max(1.0, (r_at - c_at).total_seconds() / 60.0) for c_at, r_at in ready_orders]
-    return round(sum(durations) / len(durations), 1)
+        val = float(default_prep or 10.0)
+    else:
+        durations = [max(1.0, (r_at - c_at).total_seconds() / 60.0) for c_at, r_at in ready_orders]
+        val = round(sum(durations) / len(durations), 1)
+    cache_manager.set_json(cache_ns, "avg_prep", val, ttl_seconds=15, l1_ttl=2.0)
+    return val
 
 
-def compute_order_queue_metrics_map(db: Session, orders: list[Order]) -> dict[UUID, dict]:
+def compute_order_queue_metrics_map(
+    db: Session,
+    orders: list[Order],
+    *,
+    precomputed_waiting_by_canteen: Optional[dict[UUID, list[Order]]] = None,
+    precomputed_canteens: Optional[dict[UUID, Canteen]] = None,
+    precomputed_staff_counts: Optional[dict[UUID, int]] = None,
+    precomputed_avg_prep: Optional[dict[UUID, float]] = None,
+) -> dict[UUID, dict]:
     """Compute real-time queue position, orders ahead, counter position, and dynamic wait from DB."""
     if not orders:
         return {}
 
     now = datetime.now(timezone.utc)
     waiting_canteen_ids = list({o.canteen_id for o in orders if o.status in ACTIVE_QUEUE_WAITING_STATUSES})
-    canteens = {c.id: c for c in db.scalars(select(Canteen).where(Canteen.id.in_(waiting_canteen_ids))).all()} if waiting_canteen_ids else {}
+    if precomputed_canteens is not None:
+        canteens = precomputed_canteens
+    else:
+        canteens = (
+            {c.id: c for c in db.scalars(select(Canteen).where(Canteen.id.in_(waiting_canteen_ids))).all()}
+            if waiting_canteen_ids
+            else {}
+        )
 
     waiting_by_canteen: dict[UUID, list[Order]] = {}
     if waiting_canteen_ids:
-        all_waiting = db.scalars(
-            select(Order).where(
-                Order.canteen_id.in_(waiting_canteen_ids),
-                Order.status.in_(ACTIVE_QUEUE_WAITING_STATUSES),
-            )
-        ).all()
-        for wo in all_waiting:
-            waiting_by_canteen.setdefault(wo.canteen_id, []).append(wo)
-        for cid in waiting_by_canteen:
-            waiting_by_canteen[cid].sort(key=_queue_sort_key)
+        if precomputed_waiting_by_canteen is not None:
+            for cid in waiting_canteen_ids:
+                waiting_by_canteen[cid] = sorted(precomputed_waiting_by_canteen.get(cid, []), key=_queue_sort_key)
+        else:
+            all_waiting = db.scalars(
+                select(Order).where(
+                    Order.canteen_id.in_(waiting_canteen_ids),
+                    Order.status.in_(ACTIVE_QUEUE_WAITING_STATUSES),
+                )
+            ).all()
+            for wo in all_waiting:
+                waiting_by_canteen.setdefault(wo.canteen_id, []).append(wo)
+            for cid in waiting_by_canteen:
+                waiting_by_canteen[cid].sort(key=_queue_sort_key)
 
     pos_lookup: dict[UUID, tuple[int, int, int]] = {}
-    staff_cache: dict[UUID, int] = {}
-    avg_prep_cache: dict[UUID, float] = {}
+    staff_cache: dict[UUID, int] = dict(precomputed_staff_counts or {})
+    avg_prep_cache: dict[UUID, float] = dict(precomputed_avg_prep or {})
     for cid, q_list in waiting_by_canteen.items():
         counter_ranks: dict[UUID, int] = {}
         for idx, wo in enumerate(q_list, start=1):
             c_pos = counter_ranks.get(wo.counter_id, 0) + 1
             counter_ranks[wo.counter_id] = c_pos
             pos_lookup[wo.id] = (idx, idx - 1, c_pos)
-        staff_cache[cid] = max(1, _canteen_on_duty_staff_count(db, cid))
-        c_obj = canteens.get(cid)
-        avg_prep_cache[cid] = _canteen_avg_prep_minutes(db, cid, float(c_obj.default_prep_time_minutes if c_obj else 10))
+        if cid not in staff_cache:
+            staff_cache[cid] = max(1, _canteen_on_duty_staff_count(db, cid))
+        if cid not in avg_prep_cache:
+            c_obj = canteens.get(cid)
+            avg_prep_cache[cid] = _canteen_avg_prep_minutes(db, cid, float(c_obj.default_prep_time_minutes if c_obj else 10))
 
     metrics: dict[UUID, dict] = {}
     for o in orders:
@@ -320,25 +355,38 @@ def escalate_overdue_orders(
 
 
 def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
+    cache_ns = f"{NS_QUEUE}:{canteen_id}"
+    hit, cached = cache_manager.get_json(cache_ns, "dashboard", l1_ttl=1.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
     canteen = db.get(Canteen, canteen_id)
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")
 
-    is_open, crowd, base_eta, active_count = compute_canteen_live_status(db, canteen)
     now = datetime.now(timezone.utc)
     fifteen_mins_ago = now - timedelta(minutes=15)
 
-    placed_count = db.scalar(select(func.count(Order.id)).where(Order.canteen_id == canteen_id, Order.status == "PLACED")) or 0
-    accepted_count = db.scalar(select(func.count(Order.id)).where(Order.canteen_id == canteen_id, Order.status == "ACCEPTED")) or 0
-    preparing_count = db.scalar(select(func.count(Order.id)).where(Order.canteen_id == canteen_id, Order.status == "PREPARING")) or 0
-    ready_count = db.scalar(select(func.count(Order.id)).where(Order.canteen_id == canteen_id, Order.status == "READY")) or 0
-    delayed_count = db.scalar(
-        select(func.count(Order.id)).where(
-            Order.canteen_id == canteen_id,
-            Order.status.in_(ACTIVE_CROWD_STATUSES),
-            Order.delayed_minutes > 0,
-        )
-    ) or 0
+    # Fetch live non-completed orders once and derive all queue/status/delay counts in memory
+    all_live_orders = list(
+        db.scalars(
+            select(Order).where(
+                Order.canteen_id == canteen_id,
+                Order.status.in_(("PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING", "READY")),
+            )
+        ).all()
+    )
+    placed_count = sum(1 for o in all_live_orders if o.status == "PLACED")
+    accepted_count = sum(1 for o in all_live_orders if o.status == "ACCEPTED")
+    preparing_count = sum(1 for o in all_live_orders if o.status == "PREPARING")
+    ready_count = sum(1 for o in all_live_orders if o.status == "READY")
+    waiting_orders = [o for o in all_live_orders if o.status in ACTIVE_CROWD_STATUSES]
+    active_count_pre = len(waiting_orders)
+    delayed_count = sum(1 for o in waiting_orders if (o.delayed_minutes or 0) > 0)
+
+    is_open, crowd, base_eta, active_count = compute_canteen_live_status(
+        db, canteen, precomputed_active_count=active_count_pre
+    )
 
     recent_15m = db.scalar(
         select(func.count(Order.id)).where(
@@ -349,6 +397,7 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
     ) or 0
     orders_per_min = round(float(recent_15m) / 15.0, 2)
     avg_prep = _canteen_avg_prep_minutes(db, canteen_id, float(canteen.default_prep_time_minutes))
+    on_duty_staff = _canteen_on_duty_staff_count(db, canteen_id)
 
     kitchens = db.scalars(select(Kitchen).where(Kitchen.canteen_id == canteen_id, Kitchen.is_active.is_(True))).all()
     total_kitchen_cap = sum(k.max_active_orders for k in kitchens) or canteen.max_concurrent_orders
@@ -357,16 +406,7 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
     counters = db.scalars(select(Counter).where(Counter.canteen_id == canteen_id, Counter.is_active.is_(True)).order_by(Counter.code)).all()
     counter_map = {c.id: c for c in counters}
 
-    # Fetch live non-completed orders in queue order (COMPLETED / CANCELLED / REJECTED are automatically excluded)
-    active_orders = list(
-        db.scalars(
-            select(Order)
-            .where(
-                Order.canteen_id == canteen_id,
-                Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
-            )
-        ).all()
-    )
+    active_orders = [o for o in all_live_orders if o.status in ("PLACED", "ACCEPTED", "PREPARING", "READY")]
     active_orders.sort(
         key=lambda o: (
             1 if o.status == "READY" else 0,
@@ -375,7 +415,14 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
             str(o.id),
         )
     )
-    metrics_map = compute_order_queue_metrics_map(db, active_orders)
+    metrics_map = compute_order_queue_metrics_map(
+        db,
+        active_orders,
+        precomputed_waiting_by_canteen={canteen_id: waiting_orders},
+        precomputed_canteens={canteen_id: canteen},
+        precomputed_staff_counts={canteen_id: max(1, on_duty_staff)},
+        precomputed_avg_prep={canteen_id: avg_prep},
+    )
 
     active_order_ids = [o.id for o in active_orders]
     token_map = (
@@ -469,23 +516,9 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
             "is_overloaded": waiting_cnt >= cnt.max_queue_capacity,
         })
 
-    on_duty_staff = _canteen_on_duty_staff_count(db, canteen_id)
     avg_wait_minutes = round(sum(waiting_waits) / len(waiting_waits), 1) if waiting_waits else float(base_eta)
 
-    # Store live metrics snapshot in Redis for fast reads (non-blocking if Redis unavailable)
-    safe_redis(
-        lambda r: r.hset(
-            f"cb:queue:{canteen_id}",
-            mapping={
-                "active": str(active_count),
-                "crowd": crowd,
-                "eta": str(base_eta),
-                "orders_per_min": str(orders_per_min),
-            },
-        )
-    )
-
-    return {
+    result = {
         "canteen_id": str(canteen.id),
         "canteen_name": canteen.name,
         "is_open_now": is_open,
@@ -511,6 +544,8 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         "active_orders_queue": active_orders_queue,
         "delayed_orders": delayed_orders,
     }
+    cache_manager.set_json(cache_ns, "dashboard", result, ttl_seconds=3, l1_ttl=1.0)
+    return result
 
 
 def estimate_prep_time(db: Session, canteen_id: UUID, item_ids: list[UUID]) -> dict:
@@ -573,6 +608,7 @@ def update_queue_controls(db: Session, canteen_id: UUID, updates: dict, actor_us
         details={k: v for k, v in updates.items() if k in allowed and v is not None},
     )
     db.commit()
+    invalidate_board_and_queue(canteen_id)
     return get_live_queue_dashboard(db, canteen_id)
 
 

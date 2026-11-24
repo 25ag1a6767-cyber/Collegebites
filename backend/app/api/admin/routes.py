@@ -289,9 +289,13 @@ def update_table(
 @router.get("/users", response_model=list[UserOut])
 def list_users(
     user_kind: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
 ):
+    from app.core.permissions import load_users_roles_and_permissions_batch
+
     stmt = select(User).order_by(User.created_at.desc())
     if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
         scoped_canteen = scoped_canteen_for_principal(principal, None)
@@ -300,8 +304,26 @@ def list_users(
         )
     elif user_kind:
         stmt = stmt.where(User.user_kind == user_kind)
-    users = db.scalars(stmt.limit(200)).all()
-    return [auth_service.build_user_out(db, u) for u in users]
+    users = list(db.scalars(stmt.offset(offset).limit(limit)).all())
+    if not users:
+        return []
+    rbac_map = load_users_roles_and_permissions_batch(db, [u.id for u in users])
+    return [
+        UserOut(
+            id=u.id,
+            email=u.email,
+            phone=u.phone,
+            full_name=u.full_name,
+            user_kind=u.user_kind,
+            is_active=u.is_active,
+            is_verified=u.is_verified,
+            roles=sorted(rbac_map[u.id][0]),
+            permissions=sorted(rbac_map[u.id][1]),
+            assigned_canteen_id=rbac_map[u.id][2],
+            created_at=u.created_at,
+        )
+        for u in users
+    ]
 
 
 @router.post("/users/staff", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -350,12 +372,14 @@ def update_user_status(
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     target.is_active = payload.is_active
+    revoked_session_ids: list[UUID] = []
     if not payload.is_active:
         now = datetime.now(timezone.utc)
         for sess in db.scalars(
             select(SessionRecord).where(SessionRecord.user_id == target.id, SessionRecord.revoked_at.is_(None))
         ).all():
             sess.revoked_at = now
+            revoked_session_ids.append(sess.id)
         for tok in db.scalars(
             select(RefreshToken).where(RefreshToken.user_id == target.id, RefreshToken.revoked_at.is_(None))
         ).all():
@@ -370,6 +394,11 @@ def update_user_status(
         details={"is_active": payload.is_active},
     )
     db.commit()
+    from app.core.cache import invalidate_auth_session, invalidate_auth_user
+
+    invalidate_auth_user(target.id)
+    for sid in revoked_session_ids:
+        invalidate_auth_session(sid)
     db.refresh(target)
     return auth_service.build_user_out(db, target)
 
@@ -403,16 +432,19 @@ def list_roles_with_permissions(
 ):
     from app.core.permissions import ROLE_PERMISSIONS_MAP
 
-    roles = db.scalars(select(Role).order_by(Role.name)).all()
+    roles = list(db.scalars(select(Role).order_by(Role.name)).all())
+    role_ids = [r.id for r in roles]
+    perms_by_role: dict[UUID, set[str]] = {}
+    if role_ids:
+        for rid, code in db.execute(
+            select(RolePermission.role_id, Permission.code)
+            .join(Permission, RolePermission.permission_id == Permission.id)
+            .where(RolePermission.role_id.in_(role_ids))
+        ).all():
+            perms_by_role.setdefault(rid, set()).add(code)
     out = []
     for r in roles:
-        db_codes = set(
-            db.scalars(
-                select(Permission.code)
-                .join(RolePermission, RolePermission.permission_id == Permission.id)
-                .where(RolePermission.role_id == r.id)
-            ).all()
-        )
+        db_codes = perms_by_role.get(r.id, set())
         default_codes = set(ROLE_PERMISSIONS_MAP.get(r.name, []))
         out.append({
             "id": str(r.id),
@@ -467,6 +499,9 @@ def update_user_custom_permissions(
         details={"grant": payload.grant, "revoke": payload.revoke},
     )
     db.commit()
+    from app.core.cache import invalidate_auth_user
+
+    invalidate_auth_user(target.id)
     db.refresh(target)
     return auth_service.build_user_out(db, target)
 
@@ -478,6 +513,7 @@ def list_all_orders(
     payment_status: Optional[str] = Query(default=None),
     q: Optional[str] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(
         require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
     ),
@@ -492,6 +528,7 @@ def list_all_orders(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
         .order_by(Order.created_at.desc())
+        .offset(offset)
         .limit(limit)
     )
     if scoped_canteen:
@@ -510,8 +547,8 @@ def list_all_orders(
                 PickupToken.token_code.ilike(like),
             )
         )
-    orders = db.scalars(stmt).all()
-    return [order_service.serialize_order(db, o) for o in orders]
+    orders = list(db.scalars(stmt).all())
+    return order_service.serialize_orders_batch(db, orders)
 
 
 @router.get("/audit-logs", response_model=list[AuditLogOut])
@@ -561,10 +598,15 @@ def system_health(
     total_payments = db.scalar(select(func.count(Payment.id))) or 0
     total_users = db.scalar(select(func.count(User.id))) or 0
 
+    from app.core.cache import cache_manager
+    from app.core.database import get_pool_stats
+
     return {
         "status": "healthy" if (db_ok and redis_ok) else "degraded",
         "database": "connected" if db_ok else "error",
         "redis": "connected" if redis_ok else "error",
+        "db_pool": get_pool_stats(),
+        "cache": cache_manager.get_stats(),
         "total_orders": total_orders,
         "total_payments": total_payments,
         "total_users": total_users,

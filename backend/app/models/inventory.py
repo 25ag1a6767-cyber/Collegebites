@@ -26,7 +26,10 @@ class Supplier(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class InventoryItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "inventory_items"
-    __table_args__ = (UniqueConstraint("canteen_id", "ingredient_id", name="uq_inventory_canteen_ingredient"),)
+    __table_args__ = (
+        UniqueConstraint("canteen_id", "ingredient_id", name="uq_inventory_canteen_ingredient"),
+        Index("ix_inventory_canteen_arch_qty", "canteen_id", "is_archived", "current_quantity"),
+    )
 
     canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
     ingredient_id: Mapped[uuid.UUID] = mapped_column(
@@ -87,6 +90,10 @@ class StockMovement(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class PurchaseOrder(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "purchase_orders"
+    __table_args__ = (
+        Index("ix_po_supplier_status", "supplier_id", "status"),
+        Index("ix_po_canteen_status_created", "canteen_id", "status", "created_at"),
+    )
 
     po_number: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
     canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -168,6 +175,10 @@ class GoodsReceiptItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class VendorPayment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "vendor_payments"
+    __table_args__ = (
+        Index("ix_vendor_payments_po_status", "purchase_order_id", "status"),
+        Index("ix_vendor_payments_supplier_status", "supplier_id", "status"),
+    )
 
     payment_number: Mapped[str] = mapped_column(String(48), nullable=False, unique=True)
     supplier_id: Mapped[uuid.UUID] = mapped_column(

@@ -23,6 +23,10 @@ from app.models.base import Base, Money, TimestampMixin, UUIDPrimaryKeyMixin
 
 class Cart(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "carts"
+    __table_args__ = (
+        Index("ix_carts_user_canteen_status", "user_id", "canteen_id", "status"),
+        Index("ix_carts_guest_canteen_status", "guest_session_id", "canteen_id", "status"),
+    )
 
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     guest_session_id: Mapped[Optional[str]] = mapped_column(String(120), index=True)
@@ -88,6 +92,11 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_orders_canteen_created_at", "canteen_id", "created_at"),
         Index("ix_orders_customer", "customer_id", "created_at"),
         Index("ix_orders_counter_status", "counter_id", "status"),
+        Index("ix_orders_canteen_payment_created", "canteen_id", "payment_status", "created_at"),
+        Index("ix_orders_payment_created", "payment_status", "created_at"),
+        Index("ix_orders_canteen_status_ready", "canteen_id", "status", "ready_at"),
+        Index("ix_orders_canteen_status_completed", "canteen_id", "status", "completed_at"),
+        Index("ix_orders_created_at", "created_at"),
     )
 
     order_number: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
@@ -140,6 +149,10 @@ class Order(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class OrderItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "order_items"
+    __table_args__ = (
+        Index("ix_order_items_food_item_id", "food_item_id"),
+        Index("ix_order_items_prep_status", "prep_status"),
+    )
 
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
     food_item_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("food_items.id", ondelete="SET NULL"))
@@ -182,6 +195,9 @@ class OrderItemCustomization(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class OrderStatusHistory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "order_status_history"
+    __table_args__ = (
+        Index("ix_order_status_history_created_actor", "created_at", "changed_by_user_id"),
+    )
 
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
     from_status: Mapped[Optional[str]] = mapped_column(String(32))
@@ -220,7 +236,10 @@ class OrderAssignment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class SlotReservation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "slot_reservations"
-    __table_args__ = (UniqueConstraint("order_id", name="uq_slot_reservation_order"),)
+    __table_args__ = (
+        UniqueConstraint("order_id", name="uq_slot_reservation_order"),
+        Index("ix_slot_reservations_status_expires", "status", "expires_at"),
+    )
 
     pickup_slot_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("pickup_slots.id", ondelete="CASCADE"), nullable=False, index=True

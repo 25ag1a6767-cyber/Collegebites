@@ -12,6 +12,7 @@ from sqlalchemy import desc, func, or_, select
 from sqlalchemy import event as sa_event
 from sqlalchemy.orm import Session
 
+from app.core.cache import invalidate_menu, invalidate_reports
 from app.core.time_utils import today_college
 from app.models.auth import User
 from app.models.college import Canteen
@@ -44,6 +45,8 @@ def _flush_inventory_ws_events(session: Session) -> None:
     if not pending:
         return
     for canteen_id, event_type, payload in pending:
+        invalidate_menu(canteen_id)
+        invalidate_reports(canteen_id)
         emit_order_event_sync(canteen_id, "inventory", event_type, payload)
 
 
@@ -187,14 +190,23 @@ def get_unexpired_stock_quantity(
 def _compute_order_needed_ingredients(db: Session, order_id: UUID) -> dict[UUID, Decimal]:
     needed_map: dict[UUID, Decimal] = {}
     order_items = db.scalars(select(OrderItem).where(OrderItem.order_id == order_id)).all()
+    food_ids = list({oi.food_item_id for oi in order_items if oi.food_item_id})
+    if not food_ids:
+        return needed_map
+    recipes = {r.food_item_id: r for r in db.scalars(select(Recipe).where(Recipe.food_item_id.in_(food_ids))).all()}
+    if not recipes:
+        return needed_map
+    recipe_ids = [r.id for r in recipes.values()]
+    reqs_by_recipe: dict[UUID, list[RecipeIngredient]] = {}
+    for req in db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id.in_(recipe_ids))).all():
+        reqs_by_recipe.setdefault(req.recipe_id, []).append(req)
     for oi in order_items:
         if not oi.food_item_id:
             continue
-        recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == oi.food_item_id))
+        recipe = recipes.get(oi.food_item_id)
         if not recipe:
             continue
-        req_rows = db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all()
-        for req in req_rows:
+        for req in reqs_by_recipe.get(recipe.id, ()):
             needed = ((req.quantity_required * Decimal(oi.quantity)) / Decimal(max(1, recipe.yield_portions))).quantize(
                 Decimal("0.001")
             )
@@ -247,7 +259,7 @@ def refresh_food_item_ingredient_sufficiency(
     *,
     require_restore_approval: bool = True,
 ) -> list[str]:
-    """Recompute FoodItem.insufficient_ingredients using unexpired, unreserved ingredient stock.
+    """Recompute FoodItem.insufficient_ingredients using unexpired, unreserved ingredient stock (batched O(1) queries).
     Auto-disables depleted items and queues Manager Approval before re-enabling upon restock."""
     invs = db.scalars(select(InventoryItem).where(InventoryItem.canteen_id == canteen_id)).all()
     expired_map = _expired_batch_totals_map(db, [inv.id for inv in invs])
@@ -258,13 +270,37 @@ def refresh_food_item_ingredient_sufficiency(
         for inv in invs
     }
     items = db.scalars(select(FoodItem).where(FoodItem.canteen_id == canteen_id)).all()
+    if not items:
+        return []
+    item_ids = [f.id for f in items]
+    recipes_by_food = {
+        r.food_item_id: r for r in db.scalars(select(Recipe).where(Recipe.food_item_id.in_(item_ids))).all()
+    }
+    recipe_ids = [r.id for r in recipes_by_food.values()]
+    reqs_by_recipe: dict[UUID, list[RecipeIngredient]] = {}
+    if recipe_ids:
+        for req in db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id.in_(recipe_ids))).all():
+            reqs_by_recipe.setdefault(req.recipe_id, []).append(req)
+    pending_approval_food_ids = (
+        set(
+            db.scalars(
+                select(MenuRestoreApproval.food_item_id).where(
+                    MenuRestoreApproval.food_item_id.in_(item_ids),
+                    MenuRestoreApproval.status == "pending_approval",
+                )
+            ).all()
+        )
+        if require_restore_approval
+        else set()
+    )
+
     blocked_names: list[str] = []
     changed_foods: list[dict] = []
     for food in items:
-        recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == food.id))
+        recipe = recipes_by_food.get(food.id)
         if not recipe:
             continue
-        req_rows = db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all()
+        req_rows = reqs_by_recipe.get(recipe.id)
         if not req_rows:
             continue
         short = False
@@ -295,13 +331,8 @@ def refresh_food_item_ingredient_sufficiency(
             if require_restore_approval:
                 food.is_available = False
                 food.pending_restore_approval = True
-                existing_req = db.scalar(
-                    select(MenuRestoreApproval).where(
-                        MenuRestoreApproval.food_item_id == food.id,
-                        MenuRestoreApproval.status == "pending_approval",
-                    )
-                )
-                if not existing_req:
+                if food.id not in pending_approval_food_ids:
+                    pending_approval_food_ids.add(food.id)
                     db.add(
                         MenuRestoreApproval(
                             canteen_id=canteen_id,
@@ -455,15 +486,7 @@ def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optiona
 def _compute_supplier_metrics_map(db: Session, supplier_ids: list[UUID]) -> dict[UUID, dict]:
     if not supplier_ids:
         return {}
-    pos = db.scalars(select(PurchaseOrder).where(PurchaseOrder.supplier_id.in_(supplier_ids))).all()
-    po_ids = [p.id for p in pos]
-    po_items = (
-        db.scalars(select(PurchaseOrderItem).where(PurchaseOrderItem.purchase_order_id.in_(po_ids))).all()
-        if po_ids
-        else []
-    )
-    po_by_id = {p.id: p for p in pos}
-    payments = db.scalars(select(VendorPayment).where(VendorPayment.supplier_id.in_(supplier_ids))).all()
+    from sqlalchemy import case
 
     metrics: dict[UUID, dict] = {
         sid: {
@@ -481,31 +504,53 @@ def _compute_supplier_metrics_map(db: Session, supplier_ids: list[UUID]) -> dict
         for sid in supplier_ids
     }
 
-    for p in pos:
-        m = metrics[p.supplier_id]
-        m["total_purchase_orders"] += 1
-        if p.status == "received":
-            m["received_orders_count"] += 1
-        elif p.status not in ("cancelled", "draft"):
-            m["pending_orders_count"] += 1
-        if p.status not in ("cancelled", "draft"):
-            m["total_billed_amount"] += Decimal(str(p.total_cost or 0))
+    # 3 single-pass SQL GROUP BY queries instead of loading all PO, POItem & VendorPayment ORM rows
+    for sid, tot_po, rec_po, pend_po, billed in db.execute(
+        select(
+            PurchaseOrder.supplier_id,
+            func.count(PurchaseOrder.id),
+            func.coalesce(func.sum(case((PurchaseOrder.status == "received", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((PurchaseOrder.status.not_in(["received", "cancelled", "draft"]), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((PurchaseOrder.status.not_in(["cancelled", "draft"]), PurchaseOrder.total_cost), else_=0)), 0),
+        )
+        .where(PurchaseOrder.supplier_id.in_(supplier_ids))
+        .group_by(PurchaseOrder.supplier_id)
+    ).all():
+        m = metrics[sid]
+        m["total_purchase_orders"] = int(tot_po or 0)
+        m["received_orders_count"] = int(rec_po or 0)
+        m["pending_orders_count"] = int(pend_po or 0)
+        m["total_billed_amount"] = Decimal(str(billed or 0))
 
-    for it in po_items:
-        po_row = po_by_id.get(it.purchase_order_id)
-        if not po_row or po_row.status == "cancelled":
-            continue
-        m = metrics[po_row.supplier_id]
-        m["total_ordered_qty"] += Decimal(str(it.quantity_ordered or 0))
-        m["total_received_qty"] += Decimal(str(it.quantity_received or 0))
-        m["total_damaged_rejected_qty"] += Decimal(str(it.quantity_damaged or 0)) + Decimal(str(it.quantity_rejected or 0))
+    for sid, ord_q, rec_q, dmg_q, rej_q in db.execute(
+        select(
+            PurchaseOrder.supplier_id,
+            func.coalesce(func.sum(PurchaseOrderItem.quantity_ordered), 0),
+            func.coalesce(func.sum(PurchaseOrderItem.quantity_received), 0),
+            func.coalesce(func.sum(PurchaseOrderItem.quantity_damaged), 0),
+            func.coalesce(func.sum(PurchaseOrderItem.quantity_rejected), 0),
+        )
+        .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderItem.purchase_order_id)
+        .where(PurchaseOrder.supplier_id.in_(supplier_ids), PurchaseOrder.status != "cancelled")
+        .group_by(PurchaseOrder.supplier_id)
+    ).all():
+        m = metrics[sid]
+        m["total_ordered_qty"] = Decimal(str(ord_q or 0))
+        m["total_received_qty"] = Decimal(str(rec_q or 0))
+        m["total_damaged_rejected_qty"] = Decimal(str(dmg_q or 0)) + Decimal(str(rej_q or 0))
 
-    for vp in payments:
-        m = metrics[vp.supplier_id]
-        if vp.status == "verified":
-            m["total_paid_amount"] += Decimal(str(vp.amount or 0))
-        elif vp.status == "pending_verification":
-            m["pending_payment_amount"] += Decimal(str(vp.amount or 0))
+    for sid, paid_amt, pend_amt in db.execute(
+        select(
+            VendorPayment.supplier_id,
+            func.coalesce(func.sum(case((VendorPayment.status == "verified", VendorPayment.amount), else_=0)), 0),
+            func.coalesce(func.sum(case((VendorPayment.status == "pending_verification", VendorPayment.amount), else_=0)), 0),
+        )
+        .where(VendorPayment.supplier_id.in_(supplier_ids))
+        .group_by(VendorPayment.supplier_id)
+    ).all():
+        m = metrics[sid]
+        m["total_paid_amount"] = Decimal(str(paid_amt or 0))
+        m["pending_payment_amount"] = Decimal(str(pend_amt or 0))
 
     for sid, m in metrics.items():
         billed = m["total_billed_amount"].quantize(Decimal("0.01"))
@@ -893,6 +938,16 @@ def list_canteen_inventory(
             })
 
     today = today_college()
+    inv_ids = [inv.id for inv, _ing, _sup in rows]
+    batches_by_inv: dict[UUID, list[StockBatch]] = {}
+    if inv_ids:
+        for b in db.scalars(
+            select(StockBatch)
+            .where(StockBatch.inventory_item_id.in_(inv_ids), StockBatch.remaining_quantity > 0)
+            .order_by(StockBatch.expiry_date.asc().nulls_last())
+        ).all():
+            batches_by_inv.setdefault(b.inventory_item_id, []).append(b)
+
     q_norm = (search or "").strip().lower()
     cat_norm = (category or "").strip().lower()
     result = []
@@ -914,11 +969,7 @@ def list_canteen_inventory(
         if stock_status and stock_status != "all" and status_val != stock_status:
             continue
 
-        batches = db.scalars(
-            select(StockBatch)
-            .where(StockBatch.inventory_item_id == inv.id, StockBatch.remaining_quantity > 0)
-            .order_by(StockBatch.expiry_date.asc().nulls_last())
-        ).all()
+        batches = batches_by_inv.get(inv.id, [])
         stock_value = (inv.current_quantity * inv.unit_cost).quantize(Decimal("0.01"))
         result.append({
             "inventory_item_id": str(inv.id),
@@ -1037,6 +1088,8 @@ def _serialize_purchase_order(
     supplier_map: Optional[dict[UUID, Supplier]] = None,
     items_by_po: Optional[dict[UUID, list[PurchaseOrderItem]]] = None,
     ing_map: Optional[dict[UUID, Ingredient]] = None,
+    grn_count_map: Optional[dict[UUID, int]] = None,
+    paid_sum_map: Optional[dict[UUID, Decimal]] = None,
 ) -> dict:
     sup = (supplier_map or {}).get(po.supplier_id) or db.get(Supplier, po.supplier_id)
     po_items = (
@@ -1051,16 +1104,22 @@ def _serialize_purchase_order(
             if ing_ids
             else {}
         )
-    grn_count = db.scalar(select(func.count(GoodsReceipt.id)).where(GoodsReceipt.purchase_order_id == po.id)) or 0
-    paid_sum = (
-        db.scalar(
-            select(func.coalesce(func.sum(VendorPayment.amount), 0)).where(
-                VendorPayment.purchase_order_id == po.id,
-                VendorPayment.status == "verified",
+    if grn_count_map is not None:
+        grn_count = grn_count_map.get(po.id, 0)
+    else:
+        grn_count = db.scalar(select(func.count(GoodsReceipt.id)).where(GoodsReceipt.purchase_order_id == po.id)) or 0
+    if paid_sum_map is not None:
+        paid_sum = paid_sum_map.get(po.id, Decimal("0.00"))
+    else:
+        paid_sum = (
+            db.scalar(
+                select(func.coalesce(func.sum(VendorPayment.amount), 0)).where(
+                    VendorPayment.purchase_order_id == po.id,
+                    VendorPayment.status == "verified",
+                )
             )
+            or Decimal("0.00")
         )
-        or Decimal("0.00")
-    )
     total_cost_dec = Decimal(str(po.total_cost or 0)).quantize(Decimal("0.01"))
     paid_dec = Decimal(str(paid_sum)).quantize(Decimal("0.01"))
     outstanding_dec = max(Decimal("0.00"), total_cost_dec - paid_dec).quantize(Decimal("0.01"))
@@ -1146,8 +1205,32 @@ def list_purchase_orders(
         if ing_ids
         else {}
     )
+    grn_count_map = {
+        pid: int(cnt or 0)
+        for pid, cnt in db.execute(
+            select(GoodsReceipt.purchase_order_id, func.count(GoodsReceipt.id))
+            .where(GoodsReceipt.purchase_order_id.in_(po_ids))
+            .group_by(GoodsReceipt.purchase_order_id)
+        ).all()
+    }
+    paid_sum_map = {
+        pid: Decimal(str(tot or 0))
+        for pid, tot in db.execute(
+            select(VendorPayment.purchase_order_id, func.coalesce(func.sum(VendorPayment.amount), 0))
+            .where(VendorPayment.purchase_order_id.in_(po_ids), VendorPayment.status == "verified")
+            .group_by(VendorPayment.purchase_order_id)
+        ).all()
+    }
     return [
-        _serialize_purchase_order(db, p, supplier_map=sup_map, items_by_po=items_by_po, ing_map=ing_map)
+        _serialize_purchase_order(
+            db,
+            p,
+            supplier_map=sup_map,
+            items_by_po=items_by_po,
+            ing_map=ing_map,
+            grn_count_map=grn_count_map,
+            paid_sum_map=paid_sum_map,
+        )
         for p in pos
     ]
 

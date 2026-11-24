@@ -24,10 +24,24 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+psycopg://postgres@127.0.0.1:5432/collegebites"
     TEST_DATABASE_URL: str = "postgresql+psycopg://postgres@127.0.0.1:5432/collegebites_test"
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 30
+    DB_POOL_SIZE: int = 12
+    DB_MAX_OVERFLOW: int = 18
+    DB_POOL_TIMEOUT: int = 15
+    DB_POOL_RECYCLE: int = 1800
+    DB_CONNECT_TIMEOUT: int = 10
+    DB_STATEMENT_TIMEOUT_MS: int = 30000
+    DB_SERVERLESS_POOL_SIZE: int = 2
+    DB_SERVERLESS_MAX_OVERFLOW: int = 3
+    DB_SERVERLESS_NULLPOOL: bool = False
 
     REDIS_URL: str = "memory://"
+    CACHE_ENABLED: bool = True
+    CACHE_L1_MAX_ENTRIES: int = 1024
+    CACHE_L1_MAX_TTL_SECONDS: float = 3.0
+    REQUEST_TIMEOUT_SECONDS: float = 30.0
+    LOG_FORMAT: str = "text"
+    UVICORN_WORKERS: int = 4
+    ANYIO_THREADPOOL_TOKENS: int = 100
 
     @model_validator(mode="after")
     def _apply_cloud_env_fallbacks(self) -> "Settings":
@@ -112,7 +126,9 @@ class Settings(BaseSettings):
     DEFAULT_PRINTER_PORT: int = 9100
 
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8081"
-    RATE_LIMIT_DEFAULT: str = "300/minute"
+    RATE_LIMIT_DEFAULT: str = "600/minute"
+    RATE_LIMIT_READ_DEFAULT: str = "1200/minute"
+    RATE_LIMIT_AUTH_LOGIN: str = "20/minute"
     RATE_LIMIT_ENABLED: bool = True
 
     @property

@@ -278,8 +278,13 @@ export const OperationalTokenBoardPage: React.FC = () => {
     },
     staleTime: 0,
     retry: false,
-    refetchInterval: () => (typeof navigator !== "undefined" && navigator.onLine === false ? false : 1000),
-    refetchIntervalInBackground: true,
+    refetchInterval: () =>
+      typeof navigator !== "undefined" && navigator.onLine === false
+        ? false
+        : syncStatus === "live"
+        ? 15000
+        : 2000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
   });

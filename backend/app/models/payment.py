@@ -26,6 +26,8 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "payments"
     __table_args__ = (
         Index("ix_payments_order_status", "order_id", "status"),
+        Index("ix_payments_order_created", "order_id", "created_at"),
+        Index("ix_payments_status_created", "status", "created_at"),
     )
 
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -128,6 +130,7 @@ class PickupToken(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UniqueConstraint("order_id", name="uq_pickup_token_order"),
         UniqueConstraint("canteen_id", "service_date", "token_code", name="uq_pickup_token_scope"),
         Index("ix_pickup_tokens_lookup", "token_code", "service_date"),
+        Index("ix_pickup_tokens_date_canteen_seq", "service_date", "canteen_id", "sequence_number"),
     )
 
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)

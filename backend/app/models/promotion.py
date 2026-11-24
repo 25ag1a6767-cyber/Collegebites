@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, Money, TimestampMixin, UUIDPrimaryKeyMixin
@@ -33,6 +33,9 @@ class Coupon(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class CouponRedemption(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "coupon_redemptions"
+    __table_args__ = (
+        Index("ix_coupon_redemptions_coupon_user", "coupon_id", "user_id"),
+    )
 
     coupon_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("coupons.id", ondelete="CASCADE"), nullable=False, index=True)
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, unique=True)
@@ -70,6 +73,9 @@ class LoyaltyAccount(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class LoyaltyTransaction(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "loyalty_transactions"
+    __table_args__ = (
+        Index("ix_loyalty_txn_order_type", "order_id", "transaction_type"),
+    )
 
     loyalty_account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("loyalty_accounts.id", ondelete="CASCADE"), nullable=False, index=True

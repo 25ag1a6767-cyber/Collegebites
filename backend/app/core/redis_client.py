@@ -27,8 +27,11 @@ class RedisManager:
             client = redis.from_url(
                 self.url,
                 decode_responses=True,
-                socket_connect_timeout=1,
-                socket_timeout=1,
+                socket_connect_timeout=0.4,
+                socket_timeout=0.5,
+                max_connections=64,
+                health_check_interval=30,
+                retry_on_timeout=False,
             )
             if not settings.is_production:
                 try:
@@ -41,7 +44,16 @@ class RedisManager:
 
     def reset_for_tests(self) -> None:
         if self._client is not None:
-            self._client.flushall()
+            try:
+                self._client.flushall()
+            except redis.exceptions.RedisError:
+                pass
+        try:
+            from app.core.cache import cache_manager
+
+            cache_manager.reset_all()
+        except Exception:
+            pass
 
 
 @lru_cache

@@ -1,0 +1,17 @@
+module,method,endpoint,baseline_sql_queries,optimized_sql_cold,optimized_sql_warm_redis,cold_reduction_pct,warm_reduction_pct,cold_ms,warm_avg_ms,warm_p95_ms,payload_bytes
+Admin Orders Console,GET,/api/v1/admin/orders?limit=50,235,15,11,93.6,95.3,44.35,19.99,23.22,53598
+Analytics BI Dashboard,GET,/api/v1/reports/dashboard?preset=last_30_days,42,27,1,35.7,97.6,51.81,8.55,9.88,19696
+Live Queue Metrics,GET,/api/v1/queue/canteens/5c9dcaa4-1f57-4921-9bee-25d1e5c9cd89,25,14,0,44.0,100.0,26.62,5.42,5.94,13030
+Operations Control Center,GET,/api/v1/reports/operations-control-center,21,17,1,19.0,95.2,38.7,7.69,9.12,14769
+Customer Orders History,GET,/api/v1/orders/my?limit=50,21,15,11,28.6,47.6,29.9,20.19,25.33,53598
+Menu Items Catalog,GET,/api/v1/menus/canteens/5c9dcaa4-1f57-4921-9bee-25d1e5c9cd89/items,11,10,0,9.1,100.0,35.29,5.59,6.57,9952
+List Canteens,GET,/api/v1/canteens,11,5,0,54.5,100.0,16.35,4.53,5.22,2230
+Operational Token Board,GET,/api/v1/pickup/token-board,11,6,1,45.5,90.9,21.53,10.72,16.51,26323
+Auth Current Session,GET,/api/v1/auth/me,10,1,1,90.0,90.0,7.15,6.86,9.17,465
+Vendor & Suppliers List,GET,/api/v1/inventory/suppliers,9,5,5,44.4,44.4,11.18,10.53,11.62,841
+Public Token Board,GET,/api/v1/pickup/board,3,3,0,0.0,100.0,11.64,4.3,4.9,10706
+Admin Users List (78 users),GET,/api/v1/admin/users,240,6,6,97.5,97.5,23.78,38.07,202.36,84665
+Inventory Items List,GET,/api/v1/inventory/canteens/5c9dcaa4-1f57-4921-9bee-25d1e5c9cd89/items,,4,4,,,14.56,9.14,11.08,4431
+Purchase Orders List,GET,/api/v1/inventory/canteens/5c9dcaa4-1f57-4921-9bee-25d1e5c9cd89/purchase-orders,,2,2,,,7.51,6.37,7.08,2
+Kitchen Orders Queue,GET,/api/v1/kitchen/canteens/5c9dcaa4-1f57-4921-9bee-25d1e5c9cd89/orders,,15,1,,,29.34,7.53,9.53,42673
+Readiness Health Probe,GET,/health/ready,,1,1,,,3.75,4.12,4.84,439

@@ -10,7 +10,7 @@ router = APIRouter(prefix="/canteens", tags=["Canteens & Locations"])
 
 @router.get("/college", response_model=CollegeSettingsOut)
 def get_college_info(db: Session = Depends(get_db)):
-    return college_service.get_or_create_college_settings(db)
+    return college_service.get_college_config_snapshot(db)
 
 
 @router.get("", response_model=list[CanteenOut])

@@ -41,12 +41,20 @@ def get_kitchen_orders(
     status: Optional[str] = Query(default=None),
     kitchen_id: Optional[UUID] = Query(default=None),
     station_id: Optional[UUID] = Query(default=None),
+    limit: int = Query(default=80, ge=1, le=300),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, canteen_id)
     return kitchen_service.list_kitchen_orders(
-        db, canteen_id, status_filter=status, kitchen_id=kitchen_id, station_id=station_id
+        db,
+        canteen_id,
+        status_filter=status,
+        kitchen_id=kitchen_id,
+        station_id=station_id,
+        limit=limit,
+        offset=offset,
     )
 
 

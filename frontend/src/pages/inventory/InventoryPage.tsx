@@ -18,6 +18,7 @@ import {
   Upload,
 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
+import { useDebouncedValue } from "../../hooks/useDebouncedValue";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
 import { useAppStore } from "../../store/useAppStore";
 import type { Canteen } from "../../types";
@@ -54,6 +55,7 @@ export const InventoryPage: React.FC = () => {
 
   const [section, setSection] = useState<SectionTab>("all");
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 300);
   const [catFilter, setCatFilter] = useState("all");
   const [stockFilter, setStockFilter] = useState("all");
   const [showArchived, setShowArchived] = useState(false);
@@ -82,11 +84,11 @@ export const InventoryPage: React.FC = () => {
   });
 
   const { data: items = [], refetch: refetchItems } = useQuery<any[]>({
-    queryKey: ["inv-items", activeId, search, catFilter, stockFilter, showArchived],
+    queryKey: ["inv-items", activeId, debouncedSearch, catFilter, stockFilter, showArchived],
     enabled: Boolean(activeId),
     queryFn: async () => {
       const qs = new URLSearchParams();
-      if (search.trim()) qs.set("search", search.trim());
+      if (debouncedSearch.trim()) qs.set("search", debouncedSearch.trim());
       if (catFilter !== "all") qs.set("category", catFilter);
       if (stockFilter !== "all") qs.set("stock_status", stockFilter);
       if (showArchived) qs.set("include_archived", "true");

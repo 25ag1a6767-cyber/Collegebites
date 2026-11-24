@@ -11,6 +11,10 @@ frontend/dist
 mobile
 e2e
 docs
+performance-testing
+VERCEL_CPU_OPTIMIZATION_REPORT.md
+CODE_CLEANUP_REPORT.md
+CAMPUS_LAUNCH_GUIDE.md
 Dockerfile
 docker-compose.yml
 backend/Dockerfile

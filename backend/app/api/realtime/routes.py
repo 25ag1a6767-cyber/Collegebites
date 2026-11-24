@@ -144,8 +144,9 @@ def _stream_with_watermark(
                     if remaining <= 0:
                         yield _format_sse("stream.reconnect", {"reason": "cycle", "version": seen_version})
                         break
+                    poll_interval = 1.5 if (os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")) else 1.0
                     try:
-                        await asyncio.wait_for(queue.get(), timeout=min(0.9, remaining))
+                        await asyncio.wait_for(queue.get(), timeout=min(poll_interval, remaining))
                         while not queue.empty():
                             try:
                                 queue.get_nowait()

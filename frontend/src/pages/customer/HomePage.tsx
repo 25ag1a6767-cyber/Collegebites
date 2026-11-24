@@ -15,6 +15,7 @@ import {
   Tag,
 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
+import { useDebouncedValue } from "../../hooks/useDebouncedValue";
 import { useAppStore } from "../../store/useAppStore";
 import { useOfflineStore } from "../../store/useOfflineStore";
 import { fetchWithOfflineCache } from "../../utils/offlineSync";
@@ -32,6 +33,7 @@ export const HomePage: React.FC = () => {
   const isOnline = useOfflineStore((s) => s.isOnline);
 
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 300);
   const [selectedCategoryId, setSelectedCategoryId] = useState<string>("");
   const [vegFilter, setVegFilter] = useState<"all" | "veg" | "nonveg">("all");
   const [maxPrice, setMaxPrice] = useState<string>("");
@@ -53,7 +55,8 @@ export const HomePage: React.FC = () => {
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
     queryFn: () => fetchWithOfflineCache("canteens", async () => (await api.get("/canteens")).data),
-    refetchInterval: isOnline ? 15000 : false,
+    staleTime: 15_000,
+    refetchInterval: isOnline ? 30_000 : false,
   });
 
   const activeCanteen = useMemo(
@@ -68,7 +71,8 @@ export const HomePage: React.FC = () => {
       fetchWithOfflineCache(`categories:${activeCanteen!.id}`, async () =>
         (await api.get(`/menus/canteens/${activeCanteen!.id}/categories`)).data
       ),
-    refetchInterval: isOnline ? 8000 : false,
+    staleTime: 60_000,
+    refetchInterval: isOnline ? 60_000 : false,
   });
 
   // Honor QR deep-link query params (?canteen=<slug|id>&category=<id|slug>#menu) and /canteen/:canteenSlug
@@ -101,12 +105,13 @@ export const HomePage: React.FC = () => {
   }, [activeCanteen?.id]);
 
   const { data: items = [], isLoading: itemsLoading } = useQuery<FoodItem[]>({
-    queryKey: ["menu-items", activeCanteen?.id, search, selectedCategoryId, vegFilter, maxPrice, sortBy, activeTag],
+    queryKey: ["menu-items", activeCanteen?.id, debouncedSearch, selectedCategoryId, vegFilter, maxPrice, sortBy, activeTag],
     enabled: Boolean(activeCanteen?.id),
-    refetchInterval: isOnline ? 8000 : false,
+    staleTime: 20_000,
+    refetchInterval: isOnline ? 30_000 : false,
     queryFn: async () => {
       const params = new URLSearchParams();
-      if (search.trim()) params.set("q", search.trim());
+      if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
       if (selectedCategoryId) params.set("category_id", selectedCategoryId);
       if (vegFilter === "veg") params.set("is_veg", "true");
       if (vegFilter === "nonveg") params.set("is_veg", "false");
@@ -118,7 +123,7 @@ export const HomePage: React.FC = () => {
       params.set("available_only", "true");
       params.set("sort_by", sortBy);
       const key =
-        !search.trim() && !selectedCategoryId && vegFilter === "all" && !maxPrice && activeTag === "all"
+        !debouncedSearch.trim() && !selectedCategoryId && vegFilter === "all" && !maxPrice && activeTag === "all"
           ? `menu:${activeCanteen!.id}:all`
           : `menu:${activeCanteen!.id}:${params.toString()}`;
       return fetchWithOfflineCache(key, async () =>
@@ -130,7 +135,8 @@ export const HomePage: React.FC = () => {
   const { data: recommended = [] } = useQuery<FoodItem[]>({
     queryKey: ["smart-recs", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
-    refetchInterval: 10000,
+    staleTime: 30_000,
+    refetchInterval: isOnline ? 45_000 : false,
     queryFn: async () => (await api.get(`/kiosk/recommendations/${activeCanteen!.id}`)).data,
   });
 
@@ -413,6 +419,8 @@ export const HomePage: React.FC = () => {
                 <img
                   src={item.images[0]?.image_url || "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=300"}
                   alt={item.name}
+                  loading="lazy"
+                  decoding="async"
                   className="h-16 w-16 rounded-xl object-cover shrink-0"
                 />
                 <div className="min-w-0 flex-1">
@@ -521,13 +529,15 @@ export const HomePage: React.FC = () => {
                 key={item.id}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: idx * 0.03 }}
+                transition={{ delay: Math.min(idx, 10) * 0.02 }}
               >
                 <Card className="overflow-hidden flex flex-col h-full">
                   <div className="relative h-44 bg-slate-100">
                     <img
                       src={item.images[0]?.image_url || "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=600"}
                       alt={item.name}
+                      loading="lazy"
+                      decoding="async"
                       className="h-full w-full object-cover"
                     />
                     <div className="absolute left-3 top-3 flex flex-wrap gap-1.5">

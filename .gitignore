@@ -25,6 +25,8 @@ build/
 
 # Databases / Logs / Temp
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.log
 .pgdata/

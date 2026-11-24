@@ -159,6 +159,10 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
     }
   }, [status, enabled, ssePath, wsPath, qc]);
 
+  // Keep statusRef in sync so visibilitychange never tears down an already-live SSE/WS connection
+  const statusRef = useRef(status);
+  statusRef.current = status;
+
   // Reset deduplication cursor when subscription target changes
   useEffect(() => {
     lastVersionRef.current = null;
@@ -178,9 +182,12 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
     };
     const handleVisible = () => {
       if (document.visibilityState === "visible") {
-        invalidateAll();
         if (navigator.onLine !== false) {
-          setReconnectTick((n) => n + 1);
+          // Only tear down & reconnect if stream is not already live
+          if (statusRef.current !== "live") {
+            setReconnectTick((n) => n + 1);
+            invalidateAll();
+          }
           void flushSyncQueue(qc);
         }
       }

@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.cache import NS_MENU, cache_manager, invalidate_menu
 from app.core.time_utils import get_college_tz, now_college
 from app.models.auth import User
 from app.models.college import Canteen, CollegeSettings, Kitchen, KitchenStation
@@ -86,8 +87,9 @@ def compute_schedule_availability_map(
     if not food_item_ids:
         return {}
 
-    college_row = db.scalar(select(CollegeSettings))
-    tz_name = college_row.college_timezone if college_row else None
+    from app.services.college_service import get_college_config_snapshot
+
+    tz_name = get_college_config_snapshot(db).get("college_timezone")
     if target_dt is not None:
         tz = get_college_tz(tz_name)
         now_dt = target_dt.astimezone(tz) if target_dt.tzinfo else target_dt.replace(tzinfo=tz)
@@ -161,6 +163,7 @@ def serialize_food_item(
     addon_map: Optional[dict[UUID, FoodAddon]] = None,
     allergen_map: Optional[dict[UUID, Allergen]] = None,
     schedule_active_map: Optional[dict[UUID, bool]] = None,
+    station_map: Optional[dict[UUID, KitchenStation]] = None,
 ) -> FoodItemOut:
     category = category_map.get(item.category_id) if category_map is not None else db.get(FoodCategory, item.category_id)
     addons: list[FoodAddonOut] = []
@@ -190,7 +193,10 @@ def serialize_food_item(
     else:
         sched_ok = compute_schedule_availability_map(db, [item.id]).get(item.id, True)
 
-    station = db.get(KitchenStation, item.station_id) if item.station_id else None
+    if item.station_id:
+        station = station_map.get(item.station_id) if station_map is not None else db.get(KitchenStation, item.station_id)
+    else:
+        station = None
     cat_active = bool(category.is_active) if category else True
     pending_restore = bool(getattr(item, "pending_restore_approval", False))
     avail_to_order = bool(item.is_active and cat_active and item.is_available and not item.insufficient_ingredients and sched_ok)
@@ -256,6 +262,20 @@ def list_categories(db: Session, canteen_id: UUID, include_inactive: bool = Fals
     return list(db.scalars(stmt).all())
 
 
+def list_categories_cached(db: Session, canteen_id: UUID, include_inactive: bool = False) -> list[dict]:
+    from app.schemas.menu import FoodCategoryOut
+
+    cache_ns = f"{NS_MENU}:{canteen_id}"
+    cache_key = f"cats:inc={int(bool(include_inactive))}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=3.0)
+    if hit and isinstance(cached, list):
+        return cached
+    rows = list_categories(db, canteen_id, include_inactive=include_inactive)
+    out = [FoodCategoryOut.model_validate(c).model_dump(mode="json") for c in rows]
+    cache_manager.set_json(cache_ns, cache_key, out, ttl_seconds=60, l1_ttl=3.0)
+    return out
+
+
 def create_category(db: Session, payload: FoodCategoryCreate, actor_user_id: UUID) -> FoodCategory:
     if not db.get(Canteen, payload.canteen_id):
         raise HTTPException(status_code=404, detail="Canteen not found")
@@ -269,6 +289,7 @@ def create_category(db: Session, payload: FoodCategoryCreate, actor_user_id: UUI
     record_audit_log(db, action="category.created", entity_type="food_category", entity_id=payload.slug, actor_user_id=actor_user_id)
     db.commit()
     db.refresh(cat)
+    invalidate_menu(payload.canteen_id)
     return cat
 
 
@@ -281,6 +302,7 @@ def update_category(db: Session, category_id: UUID, payload: FoodCategoryUpdate,
     record_audit_log(db, action="category.updated", entity_type="food_category", entity_id=str(cat.id), actor_user_id=actor_user_id)
     db.commit()
     db.refresh(cat)
+    invalidate_menu(cat.canteen_id)
     return cat
 
 
@@ -301,6 +323,17 @@ def list_food_items(
     include_inactive: bool = False,
     sort_by: str = "popularity",
 ) -> list[FoodItemOut]:
+    cache_ns = f"{NS_MENU}:{canteen_id}"
+    q_norm = (q or "").strip().lower()
+    cache_key = (
+        f"items:q={q_norm}|cat={category_id}|veg={is_veg}|min={min_price}|max={max_price}|"
+        f"feat={featured}|pop={popular}|spec={todays_special}|rec={recommended}|"
+        f"avail={int(bool(available_only))}|inc={int(bool(include_inactive))}|sort={sort_by}"
+    )
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=2.0)
+    if hit and isinstance(cached, list):
+        return [FoodItemOut.model_validate(x) for x in cached]
+
     stmt = (
         select(FoodItem)
         .join(FoodCategory, FoodCategory.id == FoodItem.category_id)
@@ -347,14 +380,21 @@ def list_food_items(
 
     items = db.scalars(stmt).all()
     if not items:
+        cache_manager.set_json(cache_ns, cache_key, [], ttl_seconds=10 if q_norm else 20, l1_ttl=2.0)
         return []
     cat_ids = list({i.category_id for i in items})
     addon_ids = list({lnk.addon_id for i in items for lnk in i.addon_links})
     allergen_ids = list({alnk.allergen_id for i in items for alnk in i.allergen_links})
+    station_ids = list({i.station_id for i in items if i.station_id})
     cat_map = {c.id: c for c in db.scalars(select(FoodCategory).where(FoodCategory.id.in_(cat_ids))).all()} if cat_ids else {}
     addon_map = {a.id: a for a in db.scalars(select(FoodAddon).where(FoodAddon.id.in_(addon_ids))).all()} if addon_ids else {}
     alg_map = {a.id: a for a in db.scalars(select(Allergen).where(Allergen.id.in_(allergen_ids))).all()} if allergen_ids else {}
-    sched_map = compute_schedule_availability_map(db, [i.id for i in items])
+    station_map = {s.id: s for s in db.scalars(select(KitchenStation).where(KitchenStation.id.in_(station_ids))).all()} if station_ids else {}
+    sched_map = compute_schedule_availability_map(
+        db,
+        [i.id for i in items],
+        food_items_map={i.id: i for i in items},
+    )
 
     serialized = [
         serialize_food_item(
@@ -364,11 +404,19 @@ def list_food_items(
             addon_map=addon_map,
             allergen_map=alg_map,
             schedule_active_map=sched_map,
+            station_map=station_map,
         )
         for item in items
     ]
     if available_only:
         serialized = [s for s in serialized if s.is_schedule_active_now]
+    cache_manager.set_json(
+        cache_ns,
+        cache_key,
+        [s.model_dump(mode="json") for s in serialized],
+        ttl_seconds=10 if q_norm else 20,
+        l1_ttl=2.0,
+    )
     return serialized
 
 
@@ -447,6 +495,7 @@ def create_food_item(db: Session, payload: FoodItemCreate, actor_user_id: UUID) 
         details={"name": item.name, "base_price": str(item.base_price)},
     )
     db.commit()
+    invalidate_menu(item.canteen_id)
     return get_food_item(db, item.id)
 
 
@@ -528,6 +577,7 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
         details=payload.model_dump(exclude_unset=True, mode="json"),
     )
     db.commit()
+    invalidate_menu(item.canteen_id)
     return get_food_item(db, item.id)
 
 
@@ -553,6 +603,7 @@ def delete_food_item(db: Session, item_id: UUID, actor_user_id: UUID) -> dict:
             details={"name": item.name, "order_ref_count": order_ref_count},
         )
         db.commit()
+        invalidate_menu(item.canteen_id)
         return {
             "status": "archived",
             "id": str(item_id),
@@ -561,6 +612,7 @@ def delete_food_item(db: Session, item_id: UUID, actor_user_id: UUID) -> dict:
         }
 
     item_name = item.name
+    item_canteen_id = item.canteen_id
     db.execute(delete(CartItem).where(CartItem.food_item_id == item.id))
     db.delete(item)
     record_audit_log(
@@ -572,6 +624,7 @@ def delete_food_item(db: Session, item_id: UUID, actor_user_id: UUID) -> dict:
         details={"name": item_name},
     )
     db.commit()
+    invalidate_menu(item_canteen_id)
     return {
         "status": "deleted",
         "id": str(item_id),
@@ -601,6 +654,7 @@ def set_food_item_primary_image(db: Session, item_id: UUID, image_url: str, acto
         details={"is_data_uri": image_url.startswith("data:")},
     )
     db.commit()
+    invalidate_menu(item.canteen_id)
     return get_food_item(db, item.id)
 
 
@@ -610,6 +664,7 @@ def create_addon(db: Session, payload: FoodAddonCreate, actor_user_id: UUID) -> 
     record_audit_log(db, action="addon.created", entity_type="food_addon", entity_id=payload.name, actor_user_id=actor_user_id)
     db.commit()
     db.refresh(addon)
+    invalidate_menu(addon.canteen_id)
     return addon
 
 
@@ -619,6 +674,7 @@ def update_addon(db: Session, addon: FoodAddon, payload: FoodAddonUpdate, actor_
     record_audit_log(db, action="addon.updated", entity_type="food_addon", entity_id=str(addon.id), actor_user_id=actor_user_id)
     db.commit()
     db.refresh(addon)
+    invalidate_menu(addon.canteen_id)
     return addon
 
 
@@ -670,6 +726,7 @@ def add_addon_to_food_item(db: Session, item_id: UUID, payload: FoodItemAddonCre
     )
     db.commit()
     db.refresh(addon)
+    invalidate_menu(item.canteen_id)
     return addon
 
 
@@ -693,6 +750,7 @@ def unlink_addon_from_food_item(db: Session, item_id: UUID, addon_id: UUID, acto
         details={"addon_id": str(addon_id)},
     )
     db.commit()
+    invalidate_menu(item.canteen_id)
     return {"status": "removed", "item_id": str(item_id), "addon_id": str(addon_id)}
 
 
@@ -810,6 +868,7 @@ def review_restore_approval(
         details={"request_id": str(req.id), "decision": decision, "review_notes": review_notes},
     )
     db.commit()
+    invalidate_menu(food.canteen_id)
     emit_order_event_sync(
         str(food.canteen_id),
         "inventory",
@@ -837,6 +896,7 @@ def create_schedule(db: Session, payload: MenuScheduleCreate, actor_user_id: UUI
     record_audit_log(db, action="menu_schedule.created", entity_type="menu_schedule", entity_id=payload.name, actor_user_id=actor_user_id)
     db.commit()
     db.refresh(sched)
+    invalidate_menu(sched.canteen_id)
     return _serialize_schedule(db, sched)
 
 
@@ -846,6 +906,7 @@ def update_schedule(db: Session, sched: MenuSchedule, payload: MenuScheduleUpdat
     record_audit_log(db, action="menu_schedule.updated", entity_type="menu_schedule", entity_id=str(sched.id), actor_user_id=actor_user_id)
     db.commit()
     db.refresh(sched)
+    invalidate_menu(sched.canteen_id)
     return _serialize_schedule(db, sched)
 
 
@@ -869,6 +930,7 @@ def assign_schedule_items(
         details={"count": len(set(food_item_ids))},
     )
     db.commit()
+    invalidate_menu(sched.canteen_id)
     return _serialize_schedule(db, sched)
 
 
@@ -1014,4 +1076,5 @@ def import_menu_csv(db: Session, canteen_id: UUID, csv_text: str, actor_user_id:
         details={"created": created_count, "updated": updated_count, "errors": len(errors)},
     )
     db.commit()
+    invalidate_menu(canteen_id)
     return {"created": created_count, "updated": updated_count, "errors": errors}

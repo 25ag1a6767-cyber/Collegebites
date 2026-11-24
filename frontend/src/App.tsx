@@ -1,35 +1,59 @@
-import React from "react";
+import React, { Suspense, lazy } from "react";
 import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Navbar } from "./components/layout/Navbar";
 import { OfflineBanner } from "./components/layout/OfflineBanner";
 import { MobileAppNav } from "./components/layout/MobileAppNav";
-import { BrandFooter, BrandLogo } from "./components/branding/BrandLogo";
+import { BrandFooter, BrandLoadingState, BrandLogo } from "./components/branding/BrandLogo";
 import { Button, Card, ToastProvider } from "./components/ui/Primitives";
 import { useAppStore } from "./store/useAppStore";
-import { AuthPage } from "./pages/auth/AuthPage";
 import { HomePage } from "./pages/customer/HomePage";
-import { ScanQRPage } from "./pages/customer/ScanQRPage";
-import { CheckoutPage } from "./pages/customer/CheckoutPage";
-import { OrderTrackingPage } from "./pages/customer/OrderTrackingPage";
-import { MyOrdersPage } from "./pages/customer/MyOrdersPage";
-import { ProfilePage } from "./pages/customer/ProfilePage";
-import { SupportPage } from "./pages/customer/SupportPage";
-import { KitchenDisplayPage } from "./pages/kitchen/KitchenDisplayPage";
-import { CashierPOSPage } from "./pages/cashier/CashierPOSPage";
-import { PickupScannerPage } from "./pages/pickup/PickupScannerPage";
-import { TokenBoardPage } from "./pages/board/TokenBoardPage";
-import { InventoryPage } from "./pages/inventory/InventoryPage";
-import { OperationalTokenBoardPage } from "./pages/board/OperationalTokenBoardPage";
-import { AdminConsolePage } from "./pages/admin/AdminConsolePage";
-import { KioskPage } from "./pages/kiosk/KioskPage";
-import { StaffPortalPage } from "./pages/staff/StaffPortalPage";
+
+// Route-level code splitting so customers on `/` do not download Admin, Recharts, QR scanner, or Stripe chunks eagerly
+const AuthPage = lazy(() => import("./pages/auth/AuthPage").then((m) => ({ default: m.AuthPage })));
+const ScanQRPage = lazy(() => import("./pages/customer/ScanQRPage").then((m) => ({ default: m.ScanQRPage })));
+const CheckoutPage = lazy(() => import("./pages/customer/CheckoutPage").then((m) => ({ default: m.CheckoutPage })));
+const OrderTrackingPage = lazy(() =>
+  import("./pages/customer/OrderTrackingPage").then((m) => ({ default: m.OrderTrackingPage }))
+);
+const MyOrdersPage = lazy(() => import("./pages/customer/MyOrdersPage").then((m) => ({ default: m.MyOrdersPage })));
+const ProfilePage = lazy(() => import("./pages/customer/ProfilePage").then((m) => ({ default: m.ProfilePage })));
+const SupportPage = lazy(() => import("./pages/customer/SupportPage").then((m) => ({ default: m.SupportPage })));
+const KitchenDisplayPage = lazy(() =>
+  import("./pages/kitchen/KitchenDisplayPage").then((m) => ({ default: m.KitchenDisplayPage }))
+);
+const CashierPOSPage = lazy(() =>
+  import("./pages/cashier/CashierPOSPage").then((m) => ({ default: m.CashierPOSPage }))
+);
+const PickupScannerPage = lazy(() =>
+  import("./pages/pickup/PickupScannerPage").then((m) => ({ default: m.PickupScannerPage }))
+);
+const TokenBoardPage = lazy(() =>
+  import("./pages/board/TokenBoardPage").then((m) => ({ default: m.TokenBoardPage }))
+);
+const InventoryPage = lazy(() =>
+  import("./pages/inventory/InventoryPage").then((m) => ({ default: m.InventoryPage }))
+);
+const OperationalTokenBoardPage = lazy(() =>
+  import("./pages/board/OperationalTokenBoardPage").then((m) => ({ default: m.OperationalTokenBoardPage }))
+);
+const AdminConsolePage = lazy(() =>
+  import("./pages/admin/AdminConsolePage").then((m) => ({ default: m.AdminConsolePage }))
+);
+const KioskPage = lazy(() => import("./pages/kiosk/KioskPage").then((m) => ({ default: m.KioskPage })));
+const StaffPortalPage = lazy(() =>
+  import("./pages/staff/StaffPortalPage").then((m) => ({ default: m.StaffPortalPage }))
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
-      staleTime: 10_000,
+      // Axios client interceptor already performs bounded GET retries on 502/503/504/network errors;
+      // keeping React Query retry=false prevents 6x retry amplification under high load.
+      retry: false,
+      staleTime: 15_000,
+      gcTime: 5 * 60_000,
+      refetchOnWindowFocus: false,
     },
   },
 });
@@ -80,108 +104,110 @@ export function App() {
             <Navbar />
             <OfflineBanner />
             <div className="flex-1">
-              <Routes>
-              <Route path="/" element={<HomePage />} />
-              <Route path="/canteen/:canteenSlug" element={<HomePage />} />
-              <Route path="/login" element={<AuthPage initialMode="login" />} />
-              <Route path="/register" element={<AuthPage initialMode="register" />} />
-              <Route path="/scan" element={<ScanQRPage />} />
-              <Route path="/scan/:code" element={<ScanQRPage />} />
-              <Route path="/checkout" element={<CheckoutPage />} />
-              <Route path="/orders" element={<MyOrdersPage />} />
-              <Route path="/orders/:orderNumber" element={<OrderTrackingPage />} />
-              <Route path="/profile" element={<ProfilePage />} />
-              <Route path="/support" element={<SupportPage />} />
-              <Route
-                path="/kitchen"
-                element={
-                  <RequireRole allowed={["kitchen_staff", "canteen_manager", "college_admin"]}>
-                    <KitchenDisplayPage />
-                  </RequireRole>
-                }
-              />
-              <Route
-                path="/cashier"
-                element={
-                  <RequireRole allowed={["cashier", "canteen_manager", "college_admin"]}>
-                    <CashierPOSPage />
-                  </RequireRole>
-                }
-              />
-              <Route
-                path="/pickup"
-                element={
-                  <RequireRole allowed={["pickup_staff", "cashier", "canteen_manager", "college_admin"]}>
-                    <PickupScannerPage />
-                  </RequireRole>
-                }
-              />
-              <Route
-                path="/pickup/verify"
-                element={
-                  <RequireRole allowed={["pickup_staff", "cashier", "canteen_manager", "college_admin"]}>
-                    <PickupScannerPage />
-                  </RequireRole>
-                }
-              />
-              <Route path="/board" element={<TokenBoardPage />} />
-              <Route path="/board/:canteenId" element={<TokenBoardPage />} />
-              <Route path="/display" element={<TokenBoardPage />} />
-              <Route path="/display/:canteenId" element={<TokenBoardPage />} />
-              <Route path="/tv" element={<TokenBoardPage />} />
-              <Route path="/tv/:canteenId" element={<TokenBoardPage />} />
-              <Route
-                path="/token-board"
-                element={
-                  <RequireRole allowed={["canteen_manager", "kitchen_staff", "pickup_staff", "cashier", "college_admin"]}>
-                    <OperationalTokenBoardPage />
-                  </RequireRole>
-                }
-              />
-              <Route
-                path="/token-board/:canteenId"
-                element={
-                  <RequireRole allowed={["canteen_manager", "kitchen_staff", "pickup_staff", "cashier", "college_admin"]}>
-                    <OperationalTokenBoardPage />
-                  </RequireRole>
-                }
-              />
-              <Route
-                path="/inventory"
-                element={
-                  <RequireRole allowed={["inventory_manager", "canteen_manager", "college_admin"]}>
-                    <InventoryPage />
-                  </RequireRole>
-                }
-              />
-              <Route
-                path="/admin"
-                element={
-                  <RequireRole allowed={["canteen_manager", "college_admin"]}>
-                    <AdminConsolePage />
-                  </RequireRole>
-                }
-              />
-              <Route
-                path="/staff"
-                element={
-                  <RequireRole
-                    allowed={[
-                      "kitchen_staff",
-                      "cashier",
-                      "pickup_staff",
-                      "inventory_manager",
-                      "canteen_manager",
-                      "college_admin",
-                    ]}
-                  >
-                    <StaffPortalPage />
-                  </RequireRole>
-                }
-              />
-              <Route path="/kiosk" element={<KioskPage />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
+              <Suspense fallback={<BrandLoadingState message="Loading CollegeBites workspace..." />}>
+                <Routes>
+                  <Route path="/" element={<HomePage />} />
+                  <Route path="/canteen/:canteenSlug" element={<HomePage />} />
+                  <Route path="/login" element={<AuthPage initialMode="login" />} />
+                  <Route path="/register" element={<AuthPage initialMode="register" />} />
+                  <Route path="/scan" element={<ScanQRPage />} />
+                  <Route path="/scan/:code" element={<ScanQRPage />} />
+                  <Route path="/checkout" element={<CheckoutPage />} />
+                  <Route path="/orders" element={<MyOrdersPage />} />
+                  <Route path="/orders/:orderNumber" element={<OrderTrackingPage />} />
+                  <Route path="/profile" element={<ProfilePage />} />
+                  <Route path="/support" element={<SupportPage />} />
+                  <Route
+                    path="/kitchen"
+                    element={
+                      <RequireRole allowed={["kitchen_staff", "canteen_manager", "college_admin"]}>
+                        <KitchenDisplayPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/cashier"
+                    element={
+                      <RequireRole allowed={["cashier", "canteen_manager", "college_admin"]}>
+                        <CashierPOSPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/pickup"
+                    element={
+                      <RequireRole allowed={["pickup_staff", "cashier", "canteen_manager", "college_admin"]}>
+                        <PickupScannerPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/pickup/verify"
+                    element={
+                      <RequireRole allowed={["pickup_staff", "cashier", "canteen_manager", "college_admin"]}>
+                        <PickupScannerPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route path="/board" element={<TokenBoardPage />} />
+                  <Route path="/board/:canteenId" element={<TokenBoardPage />} />
+                  <Route path="/display" element={<TokenBoardPage />} />
+                  <Route path="/display/:canteenId" element={<TokenBoardPage />} />
+                  <Route path="/tv" element={<TokenBoardPage />} />
+                  <Route path="/tv/:canteenId" element={<TokenBoardPage />} />
+                  <Route
+                    path="/token-board"
+                    element={
+                      <RequireRole allowed={["canteen_manager", "kitchen_staff", "pickup_staff", "cashier", "college_admin"]}>
+                        <OperationalTokenBoardPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/token-board/:canteenId"
+                    element={
+                      <RequireRole allowed={["canteen_manager", "kitchen_staff", "pickup_staff", "cashier", "college_admin"]}>
+                        <OperationalTokenBoardPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/inventory"
+                    element={
+                      <RequireRole allowed={["inventory_manager", "canteen_manager", "college_admin"]}>
+                        <InventoryPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/admin"
+                    element={
+                      <RequireRole allowed={["canteen_manager", "college_admin"]}>
+                        <AdminConsolePage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/staff"
+                    element={
+                      <RequireRole
+                        allowed={[
+                          "kitchen_staff",
+                          "cashier",
+                          "pickup_staff",
+                          "inventory_manager",
+                          "canteen_manager",
+                          "college_admin",
+                        ]}
+                      >
+                        <StaffPortalPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route path="/kiosk" element={<KioskPage />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </Suspense>
             </div>
             <BrandFooter />
             <MobileAppNav />

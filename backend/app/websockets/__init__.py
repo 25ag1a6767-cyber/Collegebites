@@ -90,7 +90,15 @@ ws_manager = ConnectionManager()
 
 
 def emit_order_event_sync(canteen_id: str, order_id: str, event_type: str, payload: dict[str, Any]) -> None:
-    """Safely schedule WebSocket and SSE broadcasts from sync or async FastAPI service contexts."""
+    """Safely schedule WebSocket/SSE broadcasts and invalidate affected board/queue/report caches."""
+    try:
+        from app.core.cache import invalidate_board_and_queue, invalidate_reports
+
+        invalidate_board_and_queue(canteen_id)
+        if event_type in ("order.placed", "order.completed", "order.cancelled", "order.rejected"):
+            invalidate_reports(canteen_id)
+    except Exception:
+        pass
     message = {"event": event_type, "order_id": order_id, "canteen_id": canteen_id, "data": payload}
     ws_manager.schedule_broadcast(f"order:{order_id}", message)
     ws_manager.schedule_broadcast(f"kitchen:{canteen_id}", message)

@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.cache import NS_QUEUE, cache_manager
 from app.models.auth import StaffProfile, User
 from app.models.college import Kitchen, KitchenStation
 from app.models.engagement import Notification
@@ -30,7 +31,17 @@ def list_kitchen_orders(
     status_filter: Optional[str] = None,
     kitchen_id: Optional[UUID] = None,
     station_id: Optional[UUID] = None,
+    limit: int = 80,
+    offset: int = 0,
 ) -> list[OrderOut]:
+    bounded_limit = max(1, min(int(limit or 80), 300))
+    bounded_offset = max(0, int(offset or 0))
+    cache_ns = f"{NS_QUEUE}:{canteen_id}"
+    cache_key = f"korders:{status_filter or 'active'}:{kitchen_id or 'all'}:{station_id or 'all'}:{bounded_offset}:{bounded_limit}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=1.5)
+    if hit and isinstance(cached, list):
+        return [OrderOut.model_validate(x) for x in cached]
+
     stmt = (
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
@@ -45,8 +56,11 @@ def list_kitchen_orders(
         stmt = stmt.where(Order.status == status_filter)
     else:
         stmt = stmt.where(Order.status.in_(KITCHEN_ACTIVE_STATUSES))
+    stmt = stmt.offset(bounded_offset).limit(bounded_limit)
     orders = db.scalars(stmt).all()
-    return serialize_orders_batch(db, list(orders))
+    result = serialize_orders_batch(db, list(orders))
+    cache_manager.set_json(cache_ns, cache_key, [r.model_dump(mode="json") for r in result], ttl_seconds=3, l1_ttl=1.5)
+    return result
 
 
 def accept_order(db: Session, order_id: UUID, staff_user_id: UUID) -> OrderOut:
@@ -306,6 +320,9 @@ def toggle_item_availability_from_kitchen(
         details={"name": item.name, "is_available": payload.is_available, "reason": payload.reason},
     )
     db.commit()
+    from app.core.cache import invalidate_menu
+
+    invalidate_menu(item.canteen_id)
     ws_manager.schedule_broadcast(
         f"board:{item.canteen_id}",
         {"event": "menu.availability_changed", "canteen_id": str(item.canteen_id), "data": {"food_item_id": str(item.id), "is_available": item.is_available}},
@@ -420,6 +437,9 @@ def report_ingredient_unavailable(db: Session, inventory_item_id: UUID, reason: 
         details={"ingredient": ing.name if ing else None, "reason": reason, "blocked_items": blocked},
     )
     db.commit()
+    from app.core.cache import invalidate_menu
+
+    invalidate_menu(inv.canteen_id)
     ws_manager.schedule_broadcast(
         f"board:{inv.canteen_id}",
         {"event": "menu.availability_changed", "canteen_id": str(inv.canteen_id), "data": {"blocked_food_items": blocked}},
@@ -453,6 +473,9 @@ def restore_ingredient_availability(db: Session, inventory_item_id: UUID, staff_
         details={"ingredient": ing.name if ing else None, "blocked_items": blocked},
     )
     db.commit()
+    from app.core.cache import invalidate_menu
+
+    invalidate_menu(inv.canteen_id)
     ws_manager.schedule_broadcast(
         f"kitchen:{inv.canteen_id}",
         {"event": "menu.availability_changed", "canteen_id": str(inv.canteen_id), "data": {"blocked_food_items": blocked}},

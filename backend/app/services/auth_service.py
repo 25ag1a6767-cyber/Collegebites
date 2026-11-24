@@ -340,6 +340,9 @@ def logout_session(db: Session, session_id: UUID, user_id: UUID, ip_address: Opt
         ip_address=ip_address,
     )
     db.commit()
+    from app.core.cache import invalidate_auth_session
+
+    invalidate_auth_session(session_id)
 
 
 def _mask_otp_destination(dest: str) -> str:
@@ -583,6 +586,11 @@ def change_user_password(
         ip_address=ip_address,
     )
     db.commit()
+    from app.core.cache import invalidate_auth_session, invalidate_auth_user
+
+    invalidate_auth_user(user.id)
+    for sess in other_sessions:
+        invalidate_auth_session(sess.id)
 
 
 def confirm_password_reset(db: Session, data: PasswordResetConfirmRequest, ip_address: Optional[str] = None) -> None:
@@ -592,9 +600,10 @@ def confirm_password_reset(db: Session, data: PasswordResetConfirmRequest, ip_ad
         raise HTTPException(status_code=404, detail="No matching account found")
     user.password_hash = hash_password(data.new_password)
     now = datetime.now(timezone.utc)
-    for sess in db.scalars(
+    revoked_sessions = db.scalars(
         select(SessionRecord).where(SessionRecord.user_id == user.id, SessionRecord.revoked_at.is_(None))
-    ).all():
+    ).all()
+    for sess in revoked_sessions:
         sess.revoked_at = now
     for tok in db.scalars(
         select(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
@@ -609,6 +618,11 @@ def confirm_password_reset(db: Session, data: PasswordResetConfirmRequest, ip_ad
         ip_address=ip_address,
     )
     db.commit()
+    from app.core.cache import invalidate_auth_session, invalidate_auth_user
+
+    invalidate_auth_user(user.id)
+    for sess in revoked_sessions:
+        invalidate_auth_session(sess.id)
 
 
 def create_staff_user(
@@ -700,13 +714,17 @@ def assign_user_roles(
         if role:
             db.add(UserRole(user_id=user.id, role_id=role.id, canteen_id=data.canteen_id))
 
+    revoked_sessions: list[SessionRecord] = []
     if data.is_active is not None:
         user.is_active = data.is_active
         if not data.is_active:
             now = datetime.now(timezone.utc)
-            for sess in db.scalars(
-                select(SessionRecord).where(SessionRecord.user_id == user.id, SessionRecord.revoked_at.is_(None))
-            ).all():
+            revoked_sessions = list(
+                db.scalars(
+                    select(SessionRecord).where(SessionRecord.user_id == user.id, SessionRecord.revoked_at.is_(None))
+                ).all()
+            )
+            for sess in revoked_sessions:
                 sess.revoked_at = now
             for tok in db.scalars(
                 select(RefreshToken).where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
@@ -727,5 +745,10 @@ def assign_user_roles(
         details={"roles": data.role_names, "canteen_id": str(data.canteen_id) if data.canteen_id else None},
     )
     db.commit()
+    from app.core.cache import invalidate_auth_session, invalidate_auth_user
+
+    invalidate_auth_user(user.id)
+    for sess in revoked_sessions:
+        invalidate_auth_session(sess.id)
     db.refresh(user)
     return build_user_out(db, user)

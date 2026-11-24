@@ -394,14 +394,14 @@ export default function ProfileScreen() {
               <Text style={{ fontSize: 11, color: "#475569" }}>
                 Status: {sub.status} ({sub.payment_status}) • Pass Code: {sub.redemption_code}
               </Text>
-              {sub.status === "active" && sub.redemption_code && (
-                <View style={{ alignItems: "center", paddingVertical: 8, backgroundColor: "#fff", borderRadius: 10 }}>
-                  <QRCode value={sub.redemption_qr_payload || sub.redemption_code} size={130} />
-                  <Text style={{ fontSize: 11, fontWeight: "800", color: "#380106", marginTop: 6 }}>
-                    Show at Pickup Counter to redeem 1 meal ({sub.daily_used_count || 0}/{sub.daily_limit || 2} used today)
-                  </Text>
-                </View>
-              )}
+                  {sub.status === "active" && sub.redemption_code && (
+                    <View style={{ alignItems: "center", paddingVertical: 8, backgroundColor: "#fff", borderRadius: 10 }}>
+                      <QRCode value={sub.redemption_qr_payload || sub.redemption_code} size={130} />
+                      <Text style={{ fontSize: 11, fontWeight: "800", color: "#380106", marginTop: 6 }}>
+                        Show at Pickup Counter to redeem 1 meal ({sub.used_meals || 0}/{sub.total_meals} used)
+                      </Text>
+                    </View>
+                  )}
             </View>
           ))}
           {mealPlans.length === 0 ? (
@@ -425,10 +425,9 @@ export default function ProfileScreen() {
                     try {
                       await profileApi.subscribeMealPlan(plan.id, {
                         payment_method: "razorpay",
-                        auto_confirm_demo: true,
                       });
                       await refetchMealSubs();
-                      setMsg(`Subscribed to ${plan.name}! Your QR meal pass is ready.`);
+                      setMsg(`Meal plan subscription initiated for ${plan.name}. Complete online payment to activate your QR pass.`);
                     } catch (e: unknown) {
                       setMsg(getMobileApiError(e, "Could not subscribe to meal plan"));
                     } finally {
@@ -460,7 +459,7 @@ export default function ProfileScreen() {
                       style={[styles.prefPill, active && styles.prefPillActive, { marginRight: 6 }]}
                     >
                       <Text style={{ fontSize: 11, fontWeight: "700", color: active ? "#fff" : "#0f172a" }}>
-                        {ev.title} ({ev.venue || "Campus"})
+                        {ev.name} ({ev.location || "Campus"})
                       </Text>
                     </Pressable>
                   );
@@ -516,16 +515,15 @@ export default function ProfileScreen() {
                     setBusy(true);
                     setMsg("");
                     try {
+                      const prepAt = new Date(Date.now() + 23 * 3600 * 1000).toISOString();
+                      const pickupAt = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
                       await profileApi.createEventBulkOrder(evId, {
-                        canteen_id: primaryCanteenId,
-                        organizer_name: fullName || user.full_name || "Campus Organizer",
-                        organizer_phone: phoneInput || user.phone || "+919876543210",
-                        organizer_email: user.email || null,
-                        department: department || "Computer Science",
-                        headcount: Math.max(5, Number(bulkHeadcount) || 25),
-                        requested_delivery_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-                        delivery_venue: bulkVenue || "Main Seminar Hall",
+                        idempotency_key: `mob-ebo-${Date.now()}`,
+                        scheduled_prep_at: prepAt,
+                        scheduled_pickup_at: pickupAt,
+                        pickup_arrangement: "grouped_token",
                         payment_method: "razorpay",
+                        notes: `Headcount: ${Math.max(5, Number(bulkHeadcount) || 25)}, Venue: ${bulkVenue || "Main Seminar Hall"}`,
                         items: [{ food_item_id: itemId, quantity: Math.max(5, Number(bulkFoodQty) || 25) }],
                       });
                       await refetchBulkOrders();
@@ -546,10 +544,11 @@ export default function ProfileScreen() {
           {myBulkOrders.slice(0, 4).map((bo: any) => (
             <View key={bo.id} style={styles.notifRow}>
               <Text style={{ fontWeight: "700", fontSize: 12 }}>
-                {bo.order_reference} • ₹{bo.total_amount} ({bo.headcount} pax)
+                {bo.bulk_order_number} • ₹{bo.total_amount} ({bo.total_quantity} items)
               </Text>
               <Text style={{ fontSize: 11, color: "#475569" }}>
-                Status: {bo.status} • Payment: {bo.payment_status} • Venue: {bo.delivery_venue || "Campus"}
+                Status: {bo.status} • Payment: {bo.payment_status}
+                {bo.group_pickup_token ? ` • Token: ${bo.group_pickup_token}` : ""}
               </Text>
             </View>
           ))}

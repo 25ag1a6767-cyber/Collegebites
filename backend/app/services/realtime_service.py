@@ -8,6 +8,7 @@ from fastapi import Request
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.cache import NS_BOARD, NS_QUEUE, cache_manager
 from app.core.database import get_db
 from app.core.security import sha256_hex
 from app.core.time_utils import today_college
@@ -35,7 +36,12 @@ def close_db_session(gen: Any) -> None:
 
 
 def compute_board_watermark(db: Session, canteen_id: Optional[UUID] = None) -> str:
-    """Fast single-row aggregate fingerprint for public token board state."""
+    """Fast single-row aggregate fingerprint for public token board state (coalesced across concurrent clients)."""
+    cache_ns = f"{NS_BOARD}:{canteen_id}" if canteen_id is not None else NS_BOARD
+    cache_key = f"wm:{canteen_id or 'all'}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=0.8)
+    if hit and isinstance(cached, str):
+        return cached
     today = today_college()
     stmt = (
         select(
@@ -68,7 +74,9 @@ def compute_board_watermark(db: Session, canteen_id: Optional[UUID] = None) -> s
             *(str(row[idx] or 0) for idx in range(3, 9)),
         ]
     )
-    return sha256_hex(raw)[:16]
+    wm = sha256_hex(raw)[:16]
+    cache_manager.set_json(cache_ns, cache_key, wm, ttl_seconds=2, l1_ttl=0.8)
+    return wm
 
 
 def fetch_board_snapshot(db: Session, canteen_id: Optional[UUID] = None) -> DigitalBoardResponse:
@@ -151,6 +159,11 @@ def compute_staff_orders_version(
     payment_status: Optional[str] = None,
     q: Optional[str] = None,
 ) -> str:
+    cache_ns = f"{NS_BOARD}:{canteen_id}" if canteen_id is not None else NS_BOARD
+    cache_key = f"staff_wm:{canteen_id or 'all'}:{status_filter or ''}:{payment_status or ''}:{(q or '').strip().lower()}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=0.8)
+    if hit and isinstance(cached, str):
+        return cached
     stmt = select(
         func.count(Order.id),
         func.max(Order.updated_at),
@@ -188,7 +201,9 @@ def compute_staff_orders_version(
             str(item_prep_ready),
         ]
     )
-    return sha256_hex(raw)[:16]
+    wm = sha256_hex(raw)[:16]
+    cache_manager.set_json(cache_ns, cache_key, wm, ttl_seconds=2, l1_ttl=0.8)
+    return wm
 
 
 def fetch_token_board_snapshot(db: Session, canteen_id: Optional[UUID] = None) -> OperationalTokenBoardResponse:
@@ -196,6 +211,11 @@ def fetch_token_board_snapshot(db: Session, canteen_id: Optional[UUID] = None) -
 
 
 def compute_queue_version(db: Session, canteen_id: UUID) -> str:
+    cache_ns = f"{NS_QUEUE}:{canteen_id}"
+    cache_key = f"qwm:{canteen_id}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=0.8)
+    if hit and isinstance(cached, str):
+        return cached
     row = db.execute(
         select(
             func.count(Order.id),
@@ -221,7 +241,9 @@ def compute_queue_version(db: Session, canteen_id: UUID) -> str:
             *(str(row[idx] or 0) for idx in range(3, 9)),
         ]
     )
-    return sha256_hex(raw)[:16]
+    wm = sha256_hex(raw)[:16]
+    cache_manager.set_json(cache_ns, cache_key, wm, ttl_seconds=2, l1_ttl=0.8)
+    return wm
 
 
 def fetch_queue_snapshot(db: Session, canteen_id: UUID) -> tuple[str, dict[str, Any]]:

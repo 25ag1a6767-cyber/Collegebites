@@ -6,6 +6,13 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.cache import (
+    NS_CANTEENS,
+    NS_COLLEGE,
+    cache_manager,
+    invalidate_canteens,
+    invalidate_college_settings,
+)
 from app.core.time_utils import now_college, today_college
 from app.models.college import (
     Canteen,
@@ -42,16 +49,34 @@ from app.services.audit_service import record_audit_log
 ACTIVE_CROWD_STATUSES = ("PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING")
 
 
+def get_college_config_snapshot(db: Session) -> dict:
+    """Return cached college settings dict (300s TTL, invalidated on admin settings update)."""
+    hit, cached = cache_manager.get_json(NS_COLLEGE, "settings", l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+    row = get_or_create_college_settings(db)
+    from app.schemas.college import CollegeSettingsOut
+
+    snap = CollegeSettingsOut.model_validate(row).model_dump(mode="json")
+    cache_manager.set_json(NS_COLLEGE, "settings", snap, ttl_seconds=300, l1_ttl=3.0)
+    return snap
+
+
 def compute_canteen_live_status(
     db: Session,
     canteen: Canteen,
     now: Optional[datetime] = None,
     *,
     precomputed_active_count: Optional[int] = None,
+    precomputed_tz_name: Optional[str] = None,
+    precomputed_holidays: Optional[list[CollegeHoliday]] = None,
+    precomputed_op_hour: Optional[OperatingHour] = None,
+    op_hour_loaded: bool = False,
 ) -> tuple[bool, str, int, int]:
     """Compute real-time openness, crowd level, ETA, and active order count."""
-    college_row = db.scalar(select(CollegeSettings))
-    tz_name = college_row.college_timezone if college_row else None
+    tz_name = precomputed_tz_name
+    if tz_name is None:
+        tz_name = get_college_config_snapshot(db).get("college_timezone")
     now_local = now or now_college(tz_name)
     today = now_local.date()
     current_time = now_local.time()
@@ -74,13 +99,16 @@ def compute_canteen_live_status(
         return False, "TEMPORARILY_UNAVAILABLE", canteen.default_prep_time_minutes, int(active_count)
 
     # Check all matching holidays on today's date
-    holidays = db.scalars(
-        select(CollegeHoliday).where(
-            CollegeHoliday.is_active.is_(True),
-            CollegeHoliday.holiday_date == today,
-            or_(CollegeHoliday.canteen_id == canteen.id, CollegeHoliday.canteen_id.is_(None)),
-        )
-    ).all()
+    if precomputed_holidays is not None:
+        holidays = [h for h in precomputed_holidays if h.canteen_id is None or h.canteen_id == canteen.id]
+    else:
+        holidays = db.scalars(
+            select(CollegeHoliday).where(
+                CollegeHoliday.is_active.is_(True),
+                CollegeHoliday.holiday_date == today,
+                or_(CollegeHoliday.canteen_id == canteen.id, CollegeHoliday.canteen_id.is_(None)),
+            )
+        ).all()
     for holiday in holidays:
         if holiday.is_full_day:
             return False, "TEMPORARILY_UNAVAILABLE", canteen.default_prep_time_minutes, int(active_count)
@@ -88,12 +116,15 @@ def compute_canteen_live_status(
             return False, "TEMPORARILY_UNAVAILABLE", canteen.default_prep_time_minutes, int(active_count)
 
     # Check operating hours if configured for today
-    op_hour = db.scalar(
-        select(OperatingHour).where(
-            OperatingHour.canteen_id == canteen.id,
-            OperatingHour.day_of_week == weekday,
+    if op_hour_loaded:
+        op_hour = precomputed_op_hour
+    else:
+        op_hour = db.scalar(
+            select(OperatingHour).where(
+                OperatingHour.canteen_id == canteen.id,
+                OperatingHour.day_of_week == weekday,
+            )
         )
-    )
     is_open = True
     if op_hour:
         if op_hour.is_closed:
@@ -123,10 +154,23 @@ def compute_canteen_live_status(
 
 
 def serialize_canteen(
-    db: Session, canteen: Canteen, *, precomputed_active_count: Optional[int] = None
+    db: Session,
+    canteen: Canteen,
+    *,
+    precomputed_active_count: Optional[int] = None,
+    precomputed_tz_name: Optional[str] = None,
+    precomputed_holidays: Optional[list[CollegeHoliday]] = None,
+    precomputed_op_hour: Optional[OperatingHour] = None,
+    op_hour_loaded: bool = False,
 ) -> CanteenOut:
     is_open, crowd, eta, active_count = compute_canteen_live_status(
-        db, canteen, precomputed_active_count=precomputed_active_count
+        db,
+        canteen,
+        precomputed_active_count=precomputed_active_count,
+        precomputed_tz_name=precomputed_tz_name,
+        precomputed_holidays=precomputed_holidays,
+        precomputed_op_hour=precomputed_op_hour,
+        op_hour_loaded=op_hour_loaded,
     )
     out = CanteenOut.model_validate(canteen)
     out.is_open_now = is_open
@@ -165,26 +209,80 @@ def update_college_settings(
     )
     db.commit()
     db.refresh(row)
+    invalidate_college_settings()
     return row
 
 
 def list_canteens(db: Session, include_inactive: bool = False) -> list[CanteenOut]:
+    cache_key = f"list:inactive={int(bool(include_inactive))}"
+    hit, cached = cache_manager.get_json(NS_CANTEENS, cache_key, l1_ttl=2.0)
+    if hit and isinstance(cached, list):
+        return [CanteenOut.model_validate(item) for item in cached]
+
     stmt = select(Canteen).order_by(Canteen.name.asc())
     if not include_inactive:
         stmt = stmt.where(Canteen.is_active.is_(True))
     rows = db.scalars(stmt).all()
     if not rows:
         return []
+    cids = [c.id for c in rows]
+    tz_name = get_college_config_snapshot(db).get("college_timezone")
+    now_local = now_college(tz_name)
+    today = now_local.date()
+    weekday = now_local.weekday()
+
     counts_rows = db.execute(
         select(Order.canteen_id, func.count(Order.id))
-        .where(Order.canteen_id.in_([c.id for c in rows]), Order.status.in_(ACTIVE_CROWD_STATUSES))
+        .where(Order.canteen_id.in_(cids), Order.status.in_(ACTIVE_CROWD_STATUSES))
         .group_by(Order.canteen_id)
     ).all()
     count_map = {cid: int(cnt) for cid, cnt in counts_rows}
-    return [serialize_canteen(db, c, precomputed_active_count=count_map.get(c.id, 0)) for c in rows]
+    holidays_today = list(
+        db.scalars(
+            select(CollegeHoliday).where(
+                CollegeHoliday.is_active.is_(True),
+                CollegeHoliday.holiday_date == today,
+                or_(CollegeHoliday.canteen_id.in_(cids), CollegeHoliday.canteen_id.is_(None)),
+            )
+        ).all()
+    )
+    op_hour_map = {
+        oh.canteen_id: oh
+        for oh in db.scalars(
+            select(OperatingHour).where(
+                OperatingHour.canteen_id.in_(cids),
+                OperatingHour.day_of_week == weekday,
+            )
+        ).all()
+    }
+    result = [
+        serialize_canteen(
+            db,
+            c,
+            precomputed_active_count=count_map.get(c.id, 0),
+            precomputed_tz_name=tz_name,
+            precomputed_holidays=holidays_today,
+            precomputed_op_hour=op_hour_map.get(c.id),
+            op_hour_loaded=True,
+        )
+        for c in rows
+    ]
+    cache_manager.set_json(
+        NS_CANTEENS,
+        cache_key,
+        [r.model_dump(mode="json") for r in result],
+        ttl_seconds=10,
+        l1_ttl=2.0,
+    )
+    return result
 
 
 def get_canteen_detail(db: Session, canteen_id_or_slug: str) -> CanteenDetailOut:
+    cache_key = f"detail:{canteen_id_or_slug.strip().lower()}"
+    hit, cached = cache_manager.get_json(NS_CANTEENS, cache_key, l1_ttl=2.0)
+    if hit and isinstance(cached, dict):
+        return CanteenDetailOut.model_validate(cached)
+
     canteen: Optional[Canteen] = None
     try:
         cid = UUID(canteen_id_or_slug)
@@ -194,26 +292,43 @@ def get_canteen_detail(db: Session, canteen_id_or_slug: str) -> CanteenDetailOut
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")
 
-    base = serialize_canteen(db, canteen)
+    tz_name = get_college_config_snapshot(db).get("college_timezone")
+    now_local = now_college(tz_name)
+    today = now_local.date()
+    weekday = now_local.weekday()
+
+    op_hours = list(
+        db.scalars(
+            select(OperatingHour).where(OperatingHour.canteen_id == canteen.id).order_by(OperatingHour.day_of_week)
+        ).all()
+    )
+    holidays = list(
+        db.scalars(
+            select(CollegeHoliday)
+            .where(
+                CollegeHoliday.is_active.is_(True),
+                CollegeHoliday.holiday_date >= today,
+                or_(CollegeHoliday.canteen_id == canteen.id, CollegeHoliday.canteen_id.is_(None)),
+            )
+            .order_by(CollegeHoliday.holiday_date)
+        ).all()
+    )
+    today_holidays = [h for h in holidays if h.holiday_date == today]
+    today_op = next((oh for oh in op_hours if oh.day_of_week == weekday), None)
+
+    base = serialize_canteen(
+        db,
+        canteen,
+        precomputed_tz_name=tz_name,
+        precomputed_holidays=today_holidays,
+        precomputed_op_hour=today_op,
+        op_hour_loaded=True,
+    )
     counters = db.scalars(select(Counter).where(Counter.canteen_id == canteen.id).order_by(Counter.code)).all()
     kitchens = db.scalars(select(Kitchen).where(Kitchen.canteen_id == canteen.id).order_by(Kitchen.code)).all()
     tables = db.scalars(select(DiningTable).where(DiningTable.canteen_id == canteen.id).order_by(DiningTable.table_number)).all()
-    op_hours = db.scalars(
-        select(OperatingHour).where(OperatingHour.canteen_id == canteen.id).order_by(OperatingHour.day_of_week)
-    ).all()
-    college_row = db.scalar(select(CollegeSettings))
-    today = today_college(college_row.college_timezone if college_row else None)
-    holidays = db.scalars(
-        select(CollegeHoliday)
-        .where(
-            CollegeHoliday.is_active.is_(True),
-            CollegeHoliday.holiday_date >= today,
-            or_(CollegeHoliday.canteen_id == canteen.id, CollegeHoliday.canteen_id.is_(None)),
-        )
-        .order_by(CollegeHoliday.holiday_date)
-    ).all()
 
-    return CanteenDetailOut(
+    detail = CanteenDetailOut(
         **base.model_dump(),
         counters=counters,
         kitchens=kitchens,
@@ -221,6 +336,8 @@ def get_canteen_detail(db: Session, canteen_id_or_slug: str) -> CanteenDetailOut
         operating_hours=op_hours,
         upcoming_holidays=holidays,
     )
+    cache_manager.set_json(NS_CANTEENS, cache_key, detail.model_dump(mode="json"), ttl_seconds=15, l1_ttl=2.0)
+    return detail
 
 
 def create_canteen(
@@ -250,6 +367,7 @@ def create_canteen(
     )
     db.commit()
     db.refresh(canteen)
+    invalidate_canteens(canteen.id)
     return serialize_canteen(db, canteen)
 
 
@@ -274,6 +392,7 @@ def update_canteen(
     )
     db.commit()
     db.refresh(canteen)
+    invalidate_canteens(canteen.id)
     return serialize_canteen(db, canteen)
 
 
@@ -374,6 +493,7 @@ def upsert_operating_hours(
         actor_user_id=actor_user_id,
     )
     db.commit()
+    invalidate_canteens(canteen_id)
     return results
 
 
@@ -390,6 +510,7 @@ def create_holiday(db: Session, payload: HolidayCreate, actor_user_id: UUID) -> 
     )
     db.commit()
     db.refresh(holiday)
+    invalidate_canteens(holiday.canteen_id)
     return holiday
 
 
@@ -402,6 +523,7 @@ def update_counter(db: Session, counter_id: UUID, payload: CounterUpdate, actor_
     record_audit_log(db, action="counter.updated", entity_type="counter", entity_id=str(counter.id), actor_user_id=actor_user_id)
     db.commit()
     db.refresh(counter)
+    invalidate_canteens(counter.canteen_id)
     return counter
 
 
@@ -414,6 +536,7 @@ def update_kitchen(db: Session, kitchen_id: UUID, payload: KitchenUpdate, actor_
     record_audit_log(db, action="kitchen.updated", entity_type="kitchen", entity_id=str(kitchen.id), actor_user_id=actor_user_id)
     db.commit()
     db.refresh(kitchen)
+    invalidate_canteens(kitchen.canteen_id)
     return kitchen
 
 
@@ -462,4 +585,5 @@ def update_holiday(db: Session, holiday_id: UUID, payload: HolidayUpdate, actor_
     record_audit_log(db, action="holiday.updated", entity_type="college_holiday", entity_id=str(hol.id), actor_user_id=actor_user_id)
     db.commit()
     db.refresh(hol)
+    invalidate_canteens(hol.canteen_id)
     return hol

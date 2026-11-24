@@ -37,7 +37,10 @@ def _serialize_event(
 ) -> dict:
     fids = [str(x) for x in (ev.eligible_food_item_ids or [])]
     now = datetime.now(timezone.utc)
-    deadline_passed = bool(ev.ordering_deadline and ev.ordering_deadline <= now)
+    deadline_dt = ev.ordering_deadline
+    if deadline_dt is not None and deadline_dt.tzinfo is None:
+        deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+    deadline_passed = bool(deadline_dt and deadline_dt <= now)
     return {
         "id": str(ev.id),
         "event_code": ev.event_code,

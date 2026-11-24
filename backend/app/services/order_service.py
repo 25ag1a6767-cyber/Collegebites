@@ -1,4 +1,5 @@
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
@@ -6,6 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
@@ -33,9 +35,11 @@ from app.schemas.order import CheckoutItemDirectIn, CheckoutRequest, OrderItemOu
 from app.services.audit_service import record_audit_log
 from app.services.auth_service import validate_guest_otp_token
 from app.services.cart_service import evaluate_coupon_discount, get_active_cart
-from app.services.college_service import compute_canteen_live_status, get_or_create_college_settings
+from app.services.college_service import compute_canteen_live_status, get_college_config_snapshot, get_or_create_college_settings
 from app.services.menu_service import compute_schedule_availability_map
 from app.websockets import emit_order_event_sync
+
+_LAST_SLOT_CLEANUP_MONOTONIC: float = 0.0
 
 ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
     "CREATED": {"PAYMENT_PENDING", "PAYMENT_FAILED", "CANCELLED"},
@@ -117,7 +121,7 @@ def rollback_unpaid_incentives(db: Session, order: Order) -> None:
 def release_expired_slot_reservations(db: Session) -> int:
     """Release expired pending online checkout slot reservations cleanly."""
     now = datetime.now(timezone.utc)
-    expired_resvs = db.scalars(
+    stmt = (
         select(SlotReservation)
         .where(
             SlotReservation.status == "reserved",
@@ -125,7 +129,10 @@ def release_expired_slot_reservations(db: Session) -> int:
             SlotReservation.expires_at <= now,
         )
         .limit(50)
-    ).all()
+    )
+    if db.bind and db.bind.dialect.name == "postgresql":
+        stmt = stmt.with_for_update(skip_locked=True)
+    expired_resvs = db.scalars(stmt).all()
     released = 0
     for resv in expired_resvs:
         order = db.scalar(select(Order).where(Order.id == resv.order_id).with_for_update())
@@ -250,10 +257,10 @@ def serialize_orders_batch(db: Session, orders: list[Order]) -> list[OrderOut]:
     for p in db.scalars(select(Payment).where(Payment.order_id.in_(oids)).order_by(Payment.created_at.desc())).all():
         if p.order_id not in pays:
             pays[p.order_id] = p
-    college = get_or_create_college_settings(db)
+    policy_text = get_college_config_snapshot(db).get("cancellation_policy_text") or ""
     from app.services.queue_service import compute_order_queue_metrics_map
 
-    q_metrics_map = compute_order_queue_metrics_map(db, orders)
+    q_metrics_map = compute_order_queue_metrics_map(db, orders, precomputed_canteens=canteens)
     return [
         _serialize_order_with_maps(
             o,
@@ -262,7 +269,7 @@ def serialize_orders_batch(db: Session, orders: list[Order]) -> list[OrderOut]:
             token_row=tokens.get(o.id),
             qr_row=qrs.get(o.id),
             pay_row=pays.get(o.id),
-            policy_text=college.cancellation_policy_text,
+            policy_text=policy_text,
             queue_metrics=q_metrics_map.get(o.id),
         )
         for o in orders
@@ -275,10 +282,12 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
     token_row = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
     qr_row = db.scalar(select(OrderQRCode).where(OrderQRCode.order_id == order.id))
     pay_row = db.scalar(select(Payment).where(Payment.order_id == order.id).order_by(Payment.created_at.desc()))
-    college = get_or_create_college_settings(db)
+    policy_text = get_college_config_snapshot(db).get("cancellation_policy_text") or ""
     from app.services.queue_service import compute_order_queue_metrics_map
 
-    q_metrics = compute_order_queue_metrics_map(db, [order]).get(order.id)
+    q_metrics = compute_order_queue_metrics_map(
+        db, [order], precomputed_canteens={canteen.id: canteen} if canteen else None
+    ).get(order.id)
     return _serialize_order_with_maps(
         order,
         canteen=canteen,
@@ -286,14 +295,13 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
         token_row=token_row,
         qr_row=qr_row,
         pay_row=pay_row,
-        policy_text=college.cancellation_policy_text,
+        policy_text=policy_text,
         raw_guest_token=raw_guest_token,
         queue_metrics=q_metrics,
     )
 
 
 def list_pickup_slots(db: Session, canteen_id: UUID) -> list[PickupSlotOut]:
-    release_expired_slot_reservations(db)
     today = today_college()
     slots = db.scalars(
         select(PickupSlot)
@@ -341,10 +349,14 @@ def checkout_order(
     if not payload.accepted_policy:
         raise HTTPException(status_code=400, detail="You must acknowledge the college cancellation and payment policy before checkout")
 
-    release_expired_slot_reservations(db)
+    global _LAST_SLOT_CLEANUP_MONOTONIC
+    now_mono = time.monotonic()
+    if payload.pickup_slot_id or (now_mono - _LAST_SLOT_CLEANUP_MONOTONIC) >= 30.0:
+        _LAST_SLOT_CLEANUP_MONOTONIC = now_mono
+        release_expired_slot_reservations(db)
 
     college = get_or_create_college_settings(db)
-    canteen = db.scalar(select(Canteen).where(Canteen.id == payload.canteen_id).with_for_update())
+    canteen = db.get(Canteen, payload.canteen_id)
     if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Selected canteen is unavailable")
 
@@ -463,8 +475,10 @@ def checkout_order(
         )
         kitchen_id = default_kitchen.id if default_kitchen else None
 
-    # Validate pickup slot capacity atomically with FOR UPDATE + Redis
+    # Validate pickup slot capacity atomically with FOR UPDATE + Redis (guarding rollback immediately)
     pickup_slot: Optional[PickupSlot] = None
+    redis_slot_key: Optional[str] = None
+    redis_incremented = False
     if payload.pickup_slot_id:
         pickup_slot = db.scalar(
             select(PickupSlot).where(PickupSlot.id == payload.pickup_slot_id).with_for_update()
@@ -486,30 +500,64 @@ def checkout_order(
         if new_count is not None and new_count > pickup_slot.capacity:
             safe_redis(lambda r: r.decr(rkey))
             raise HTTPException(status_code=409, detail="Selected pickup slot capacity reached")
+        if new_count is not None:
+            redis_slot_key = rkey
+            redis_incremented = True
         pickup_slot.reserved_count += 1
 
-    redis_slot_key: Optional[str] = None
-    redis_incremented = False
     try:
-        # Recalculate ALL prices strictly on backend
+        # Recalculate ALL prices strictly on backend using batched lookups
         subtotal = Decimal("0.00")
         max_item_prep = canteen.default_prep_time_minutes
         line_tax_specs: list[tuple[Decimal, Decimal]] = []
         prepared_items: list[tuple[FoodItem, Optional[FoodVariant], int, Decimal, Decimal, Decimal, Optional[str], list[dict]]] = []
+
+        spec_food_map = {f.id: f for f in spec_foods}
+        spec_food_ids = list(spec_food_map.keys())
+        spec_cat_ids = list({f.category_id for f in spec_foods})
+        spec_cat_map = {c.id: c for c in db.scalars(select(FoodCategory).where(FoodCategory.id.in_(spec_cat_ids))).all()} if spec_cat_ids else {}
+        spec_variant_ids = list({s.variant_id for s in line_specs if s.variant_id})
+        spec_variant_map = {v.id: v for v in db.scalars(select(FoodVariant).where(FoodVariant.id.in_(spec_variant_ids))).all()} if spec_variant_ids else {}
+        spec_recipes = {r.food_item_id: r for r in db.scalars(select(Recipe).where(Recipe.food_item_id.in_(spec_food_ids))).all()} if spec_food_ids else {}
+        spec_recipe_ids = [r.id for r in spec_recipes.values()]
+        spec_reqs_by_recipe: dict[UUID, list[RecipeIngredient]] = {}
+        if spec_recipe_ids:
+            for req in db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id.in_(spec_recipe_ids))).all():
+                spec_reqs_by_recipe.setdefault(req.recipe_id, []).append(req)
+        spec_addon_ids = list({ad.addon_id for s in line_specs for ad in s.addons})
+        spec_addon_map = {a.id: a for a in db.scalars(select(FoodAddon).where(FoodAddon.id.in_(spec_addon_ids))).all()} if spec_addon_ids else {}
+        spec_addon_links = (
+            {
+                (lnk.food_item_id, lnk.addon_id): lnk
+                for lnk in db.scalars(
+                    select(FoodItemAddon).where(
+                        FoodItemAddon.food_item_id.in_(spec_food_ids),
+                        FoodItemAddon.addon_id.in_(spec_addon_ids),
+                    )
+                ).all()
+            }
+            if (spec_food_ids and spec_addon_ids)
+            else {}
+        )
 
         sched_target_dt = (
             datetime.combine(pickup_slot.slot_date, pickup_slot.start_time, tzinfo=get_college_tz())
             if pickup_slot
             else None
         )
-        sched_map = compute_schedule_availability_map(db, [s.food_item_id for s in line_specs], target_dt=sched_target_dt)
+        sched_map = compute_schedule_availability_map(
+            db,
+            [s.food_item_id for s in line_specs],
+            target_dt=sched_target_dt,
+            food_items_map=spec_food_map,
+        )
         needed_ingredients: dict[UUID, Decimal] = {}
 
         for spec in line_specs:
-            food = db.get(FoodItem, spec.food_item_id)
+            food = spec_food_map.get(spec.food_item_id)
             if not food or food.canteen_id != canteen.id or not food.is_active:
                 raise HTTPException(status_code=400, detail="Food item not found in canteen")
-            cat = db.get(FoodCategory, food.category_id)
+            cat = spec_cat_map.get(food.category_id)
             if not cat or not cat.is_active:
                 raise HTTPException(status_code=400, detail=f"{food.name}'s category is currently inactive")
             if not food.is_available or food.insufficient_ingredients:
@@ -517,9 +565,9 @@ def checkout_order(
             if not sched_map.get(food.id, True):
                 raise HTTPException(status_code=400, detail=f"{food.name} is outside its scheduled serving hours or validity period")
 
-            recipe = db.scalar(select(Recipe).where(Recipe.food_item_id == food.id))
+            recipe = spec_recipes.get(food.id)
             if recipe:
-                for req in db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all():
+                for req in spec_reqs_by_recipe.get(recipe.id, ()):
                     per_unit = (req.quantity_required * Decimal(spec.quantity)) / Decimal(max(1, recipe.yield_portions))
                     needed_ingredients[req.ingredient_id] = needed_ingredients.get(req.ingredient_id, Decimal("0.000")) + per_unit
 
@@ -527,7 +575,7 @@ def checkout_order(
             variant: Optional[FoodVariant] = None
             unit_price = food.base_price
             if spec.variant_id:
-                variant = db.get(FoodVariant, spec.variant_id)
+                variant = spec_variant_map.get(spec.variant_id)
                 if not variant or variant.food_item_id != food.id or not variant.is_available:
                     raise HTTPException(status_code=400, detail=f"Selected variant for {food.name} is unavailable")
                 unit_price = variant.absolute_price if variant.absolute_price is not None else (food.base_price + variant.price_delta)
@@ -543,8 +591,8 @@ def checkout_order(
                 cust_dicts.append({"customization_type": "remove_ingredient", "option_name": "Remove", "option_value": rem, "quantity": 1, "unit_price": Decimal("0.00"), "total_price": Decimal("0.00")})
 
             for ad in spec.addons:
-                link = db.scalar(select(FoodItemAddon).where(FoodItemAddon.food_item_id == food.id, FoodItemAddon.addon_id == ad.addon_id))
-                addon = db.get(FoodAddon, ad.addon_id)
+                link = spec_addon_links.get((food.id, ad.addon_id))
+                addon = spec_addon_map.get(ad.addon_id)
                 if not link or not addon or not addon.is_available:
                     raise HTTPException(status_code=400, detail="Invalid or unavailable add-on")
                 if ad.quantity > link.max_quantity:
@@ -783,6 +831,26 @@ def checkout_order(
             details={"total_amount": str(total_amount), "payment_method": payload.payment_method, "is_guest": is_guest},
         )
         db.commit()
+    except IntegrityError:
+        db.rollback()
+        if redis_incremented and redis_slot_key:
+            safe_redis(lambda r: r.decr(redis_slot_key))
+        if payload.idempotency_key:
+            dup_stmt = (
+                select(Order)
+                .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+                .where(Order.idempotency_key == payload.idempotency_key)
+            )
+            existing_dup = db.scalar(dup_stmt)
+            if existing_dup:
+                same_owner = (
+                    (user_id is not None and existing_dup.customer_id == user_id)
+                    or (user_id is None and existing_dup.is_guest and (not payload.guest_phone or existing_dup.guest_phone == payload.guest_phone.strip()))
+                )
+                if same_owner:
+                    return serialize_order(db, existing_dup)
+                raise HTTPException(status_code=409, detail="Idempotency key already used for another order")
+        raise
     except Exception:
         db.rollback()
         if redis_incremented and redis_slot_key:

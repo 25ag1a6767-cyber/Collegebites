@@ -47,7 +47,7 @@ router = APIRouter(prefix="/menus", tags=["Menus & Food Catalog"])
 
 @router.get("/canteens/{canteen_id}/categories", response_model=list[FoodCategoryOut])
 def get_categories(canteen_id: UUID, include_inactive: bool = False, db: Session = Depends(get_db)):
-    return menu_service.list_categories(db, canteen_id, include_inactive=include_inactive)
+    return menu_service.list_categories_cached(db, canteen_id, include_inactive=include_inactive)
 
 
 @router.post("/categories", response_model=FoodCategoryOut, status_code=status.HTTP_201_CREATED)
@@ -92,6 +92,9 @@ def delete_category(
     enforce_canteen_scope(principal, cat.canteen_id)
     cat.is_active = False
     db.commit()
+    from app.core.cache import invalidate_menu
+
+    invalidate_menu(cat.canteen_id)
     return {"status": "deactivated", "id": str(category_id)}
 
 
@@ -254,6 +257,9 @@ def add_variant(
     db.add(var)
     db.commit()
     db.refresh(var)
+    from app.core.cache import invalidate_menu
+
+    invalidate_menu(item.canteen_id)
     return var
 
 
@@ -274,6 +280,10 @@ def update_variant(
         setattr(var, k, v)
     db.commit()
     db.refresh(var)
+    if item:
+        from app.core.cache import invalidate_menu
+
+        invalidate_menu(item.canteen_id)
     return var
 
 
@@ -291,6 +301,10 @@ def delete_variant(
         enforce_canteen_scope(principal, item.canteen_id)
     db.delete(var)
     db.commit()
+    if item:
+        from app.core.cache import invalidate_menu
+
+        invalidate_menu(item.canteen_id)
     return {"status": "deleted", "id": str(variant_id)}
 
 

@@ -161,7 +161,10 @@ def _serialize_subscription(
     include_redemptions: bool = True,
 ) -> dict:
     now = datetime.now(timezone.utc)
-    if sub.status == "active" and sub.expires_at and sub.expires_at <= now:
+    exp_dt = sub.expires_at
+    if exp_dt is not None and exp_dt.tzinfo is None:
+        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+    if sub.status == "active" and exp_dt and exp_dt <= now:
         sub.status = "expired"
         db.commit()
 

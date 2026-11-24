@@ -6,7 +6,6 @@ email-validator==2.2.0
 SQLAlchemy==2.0.35
 alembic==1.13.2
 psycopg[binary]==3.2.3
-psycopg2-binary==2.9.10
 redis==5.1.1
 fakeredis==2.26.2
 celery==5.4.0

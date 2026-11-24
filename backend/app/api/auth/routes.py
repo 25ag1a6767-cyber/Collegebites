@@ -40,7 +40,7 @@ def register(payload: RegisterCustomerRequest, request: Request, db: Session = D
 
 
 @router.post("/login", response_model=TokenResponse)
-@limiter.limit("12/minute")
+@limiter.limit(settings.RATE_LIMIT_AUTH_LOGIN)
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     ip = client_ip_from_request(request)
     ua = request.headers.get("user-agent")

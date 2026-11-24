@@ -3,7 +3,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, Time, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, Money, TimestampMixin, UUIDPrimaryKeyMixin
@@ -48,6 +48,9 @@ class StaffWeeklySchedule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class StaffAttendance(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "staff_attendance"
+    __table_args__ = (
+        Index("ix_staff_attendance_canteen_date_status", "canteen_id", "attendance_date", "status"),
+    )
 
     staff_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)

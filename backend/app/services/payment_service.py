@@ -1,11 +1,12 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
@@ -187,57 +188,75 @@ def _finalize_confirmed_payment(
     if order.status == "PAYMENT_CONFIRMED":
         transition_order_status(db, order, "PLACED", actor_user_id=actor_user_id, reason="Order dispatched to canteen kitchen")
 
-    token, qr = generate_token_and_qr_for_confirmed_order(db, order)
-    create_receipt_for_order(db, order, token, qr, payment)
+    order_id_val = order.id
+    canteen_id_val = order.canteen_id
+    order_number_val = order.order_number
     try:
-        from app.services.invoice_service import ensure_invoice_for_order
+        token, qr = generate_token_and_qr_for_confirmed_order(db, order)
+        create_receipt_for_order(db, order, token, qr, payment)
+        try:
+            from app.services.invoice_service import ensure_invoice_for_order
 
-        ensure_invoice_for_order(db, order, payment=payment)
-    except ImportError:
-        pass
+            ensure_invoice_for_order(db, order, payment=payment)
+        except ImportError:
+            pass
 
-    # Deduct inventory idempotently (service defined in inventory_service when available)
-    try:
-        from app.services.inventory_service import deduct_inventory_for_order
-        deduct_inventory_for_order(db, order, actor_user_id=actor_user_id)
-    except ImportError:
-        pass
+        # Deduct inventory idempotently (service defined in inventory_service when available)
+        try:
+            from app.services.inventory_service import deduct_inventory_for_order
+            deduct_inventory_for_order(db, order, actor_user_id=actor_user_id)
+        except ImportError:
+            pass
 
-    # Create notification if notification service available
-    try:
-        from app.services.notification_service import notify_order_confirmed
-        notify_order_confirmed(db, order, token.token_code)
-    except ImportError:
-        pass
-
-    record_audit_log(
-        db,
-        action="payment.confirmed",
-        entity_type="order",
-        entity_id=order.order_number,
-        actor_user_id=actor_user_id,
-        details={
-            "payment_id": str(payment.id),
-            "payment_reference": payment_reference,
-            "pickup_token": token.token_code,
-            "amount": str(payment.amount),
-        },
-    )
-    db.commit()
+        record_audit_log(
+            db,
+            action="payment.confirmed",
+            entity_type="order",
+            entity_id=order.order_number,
+            actor_user_id=actor_user_id,
+            details={
+                "payment_id": str(payment.id),
+                "payment_reference": payment_reference,
+                "pickup_token": token.token_code,
+                "amount": str(payment.amount),
+            },
+        )
+        token_code_val = token.token_code
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        already_loaded = db.scalar(
+            select(Order)
+            .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
+            .where(Order.id == order_id_val)
+        )
+        if already_loaded is not None and already_loaded.payment_status == "CONFIRMED":
+            return serialize_order(db, already_loaded)
+        raise
     db.expire_all()
-
-    emit_order_event_sync(
-        str(order.canteen_id),
-        str(order.id),
-        "order.placed",
-        {"order_number": order.order_number, "pickup_token": token.token_code, "status": "PLACED"},
-    )
 
     loaded = db.scalar(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
-        .where(Order.id == order.id)
+        .where(Order.id == order_id_val)
     )
+
+    # Dispatch notifications AFTER commit so external SMTP/SMS/Push never hold DB row locks
+    if loaded is not None:
+        try:
+            from app.services.notification_service import notify_order_confirmed
+            notify_order_confirmed(db, loaded, token_code_val)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    emit_order_event_sync(
+        str(canteen_id_val),
+        str(order_id_val),
+        "order.placed",
+        {"order_number": order_number_val, "pickup_token": token_code_val, "status": "PLACED"},
+    )
+
     return serialize_order(db, loaded)
 
 
@@ -494,8 +513,12 @@ def handle_razorpay_webhook(db: Session, raw_body: bytes, x_razorpay_signature: 
         payload=payload,
     )
     if not existing_evt:
-        db.add(evt)
-        db.flush()
+        try:
+            with db.begin_nested():
+                db.add(evt)
+                db.flush()
+        except IntegrityError:
+            return {"status": "already_processed", "event_id": event_id}
 
     rzp_order_id = payment_entity.get("order_id")
     rzp_payment_id = payment_entity.get("id")
@@ -563,6 +586,16 @@ def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: 
     payment.status = "FAILED"
     payment.failure_reason = reason
     order.payment_status = "FAILED"
+
+    # Release reserved slot BEFORE inventory locks to match checkout_order lock ordering and avoid deadlocks
+    resv = db.scalar(select(SlotReservation).where(SlotReservation.order_id == order.id))
+    if resv and resv.status == "reserved":
+        resv.status = "released"
+        slot = db.scalar(select(PickupSlot).where(PickupSlot.id == resv.pickup_slot_id).with_for_update())
+        if slot and slot.reserved_count > 0:
+            slot.reserved_count -= 1
+            safe_redis(lambda r: r.decr(f"cb:slot:{slot.id}:reserved"))
+
     if was_pending:
         transition_order_status(db, order, "PAYMENT_FAILED", reason=reason)
         try:
@@ -571,15 +604,6 @@ def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: 
         except ImportError:
             pass
     rollback_unpaid_incentives(db, order)
-
-    # Release reserved slot
-    resv = db.scalar(select(SlotReservation).where(SlotReservation.order_id == order.id))
-    if resv and resv.status == "reserved":
-        resv.status = "released"
-        slot = db.scalar(select(PickupSlot).where(PickupSlot.id == resv.pickup_slot_id).with_for_update())
-        if slot and slot.reserved_count > 0:
-            slot.reserved_count -= 1
-            safe_redis(lambda r: r.decr(f"cb:slot:{slot.id}:reserved"))
 
     db.add(
         PaymentTransaction(
@@ -793,8 +817,12 @@ def handle_stripe_webhook(db: Session, raw_body: bytes, stripe_signature_header:
         payload=payload,
     )
     if not existing_evt:
-        db.add(evt)
-        db.flush()
+        try:
+            with db.begin_nested():
+                db.add(evt)
+                db.flush()
+        except IntegrityError:
+            return {"status": "already_processed", "event_id": event_id}
 
     pay_ro: Optional[Payment] = None
     if event_type.startswith("payment_intent."):
@@ -983,6 +1011,17 @@ def retry_online_payment(
                 needed_ingredients[req.ingredient_id] = needed_ingredients.get(req.ingredient_id, Decimal("0.000")) + per_unit
 
     if order.status == "PAYMENT_FAILED":
+        # Re-reserve pickup slot if it was previously released on payment failure
+        if order.pickup_slot_id:
+            resv = db.scalar(select(SlotReservation).where(SlotReservation.order_id == order.id).with_for_update())
+            if resv and resv.status == "released":
+                slot = db.scalar(select(PickupSlot).where(PickupSlot.id == resv.pickup_slot_id).with_for_update())
+                if not slot or not slot.is_active or slot.reserved_count >= slot.capacity:
+                    raise HTTPException(status_code=409, detail="Selected pickup slot is now full; please place a new order")
+                slot.reserved_count += 1
+                resv.status = "reserved"
+                resv.expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+                safe_redis(lambda r: r.incr(f"cb:slot:{slot.id}:reserved"))
         if needed_ingredients:
             from app.services.inventory_service import reserve_inventory_for_order
             reserve_inventory_for_order(db, order.canteen_id, needed_ingredients)

@@ -40,6 +40,8 @@ class FoodItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("canteen_id", "slug", name="uq_food_items_canteen_slug"),
         Index("ix_food_items_canteen_active", "canteen_id", "is_active", "is_available"),
+        Index("ix_food_items_canteen_popularity", "canteen_id", "is_active", "popularity_score"),
+        Index("ix_food_items_canteen_insuff", "canteen_id", "insufficient_ingredients"),
     )
 
     canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)

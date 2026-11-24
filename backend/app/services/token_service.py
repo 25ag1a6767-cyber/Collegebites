@@ -45,43 +45,80 @@ def generate_token_and_qr_for_confirmed_order(db: Session, order: Order) -> tupl
         .with_for_update()
     )
     if not seq_row:
-        seq_row = OrderTokenSequence(
-            canteen_id=order.canteen_id,
-            service_date=service_day,
-            prefix=prefix,
-            last_sequence=0,
-        )
-        db.add(seq_row)
-        db.flush()
+        try:
+            with db.begin_nested():
+                seq_row = OrderTokenSequence(
+                    canteen_id=order.canteen_id,
+                    service_date=service_day,
+                    prefix=prefix,
+                    last_sequence=0,
+                )
+                db.add(seq_row)
+                db.flush()
+        except Exception:
+            seq_row = db.scalar(
+                select(OrderTokenSequence)
+                .where(
+                    OrderTokenSequence.canteen_id == order.canteen_id,
+                    OrderTokenSequence.service_date == service_day,
+                    OrderTokenSequence.prefix == prefix,
+                )
+                .with_for_update()
+            )
+            if not seq_row:
+                raise
 
-    seq_row.last_sequence += 1
-    seq_num = seq_row.last_sequence
-    token_code = f"{prefix}{seq_num:03d}"
+    pickup_token = existing_token
+    if not pickup_token:
+        from sqlalchemy import func
+        from sqlalchemy.exc import IntegrityError
 
-    # Ensure uniqueness even if custom sequences exist
-    while db.scalar(
-        select(PickupToken.id).where(
-            PickupToken.canteen_id == order.canteen_id,
-            PickupToken.service_date == service_day,
-            PickupToken.token_code == token_code,
-        )
-    ):
-        seq_row.last_sequence += 1
-        seq_num = seq_row.last_sequence
-        token_code = f"{prefix}{seq_num:03d}"
+        for attempt in range(6):
+            seq_row.last_sequence += 1
+            seq_num = seq_row.last_sequence
+            token_code = f"{prefix}{seq_num:03d}"
 
-    pickup_token = existing_token or PickupToken(
-        order_id=order.id,
-        canteen_id=order.canteen_id,
-        counter_id=order.counter_id,
-        service_date=service_day,
-        token_code=token_code,
-        sequence_number=seq_num,
-        status="ACTIVE",
-    )
-    if not existing_token:
-        db.add(pickup_token)
-        db.flush()
+            while db.scalar(
+                select(PickupToken.id).where(
+                    PickupToken.canteen_id == order.canteen_id,
+                    PickupToken.service_date == service_day,
+                    PickupToken.token_code == token_code,
+                )
+            ):
+                seq_row.last_sequence += 1
+                seq_num = seq_row.last_sequence
+                token_code = f"{prefix}{seq_num:03d}"
+
+            try:
+                with db.begin_nested():
+                    candidate = PickupToken(
+                        order_id=order.id,
+                        canteen_id=order.canteen_id,
+                        counter_id=order.counter_id,
+                        service_date=service_day,
+                        token_code=token_code,
+                        sequence_number=seq_num,
+                        status="ACTIVE",
+                    )
+                    db.add(candidate)
+                    db.flush()
+                    pickup_token = candidate
+                    break
+            except IntegrityError:
+                already = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
+                if already:
+                    pickup_token = already
+                    break
+                max_seq = db.scalar(
+                    select(func.coalesce(func.max(PickupToken.sequence_number), 0)).where(
+                        PickupToken.canteen_id == order.canteen_id,
+                        PickupToken.service_date == service_day,
+                    )
+                ) or 0
+                seq_row.last_sequence = max(seq_row.last_sequence, int(max_seq))
+                if attempt == 5:
+                    raise
+    assert pickup_token is not None
 
     if not existing_qr:
         raw_qr_token, token_hash = generate_signed_qr_token()
@@ -107,7 +144,9 @@ def generate_token_and_qr_for_confirmed_order(db: Session, order: Order) -> tupl
             )
         )
         if not already_earned:
-            acct = db.scalar(select(LoyaltyAccount).where(LoyaltyAccount.user_id == order.customer_id))
+            acct = db.scalar(
+                select(LoyaltyAccount).where(LoyaltyAccount.user_id == order.customer_id).with_for_update()
+            )
             if acct:
                 pts = int(order.total_amount // Decimal("20"))
                 if pts > 0:

@@ -40,7 +40,7 @@ export const profileApi = {
 
   subscribeMealPlan: async (
     planId: string,
-    payload: { payment_method: "razorpay" | "stripe"; auto_confirm_demo?: boolean }
+    payload: { payment_method: "razorpay" | "stripe" }
   ) => (await mobileApi.post(`/meal-plans/${encodeURIComponent(planId)}/subscribe`, payload)).data,
 
   listMyMealSubscriptions: async () => (await mobileApi.get("/meal-plans/my-subscriptions")).data,
@@ -50,16 +50,12 @@ export const profileApi = {
   createEventBulkOrder: async (
     eventId: string,
     payload: {
-      canteen_id: string;
-      organizer_name: string;
-      organizer_phone: string;
-      organizer_email?: string | null;
-      department?: string | null;
-      headcount: number;
-      requested_delivery_at: string;
-      delivery_venue?: string | null;
-      special_instructions?: string | null;
+      idempotency_key?: string | null;
+      scheduled_prep_at: string;
+      scheduled_pickup_at: string;
+      pickup_arrangement?: "grouped_token" | "individual_tokens";
       payment_method: "razorpay" | "stripe";
+      notes?: string | null;
       items: Array<{ food_item_id: string; quantity: number }>;
     }
   ) => (await mobileApi.post(`/events/${encodeURIComponent(eventId)}/bulk-orders`, payload)).data,
@@ -70,7 +66,7 @@ export const profileApi = {
     (
       await mobileApi.get(
         `/invoices/${encodeURIComponent(orderId)}${
-          guestToken ? `?guest_token=${encodeURIComponent(guestToken)}` : ""
+          guestToken ? `?guest_access_token=${encodeURIComponent(guestToken)}` : ""
         }`
       )
     ).data,

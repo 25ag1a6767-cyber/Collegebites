@@ -139,6 +139,10 @@ class UserPermission(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class SessionRecord(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "sessions"
+    __table_args__ = (
+        Index("ix_sessions_user_revoked", "user_id", "revoked_at"),
+        Index("ix_sessions_expires_at", "expires_at"),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     device_info: Mapped[Optional[str]] = mapped_column(String(255))

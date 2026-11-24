@@ -11,7 +11,10 @@ from app.models.base import Base, Money, TimestampMixin, UUIDPrimaryKeyMixin
 
 class AuditLog(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "audit_logs"
-    __table_args__ = (Index("ix_audit_logs_entity", "entity_type", "entity_id"),)
+    __table_args__ = (
+        Index("ix_audit_logs_entity", "entity_type", "entity_id"),
+        Index("ix_audit_logs_created_at", "created_at"),
+    )
 
     actor_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     actor_role: Mapped[Optional[str]] = mapped_column(String(64))
@@ -62,6 +65,7 @@ class LoginAttempt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "login_attempts"
     __table_args__ = (
         Index("ix_login_attempts_ident_time", "identifier", "created_at"),
+        Index("ix_login_attempts_ip_success_time", "ip_address", "success", "created_at"),
     )
 
     identifier: Mapped[str] = mapped_column(String(160), nullable=False, index=True)

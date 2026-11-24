@@ -45,7 +45,13 @@ def clean_db_and_seed() -> Generator[Session, None, None]:
     with test_engine.begin() as conn:
         table_names = [t.name for t in reversed(Base.metadata.sorted_tables)]
         if table_names:
-            conn.execute(text("TRUNCATE TABLE " + ", ".join(f'"{name}"' for name in table_names) + " RESTART IDENTITY CASCADE"))
+            if test_engine.dialect.name == "sqlite":
+                conn.execute(text("PRAGMA foreign_keys = OFF"))
+                for name in table_names:
+                    conn.execute(text(f'DELETE FROM "{name}"'))
+                conn.execute(text("PRAGMA foreign_keys = ON"))
+            else:
+                conn.execute(text("TRUNCATE TABLE " + ", ".join(f'"{name}"' for name in table_names) + " RESTART IDENTITY CASCADE"))
     get_redis_manager().reset_for_tests()
 
     db = TestingSessionLocal()

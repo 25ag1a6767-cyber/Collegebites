@@ -46,8 +46,13 @@ export const PickupScannerPage: React.FC = () => {
     enabled: Boolean(activeCanteenId),
     staleTime: 0,
     retry: false,
-    refetchInterval: () => (typeof navigator !== "undefined" && navigator.onLine === false ? false : 1000),
-    refetchIntervalInBackground: true,
+    refetchInterval: () =>
+      typeof navigator !== "undefined" && navigator.onLine === false
+        ? false
+        : boardSyncStatus === "live"
+        ? 15000
+        : 2000,
+    refetchIntervalInBackground: false,
     queryFn: async () =>
       (await api.get(`/pickup/board/${activeCanteenId}`, { headers: { "Cache-Control": "no-cache", Pragma: "no-cache" } })).data,
   });
