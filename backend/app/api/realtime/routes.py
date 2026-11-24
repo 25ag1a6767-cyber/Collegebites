@@ -382,6 +382,7 @@ async def stream_user_notifications(
         ROLE_KITCHEN_STAFF,
         ROLE_INVENTORY_MANAGER,
         ROLE_PICKUP_STAFF,
+        "food_safety_inspector",
         "customer",
     )),
 ):
@@ -403,6 +404,8 @@ async def stream_user_notifications(
         last_event_id=last_event_id,
         once=once,
         max_seconds=max_seconds,
-        compute_version=lambda sess: realtime_service.compute_user_notifications_version(sess, user_id=uid, roles=roles),
+        compute_version=lambda sess: realtime_service.compute_user_notifications_version(
+            sess, user_id=uid, roles=roles, assigned_canteen_id=assigned_cid
+        ),
         fetch_payload=_fetch,
     )

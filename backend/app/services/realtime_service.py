@@ -258,27 +258,15 @@ def compute_user_notifications_version(
     *,
     user_id: UUID,
     roles: set[str],
+    assigned_canteen_id: Optional[UUID] = None,
 ) -> str:
-    conds = [Notification.user_id == user_id]
-    if roles:
-        conds.append(Notification.role_target.in_(list(roles)))
-    row = db.execute(
-        select(
-            func.count(Notification.id),
-            func.coalesce(func.sum(case((Notification.is_read.is_(False), 1), else_=0)), 0),
-            func.max(Notification.created_at),
-            func.max(Notification.read_at),
-        ).where(or_(*conds))
-    ).one()
-    raw = "|".join(
-        [
-            str(user_id),
-            str(row[0] or 0),
-            str(row[1] or 0),
-            row[2].isoformat() if row[2] else "",
-            row[3].isoformat() if row[3] else "",
-        ]
+    rows = notification_service.list_my_notifications(
+        db, user_id, roles, assigned_canteen_id=assigned_canteen_id, limit=200
     )
+    unread_cnt = sum(1 for n in rows if not notification_service.is_notification_read_for_user(n, user_id))
+    latest_created = max((n.created_at.isoformat() for n in rows if n.created_at), default="")
+    latest_updated = max((n.updated_at.isoformat() for n in rows if n.updated_at), default="")
+    raw = "|".join([str(user_id), str(len(rows)), str(unread_cnt), latest_created, latest_updated])
     return sha256_hex(raw)[:16]
 
 
@@ -289,22 +277,11 @@ def fetch_user_notifications_snapshot(
     roles: set[str],
     assigned_canteen_id: Optional[UUID] = None,
 ) -> tuple[str, dict[str, Any]]:
-    version = compute_user_notifications_version(db, user_id=user_id, roles=roles)
+    version = compute_user_notifications_version(
+        db, user_id=user_id, roles=roles, assigned_canteen_id=assigned_canteen_id
+    )
     rows = notification_service.list_my_notifications(db, user_id, roles, assigned_canteen_id=assigned_canteen_id)
-    serialized = [
-        {
-            "id": str(n.id),
-            "title": n.title,
-            "message": n.message,
-            "event_type": n.event_type,
-            "order_id": str(n.order_id) if n.order_id else None,
-            "canteen_id": str(n.canteen_id) if n.canteen_id else None,
-            "is_read": n.is_read,
-            "created_at": n.created_at.isoformat() if n.created_at else None,
-            "metadata_json": n.metadata_json or {},
-        }
-        for n in rows
-    ]
+    serialized = [notification_service.serialize_notification_for_user(n, user_id) for n in rows]
     return version, {
         "version": version,
         "unread_count": sum(1 for r in serialized if not r["is_read"]),

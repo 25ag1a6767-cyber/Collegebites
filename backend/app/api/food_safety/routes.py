@@ -120,6 +120,14 @@ class IncidentUpdateIn(BaseModel):
     corrective_action: Optional[str] = None
     resolution_notes: Optional[str] = None
     assigned_to_user_id: Optional[UUID] = None
+    evidence_urls: Optional[list[str]] = None
+
+
+class ChecklistTemplateUpdateIn(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=160)
+    category: Optional[str] = Field(default=None, max_length=64)
+    items: Optional[list[dict]] = None
+    is_active: Optional[bool] = None
 
 
 @router.get("/dashboard")
@@ -151,15 +159,67 @@ def create_template(
     principal: AuthenticatedPrincipal = Depends(require_roles(*FS_ADMIN_ROLES)),
     db: Session = Depends(get_db),
 ):
-    if payload.canteen_id:
-        enforce_canteen_scope(principal, payload.canteen_id)
+    eff_canteen_id = payload.canteen_id
+    if not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        if eff_canteen_id is None:
+            raise HTTPException(status_code=403, detail="Only college administrators can create global checklist templates")
+        enforce_canteen_scope(principal, eff_canteen_id)
+    elif eff_canteen_id is not None:
+        enforce_canteen_scope(principal, eff_canteen_id)
     return food_safety_service.create_checklist_template(
         db,
-        canteen_id=payload.canteen_id,
+        canteen_id=eff_canteen_id,
         name=payload.name,
         category=payload.category,
         items=payload.items,
         actor_user_id=principal.user.id,
+    )
+
+
+@router.patch("/templates/{template_id}")
+def update_template(
+    template_id: UUID,
+    payload: ChecklistTemplateUpdateIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*FS_ADMIN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    from app.models.enterprise import FoodSafetyChecklistTemplate
+
+    tpl = db.get(FoodSafetyChecklistTemplate, template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Checklist template not found")
+    if tpl.canteen_id is None and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        raise HTTPException(status_code=403, detail="Only college administrators can modify global templates")
+    if tpl.canteen_id is not None:
+        enforce_canteen_scope(principal, tpl.canteen_id)
+    return food_safety_service.update_checklist_template(
+        db,
+        template_id,
+        name=payload.name,
+        category=payload.category,
+        items=payload.items,
+        is_active=payload.is_active,
+        actor_user_id=principal.user.id,
+    )
+
+
+@router.delete("/templates/{template_id}")
+def deactivate_template(
+    template_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*FS_ADMIN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    from app.models.enterprise import FoodSafetyChecklistTemplate
+
+    tpl = db.get(FoodSafetyChecklistTemplate, template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Checklist template not found")
+    if tpl.canteen_id is None and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        raise HTTPException(status_code=403, detail="Only college administrators can deactivate global templates")
+    if tpl.canteen_id is not None:
+        enforce_canteen_scope(principal, tpl.canteen_id)
+    return food_safety_service.update_checklist_template(
+        db, template_id, is_active=False, actor_user_id=principal.user.id
     )
 
 
@@ -414,5 +474,19 @@ def update_incident(
         corrective_action=payload.corrective_action,
         resolution_notes=payload.resolution_notes,
         assigned_to_user_id=payload.assigned_to_user_id,
+        evidence_urls=payload.evidence_urls,
         actor_user_id=principal.user.id,
     )
+
+
+@router.get("/incidents/{incident_id}/audit-history")
+def incident_audit_history(
+    incident_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*FS_VIEW_ROLES)),
+    db: Session = Depends(get_db),
+):
+    inc = db.get(FoodSafetyIncident, incident_id)
+    if not inc:
+        raise HTTPException(status_code=404, detail="Food safety incident not found")
+    enforce_canteen_scope(principal, inc.canteen_id)
+    return food_safety_service.get_incident_audit_history(db, incident_id)

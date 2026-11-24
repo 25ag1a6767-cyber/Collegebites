@@ -277,8 +277,27 @@ def generate_reorder_recommendations(db: Session, canteen_id: UUID, *, actor_use
     ).all():
         incoming_by_ing[ing_id] = max(Decimal("0.000"), Decimal(str(outstanding or 0)))
 
-    # Actual 14-day consumption rate from real StockMovement records
-    since_14d = datetime.now(timezone.utc) - timedelta(days=14)
+    # Pending draft / awaiting-approval PO quantities (prevent cross-day duplicate draft POs)
+    pending_draft_by_ing: dict[UUID, Decimal] = {}
+    for ing_id, qty_draft in db.execute(
+        select(
+            PurchaseOrderItem.ingredient_id,
+            func.coalesce(func.sum(PurchaseOrderItem.quantity_ordered), 0),
+        )
+        .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderItem.purchase_order_id)
+        .where(
+            PurchaseOrder.canteen_id == canteen_id,
+            PurchaseOrder.status.in_(("draft", "pending_approval")),
+            PurchaseOrderItem.ingredient_id.in_(ing_ids),
+        )
+        .group_by(PurchaseOrderItem.ingredient_id)
+    ).all():
+        pending_draft_by_ing[ing_id] = max(Decimal("0.000"), Decimal(str(qty_draft or 0)))
+
+    # Actual 14-day and 3-day consumption rates from real StockMovement records (detects consumption spikes!)
+    now_utc = datetime.now(timezone.utc)
+    since_14d = now_utc - timedelta(days=14)
+    since_3d = now_utc - timedelta(days=3)
     consumed_14d: dict[UUID, Decimal] = {}
     for iid, total_used in db.execute(
         select(StockMovement.inventory_item_id, func.coalesce(func.sum(func.abs(StockMovement.quantity_delta)), 0))
@@ -290,6 +309,28 @@ def generate_reorder_recommendations(db: Session, canteen_id: UUID, *, actor_use
         .group_by(StockMovement.inventory_item_id)
     ).all():
         consumed_14d[iid] = Decimal(str(total_used or 0))
+
+    consumed_3d: dict[UUID, Decimal] = {}
+    for iid, total_used in db.execute(
+        select(StockMovement.inventory_item_id, func.coalesce(func.sum(func.abs(StockMovement.quantity_delta)), 0))
+        .where(
+            StockMovement.inventory_item_id.in_(inv_ids),
+            StockMovement.movement_type.in_(("order_deduct", "production_use")),
+            StockMovement.created_at >= since_3d,
+        )
+        .group_by(StockMovement.inventory_item_id)
+    ).all():
+        consumed_3d[iid] = Decimal(str(total_used or 0))
+
+    # Items that already have an open unfulfilled draft_po_created recommendation
+    open_draft_rec_inv_ids = set(
+        db.scalars(
+            select(ReorderRecommendation.inventory_item_id).where(
+                ReorderRecommendation.canteen_id == canteen_id,
+                ReorderRecommendation.status == "draft_po_created",
+            )
+        ).all()
+    )
 
     fc_demand_7d = _forecasted_ingredient_demand_7d(db, canteen_id)
     today_str = today_college().isoformat()
@@ -314,9 +355,22 @@ def generate_reorder_recommendations(db: Session, canteen_id: UUID, *, actor_use
 
         used_14 = consumed_14d.get(inv.id, Decimal("0.000"))
         avg_daily = (used_14 / Decimal("14")).quantize(Decimal("0.001")) if used_14 > 0 else None
+        used_3 = consumed_3d.get(inv.id, Decimal("0.000"))
+        avg_3d = (used_3 / Decimal("3")).quantize(Decimal("0.001")) if used_3 > 0 else Decimal("0.000")
+        is_consumption_spike = bool(
+            used_3 > 0
+            and (
+                (avg_daily is not None and avg_daily > 0 and avg_3d >= (avg_daily * Decimal("1.5")))
+                or (avg_daily is None and avg_3d > 0)
+            )
+        )
         fc_7d = fc_demand_7d.get(inv.ingredient_id)
         fc_daily = (fc_7d / Decimal("7")).quantize(Decimal("0.001")) if fc_7d is not None else None
-        demand_daily = max(avg_daily or Decimal("0.000"), fc_daily or Decimal("0.000"))
+        demand_daily = max(
+            avg_daily or Decimal("0.000"),
+            avg_3d if is_consumption_spike else Decimal("0.000"),
+            fc_daily or Decimal("0.000"),
+        )
 
         lead_time_need = (demand_daily * Decimal(max(1, lead_days))).quantize(Decimal("0.001"))
         reasons: list[str] = []
@@ -324,9 +378,20 @@ def generate_reorder_recommendations(db: Session, canteen_id: UUID, *, actor_use
             reasons.append(f"Effective stock ({effective_stock} {inv.unit}) at/below min stock ({min_lvl})")
         if effective_stock <= reorder_lvl:
             reasons.append(f"Effective stock ({effective_stock} {inv.unit}, incl. {incoming} incoming) <= reorder level ({reorder_lvl})")
-        if demand_daily > 0 and effective_stock < (lead_time_need + safety_stk):
+        if is_consumption_spike and effective_stock < (lead_time_need + safety_stk):
+            reasons.append(
+                f"Verified consumption spike (3d avg {avg_3d}/day vs 14d avg {avg_daily or Decimal('0.000')}/day)"
+            )
+        elif demand_daily > 0 and effective_stock < (lead_time_need + safety_stk):
             reasons.append(f"Lead-time demand ({lead_time_need}) + safety stock ({safety_stk}) exceeds effective stock")
         if not reasons:
+            continue
+
+        # Prevent cross-day duplicate recommendations when a draft/pending PO already covers this shortfall
+        pending_draft = pending_draft_by_ing.get(inv.ingredient_id, Decimal("0.000"))
+        if (inv.id in open_draft_rec_inv_ids or pending_draft > Decimal("0.000")) and (effective_stock + pending_draft) >= max(
+            reorder_lvl, lead_time_need + safety_stk
+        ):
             continue
 
         target_stock = max(reorder_lvl + safety_stk, (demand_daily * Decimal(max(1, target_cover))) + safety_stk)
@@ -495,22 +560,20 @@ def create_draft_po_from_recommendation(
             }
         ],
     }
-    po_out = create_purchase_order(db, po_payload, actor_user_id=actor_user_id)
+    # Atomic transaction: keep FOR UPDATE lock on rec until both draft PO and recommendation link commit
+    po_out = create_purchase_order(db, po_payload, actor_user_id=actor_user_id, can_approve=False, commit=False)
 
-    # Re-fetch recommendation inside fresh state after create_purchase_order commit
-    rec_upd = db.scalar(select(ReorderRecommendation).where(ReorderRecommendation.id == recommendation_id).with_for_update())
-    if rec_upd:
-        rec_upd.status = "draft_po_created"
-        rec_upd.purchase_order_id = UUID(po_out["id"])
-        rec_upd.reviewed_by_user_id = actor_user_id
-        rec_upd.reviewed_at = datetime.now(timezone.utc)
-        rec_upd.notes = notes
-        db.commit()
-        db.refresh(rec_upd)
+    rec.status = "draft_po_created"
+    rec.purchase_order_id = UUID(po_out["id"])
+    rec.reviewed_by_user_id = actor_user_id
+    rec.reviewed_at = datetime.now(timezone.utc)
+    rec.notes = notes
+    db.commit()
+    db.refresh(rec)
 
     return {
         "recommendation": _serialize_recommendation(
-            rec_upd or rec,
+            rec,
             ingredient_name=ing.name if ing else None,
             unit=inv.unit,
             po_number=po_out["po_number"],

@@ -5,6 +5,7 @@ import { Navbar } from "./components/layout/Navbar";
 import { OfflineBanner } from "./components/layout/OfflineBanner";
 import { MobileAppNav } from "./components/layout/MobileAppNav";
 import { BrandFooter, BrandLoadingState, BrandLogo } from "./components/branding/BrandLogo";
+import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { Button, Card, ToastProvider } from "./components/ui/Primitives";
 import { useAppStore } from "./store/useAppStore";
 import { HomePage } from "./pages/customer/HomePage";
@@ -106,9 +107,10 @@ const RequireRole: React.FC<{ allowed: string[]; children: React.ReactNode }> = 
 
 export function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <ToastProvider>
-        <BrowserRouter>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <ToastProvider>
+          <BrowserRouter>
           <div className="min-h-screen flex flex-col overflow-x-hidden bg-[#fdf8f0]/40 text-slate-900 pb-20 md:pb-0">
             <Navbar />
             <OfflineBanner />
@@ -205,6 +207,7 @@ export function App() {
                           "cashier",
                           "pickup_staff",
                           "inventory_manager",
+                          "food_safety_inspector",
                           "canteen_manager",
                           "college_admin",
                         ]}
@@ -272,9 +275,10 @@ export function App() {
             <BrandFooter />
             <MobileAppNav />
           </div>
-        </BrowserRouter>
-      </ToastProvider>
-    </QueryClientProvider>
+          </BrowserRouter>
+        </ToastProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 

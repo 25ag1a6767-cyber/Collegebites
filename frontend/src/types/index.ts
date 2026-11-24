@@ -232,6 +232,9 @@ export interface Order {
   orders_ahead_count?: number | null;
   counter_queue_position?: number | null;
   dynamic_wait_minutes?: number | null;
+  waiting_time_available?: boolean;
+  waiting_time_message?: string | null;
+  last_updated_at?: string | null;
   pickup_token_code?: string | null;
   qr_verification_path?: string | null;
   qr_token_raw?: string | null;

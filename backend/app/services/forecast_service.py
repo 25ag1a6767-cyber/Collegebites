@@ -412,11 +412,28 @@ def _load_historical_sales_panel(
 
     active_item_ids = sorted({fid for fid, _ in daily_qty.keys()}, key=lambda u: str(u))
     item_code_map = {fid: idx for idx, fid in enumerate(active_item_ids)}
+    # Skip canteen-wide zero-sales holiday closure days from training targets so holidays don't distort weekday baselines
+    operating_dates = [d for d in all_dates if not (d in holidays and d not in distinct_sales_dates)]
+    if len(operating_dates) < MIN_HISTORICAL_DAYS:
+        operating_dates = all_dates
+
+    # Compute per-item upper IQR outlier cap (Q3 + 3.0 * IQR) when >= 8 positive sales days exist
+    item_upper_cap: dict[UUID, float] = {}
+    for fid in active_item_ids:
+        pos_vals = sorted(v for (f_id, _d), v in daily_qty.items() if f_id == fid and v > 0)
+        if len(pos_vals) >= 8:
+            q1 = pos_vals[len(pos_vals) // 4]
+            q3 = pos_vals[(3 * len(pos_vals)) // 4]
+            iqr = max(1.0, q3 - q1)
+            item_upper_cap[fid] = q3 + (3.0 * iqr)
+
     records: list[dict[str, Any]] = []
     for fid in active_item_ids:
         hist_vals: list[float] = []
-        for d in all_dates:
-            y_val = daily_qty.get((fid, d), 0.0)
+        cap = item_upper_cap.get(fid)
+        for d in operating_dates:
+            raw_y = daily_qty.get((fid, d), 0.0)
+            y_val = min(raw_y, cap) if (cap is not None and raw_y > cap) else raw_y
             lag_1 = hist_vals[-1] if len(hist_vals) >= 1 else 0.0
             lag_7 = hist_vals[-7] if len(hist_vals) >= 7 else (sum(hist_vals) / len(hist_vals) if hist_vals else 0.0)
             r7 = (sum(hist_vals[-7:]) / len(hist_vals[-7:])) if hist_vals else 0.0
@@ -481,11 +498,25 @@ def train_and_generate_forecasts(
         t_at = latest_active.trained_at
         if t_at and t_at.tzinfo is None:
             t_at = t_at.replace(tzinfo=timezone.utc)
-        if t_at and (now - t_at) < timedelta(hours=12) and latest_active.historical_days_used >= n_sales_days:
+        existing_max_horizon = (
+            db.scalar(
+                select(DemandForecast.horizon_days)
+                .where(DemandForecast.model_id == latest_active.id)
+                .order_by(DemandForecast.horizon_days.desc())
+                .limit(1)
+            )
+            or 0
+        )
+        if (
+            t_at
+            and (now - t_at) < timedelta(hours=12)
+            and latest_active.historical_days_used >= n_sales_days
+            and int(existing_max_horizon) >= int(horizon_days)
+        ):
             summary = get_canteen_forecast_summary(db, canteen_id, horizon_days=horizon_days)
             summary["retrained"] = False
             summary["retrain_skipped_reason"] = (
-                "Active model trained within last 12 hours on identical historical window; pass force_retrain=true to override."
+                "Active model trained within last 12 hours on identical historical window and horizon; pass force_retrain=true to override."
             )
             return summary
 
@@ -872,4 +903,97 @@ def get_canteen_forecast_summary(db: Session, canteen_id: UUID, *, horizon_days:
         "peak_ordering_periods": peak_periods,
         "low_demand_items": low_demand,
         "potential_shortages": potential_shortages,
+    }
+
+
+def evaluate_past_forecasts(db: Session, canteen_id: UUID, *, lookback_days: int = 30) -> dict[str, Any]:
+    """Compare previously generated DemandForecast rows for elapsed dates against actual confirmed orders."""
+    canteen = db.get(Canteen, canteen_id)
+    if not canteen:
+        raise HTTPException(status_code=404, detail="Canteen not found")
+
+    tz = get_college_tz()
+    today = today_college()
+    since_d = today - timedelta(days=max(1, min(lookback_days, 180)))
+
+    stored_evals = list(
+        db.scalars(
+            select(ForecastEvaluation)
+            .where(ForecastEvaluation.canteen_id == canteen_id)
+            .order_by(ForecastEvaluation.created_at.desc())
+            .limit(30)
+        ).all()
+    )
+    past_forecasts = list(
+        db.scalars(
+            select(DemandForecast).where(
+                DemandForecast.canteen_id == canteen_id,
+                DemandForecast.forecast_date >= since_d,
+                DemandForecast.forecast_date < today,
+            )
+        ).all()
+    )
+
+    realized_metrics: dict[str, Any]
+    if not past_forecasts:
+        realized_metrics = {
+            "status": "no_elapsed_forecasts",
+            "evaluated_pairs": 0,
+            "mae": None,
+            "rmse": None,
+            "mape": None,
+            "message": "No past forecast dates have completed yet for realized-vs-predicted comparison.",
+        }
+    else:
+        s_dt = datetime.combine(since_d, time.min, tzinfo=tz)
+        e_dt = datetime.combine(today - timedelta(days=1), time.max, tzinfo=tz)
+        actual_rows = db.execute(
+            select(Order.created_at, OrderItem.food_item_id, OrderItem.quantity)
+            .join(OrderItem, OrderItem.order_id == Order.id)
+            .where(
+                Order.canteen_id == canteen_id,
+                Order.payment_status == "CONFIRMED",
+                Order.created_at >= s_dt,
+                Order.created_at <= e_dt,
+                OrderItem.food_item_id.is_not(None),
+            )
+        ).all()
+        actual_map: dict[tuple[UUID, date], float] = {}
+        for ts, fid, qty in actual_rows:
+            dt_u = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+            d_loc = dt_u.astimezone(tz).date()
+            actual_map[(fid, d_loc)] = actual_map.get((fid, d_loc), 0.0) + float(qty or 0)
+
+        y_true = [actual_map.get((fc.food_item_id, fc.forecast_date), 0.0) for fc in past_forecasts]
+        y_pred = [float(fc.predicted_quantity) for fc in past_forecasts]
+        mae, rmse, mape, _std = _compute_metrics(y_true, y_pred)
+        realized_metrics = {
+            "status": "ok",
+            "evaluated_pairs": len(past_forecasts),
+            "mae": mae,
+            "rmse": rmse,
+            "mape": mape,
+            "message": None,
+        }
+
+    return {
+        "canteen_id": str(canteen_id),
+        "canteen_name": canteen.name,
+        "lookback_days": lookback_days,
+        "data_classification": "calculated",
+        "realized_vs_predicted": realized_metrics,
+        "training_evaluations": [
+            {
+                "id": str(e.id),
+                "model_id": str(e.model_id),
+                "evaluation_date": e.evaluation_date.isoformat() if e.evaluation_date else None,
+                "mae": float(e.mae) if e.mae is not None else None,
+                "rmse": float(e.rmse) if e.rmse is not None else None,
+                "mape": float(e.mape) if e.mape is not None else None,
+                "evaluated_items_count": e.evaluated_items_count,
+                "notes": e.notes,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in stored_evals
+        ],
     }

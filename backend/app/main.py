@@ -19,7 +19,7 @@ from app.api.router import api_router
 from app.core.cache import cache_manager
 from app.core.config import settings
 from app.core.database import SessionLocal, dispose_engine, get_pool_stats
-from app.core.logging import setup_logging
+from app.core.logging import request_id_ctx, setup_logging
 from app.core.rate_limit import PureASGIRateLimitMiddleware, limiter
 from app.core.redis_client import get_redis
 from app.middleware.security_headers import SecurityHeadersMiddleware
@@ -53,6 +53,7 @@ class RequestObservabilityMiddleware:
                 break
         request_id = incoming_rid or uuid4().hex[:16]
         scope.setdefault("state", {})["request_id"] = request_id
+        rid_token = request_id_ctx.set(request_id)
         response_started = False
         status_code = 200
 
@@ -62,9 +63,12 @@ class RequestObservabilityMiddleware:
                 response_started = True
                 status_code = int(message.get("status", 200))
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
-                headers = list(message.get("headers") or [])
-                if not any(k.lower() == b"x-request-id" for k, _ in headers):
-                    headers.append((b"x-request-id", request_id.encode("ascii")))
+                headers = [
+                    (k, v)
+                    for k, v in (message.get("headers") or [])
+                    if k.lower() not in (b"x-request-id", b"x-response-time-ms")
+                ]
+                headers.append((b"x-request-id", request_id.encode("ascii")))
                 headers.append((b"x-response-time-ms", f"{elapsed_ms:.2f}".encode("ascii")))
                 message = {**message, "headers": headers}
             await send(message)
@@ -91,6 +95,8 @@ class RequestObservabilityMiddleware:
                 )
                 await resp(scope, receive, send)
             return
+        finally:
+            request_id_ctx.reset(rid_token)
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         if elapsed_ms >= 500.0 and not is_stream:

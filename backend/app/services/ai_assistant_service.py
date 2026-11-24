@@ -34,11 +34,14 @@ from app.services import (
 )
 
 BLOCKED_ACTION_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\b(approve|confirm|place|submit|authorize)\b.{0,30}\b(po|purchase\s*order|reorder|procurement)\b", re.I), "Purchase order approval/submission"),
+    (re.compile(r"\b(approve|confirm|place|submit|authorize|create|generate|issue)\b.{0,30}\b(po|purchase\s*order|reorder|procurement)\b", re.I), "Purchase order creation/approval/submission"),
     (re.compile(r"\b(transfer|send|pay|disburse)\b.{0,25}\b(money|funds|vendor|supplier|payment)\b", re.I), "Financial payment / money transfer"),
     (re.compile(r"\b(refund|reverse|chargeback)\b", re.I), "Refund processing (prohibited under CollegeBites no-refund policy)"),
-    (re.compile(r"\b(change|update|modify|set|edit|alter|raise|lower|delete|remove)\b.{0,30}\b(price|menu|food\s*item|stock|inventory|quantity|payment|financial|ledger|production\s*plan|batch|order)\b", re.I), "Direct operational or financial data modification"),
+    (re.compile(r"\b(cancel|void|reject)\b.{0,25}\b(order|bulk\s*order|po|purchase\s*order|batch)\b", re.I), "Order or batch cancellation/rejection"),
+    (re.compile(r"\b(disable|deactivate|enable|hide|archive|suspend)\b.{0,25}\b(item|menu|dish|user|staff|account|canteen|counter|supplier)\b", re.I), "Account, menu, or operational status mutation"),
+    (re.compile(r"\b(change|update|modify|set|edit|alter|raise|lower|delete|remove)\b.{0,30}\b(price|menu|food\s*item|recipe|stock|inventory|quantity|payment|financial|ledger|production\s*plan|batch|order|user|role)\b", re.I), "Direct operational, recipe, or financial data modification"),
     (re.compile(r"\b(deduct|consume|add|adjust|dispose)\b.{0,25}\b(stock|inventory|batch)\b", re.I), "Direct inventory mutation"),
+    (re.compile(r"\b(approve|reject|activate|initiate|close)\b.{0,25}\b(recall|bulk\s*order|price\s*change)\b", re.I), "Compliance recall or approval workflow mutation"),
     (re.compile(r"\b(send|broadcast|publish|post)\b.{0,25}\b(announcement|notification|alert|email|sms|maintenance)\b", re.I), "Automated broadcast / announcement dispatch"),
     (re.compile(r"\b(confirm|mark)\b.{0,20}\b(payment|paid|delivered|completed)\b", re.I), "Payment or order confirmation"),
     (re.compile(r"\b(drop\s+table|delete\s+from|update\s+\w+\s+set|insert\s+into|truncate)\b", re.I), "Direct database modification"),
@@ -55,6 +58,19 @@ def _detect_blocked_action(question: str) -> Optional[str]:
 def _parse_date_window(question: str) -> tuple[str, date, date]:
     q = question.lower()
     today = today_college()
+    explicit_dates = re.findall(r"\b(20\d{2}-\d{2}-\d{2})\b", question)
+    if explicit_dates:
+        parsed: list[date] = []
+        for ds in explicit_dates[:2]:
+            try:
+                parsed.append(date.fromisoformat(ds))
+            except ValueError:
+                pass
+        if len(parsed) == 2:
+            s_d, e_d = min(parsed), max(parsed)
+            return "custom", s_d, e_d
+        if len(parsed) == 1:
+            return "custom", parsed[0], parsed[0]
     if "yesterday" in q:
         y = today - timedelta(days=1)
         return "yesterday", y, y
@@ -113,6 +129,8 @@ def ask_assistant(
         conv = db.get(AIAssistantConversation, conversation_id)
         if not conv or conv.user_id != user_id:
             raise HTTPException(status_code=404, detail="Conversation not found")
+        if conv.canteen_id and conv.canteen_id != canteen_id:
+            raise HTTPException(status_code=400, detail="Conversation belongs to a different canteen")
     else:
         conv = AIAssistantConversation(
             user_id=user_id,
@@ -185,9 +203,11 @@ def ask_assistant(
     supporting_data: dict[str, Any] = {}
     classifications: set[str] = set()
 
-    # Role-based domain filtering (e.g., food_safety_inspector sees safety/traceability without financial internals if not manager/admin)
+    # Role-based domain filtering (e.g., food_safety_inspector sees safety/traceability without financial internals or forecasts)
     is_finance_allowed = bool(user_roles & {"super_admin", "college_admin", "canteen_manager"})
     is_inventory_allowed = bool(user_roles & {"super_admin", "college_admin", "canteen_manager", "inventory_manager", "kitchen_staff"})
+    is_forecast_allowed = bool(user_roles & {"super_admin", "college_admin", "canteen_manager", "inventory_manager", "kitchen_staff"})
+    asks_derived_metric = any(k in clean_q.lower() for k in ("margin", "average", "aov", "ratio", "rate", "mae", "accuracy", "percentage"))
 
     report_cache: Optional[dict[str, Any]] = None
 
@@ -213,7 +233,7 @@ def ask_assistant(
                 sections.append(f"Sales ({date_range_str}): No verified paid orders recorded for {canteen.name} in this period.")
                 classifications.add("unavailable")
             else:
-                classifications.add("actual")
+                classifications.add("calculated" if asks_derived_metric else "actual")
                 margin_str = (
                     f"Estimated gross margin: ₹{fin['estimated_gross_margin']} ({fin['estimated_gross_margin_percent']}%)"
                     if fin.get("estimated_gross_margin") is not None
@@ -242,9 +262,17 @@ def ask_assistant(
                 classifications.add("unavailable")
             else:
                 classifications.add("actual")
-                formatted = ", ".join(f"{it['item_name']} ({it['quantity_sold']} sold, ₹{it['revenue']:.2f})" for it in top[:5])
+                if is_finance_allowed:
+                    formatted = ", ".join(f"{it['item_name']} ({it['quantity_sold']} sold, ₹{it['revenue']:.2f})" for it in top[:5])
+                    supporting_data["top_items"] = top[:10]
+                else:
+                    formatted = ", ".join(f"{it['item_name']} ({it['quantity_sold']} sold)" for it in top[:5])
+                    supporting_data["top_items"] = [
+                        {"item_name": it["item_name"], "quantity_sold": it["quantity_sold"], "order_count": it.get("order_count", 0)}
+                        for it in top[:10]
+                    ]
+                    limitations_list.append("Item revenue figures are omitted for non-finance roles.")
                 sections.append(f"Top Selling Items ({date_range_str}): {formatted}.")
-            supporting_data["top_items"] = top[:10]
 
         elif intent == "wastage_report":
             rep = _get_report()
@@ -253,14 +281,26 @@ def ask_assistant(
             tot_w = inv_rep.get("total_wastage_loss", "0.00")
             wb = inv_rep.get("wastage_breakdown") or {}
             classifications.add("actual")
-            sections.append(
-                f"Recorded Food & Ingredient Wastage ({date_range_str}): Total recorded loss ₹{tot_w} "
-                f"(Expired: ₹{wb.get('expired', {}).get('loss_amount', '0.00')}, "
-                f"Damaged: ₹{wb.get('damaged', {}).get('loss_amount', '0.00')}, "
-                f"Unsold: ₹{wb.get('unsold', {}).get('loss_amount', '0.00')}, "
-                f"Wastage: ₹{wb.get('wastage', {}).get('loss_amount', '0.00')})."
-            )
-            supporting_data["wastage"] = {"total_wastage_loss": tot_w, "breakdown": wb}
+            if is_finance_allowed:
+                sections.append(
+                    f"Recorded Food & Ingredient Wastage ({date_range_str}): Total recorded loss ₹{tot_w} "
+                    f"(Expired: ₹{wb.get('expired', {}).get('loss_amount', '0.00')}, "
+                    f"Damaged: ₹{wb.get('damaged', {}).get('loss_amount', '0.00')}, "
+                    f"Unsold: ₹{wb.get('unsold', {}).get('loss_amount', '0.00')}, "
+                    f"Wastage: ₹{wb.get('wastage', {}).get('loss_amount', '0.00')})."
+                )
+                supporting_data["wastage"] = {"total_wastage_loss": tot_w, "breakdown": wb}
+            else:
+                qty_breakdown = {k: {"quantity": v.get("quantity", "0.000")} for k, v in wb.items()}
+                sections.append(
+                    f"Recorded Food & Ingredient Wastage Quantities ({date_range_str}): "
+                    f"Expired {wb.get('expired', {}).get('quantity', '0.000')}, "
+                    f"Damaged {wb.get('damaged', {}).get('quantity', '0.000')}, "
+                    f"Unsold {wb.get('unsold', {}).get('quantity', '0.000')}, "
+                    f"Wastage {wb.get('wastage', {}).get('quantity', '0.000')}."
+                )
+                limitations_list.append("Financial loss amounts are restricted to Canteen Manager and Admin roles.")
+                supporting_data["wastage"] = {"breakdown_quantities": qty_breakdown}
 
         elif intent == "inventory_alerts":
             if not is_inventory_allowed:
@@ -373,6 +413,9 @@ def ask_assistant(
             supporting_data["production"] = {"planning_items_count": len(plan_ov["items"]), "report": prod_rep}
 
         elif intent == "demand_forecast":
+            if not is_forecast_allowed:
+                limitations_list.append("Demand forecasts require Admin, Canteen Manager, Inventory Manager, or Kitchen Staff role.")
+                continue
             from app.services import forecast_service
 
             tools_invoked.append("forecast_service.get_canteen_forecast_summary")
@@ -406,6 +449,8 @@ def ask_assistant(
         final_class = "ai_predicted"
     elif "estimated" in classifications:
         final_class = "estimated"
+    elif "calculated" in classifications:
+        final_class = "calculated"
     elif "actual" in classifications:
         final_class = "actual"
     else:

@@ -7,7 +7,7 @@ Phase 4: Food Traceability & Batch Tracking Service (FIFO/FEFO + End-to-End Trac
 """
 
 import io
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID, uuid4
@@ -47,6 +47,8 @@ def _serialize_batch(
 ) -> dict:
     today = today_college()
     is_expired = bool(b.expiry_date and b.expiry_date < today)
+    is_unusable = is_expired or b.quality_status in ("blocked", "rejected", "recalled")
+    avail_qty = Decimal("0.000") if is_unusable else max(Decimal("0.000"), b.remaining_quantity)
     return {
         "id": str(b.id),
         "inventory_item_id": str(b.inventory_item_id),
@@ -65,6 +67,7 @@ def _serialize_batch(
         "rejected_quantity": str(b.rejected_quantity or Decimal("0.000")),
         "wasted_quantity": str(b.wasted_quantity or Decimal("0.000")),
         "remaining_quantity": str(b.remaining_quantity),
+        "available_quantity": str(avail_qty.quantize(Decimal("0.001"))),
         "unit_cost": str(b.unit_cost),
         "manufacturing_date": b.manufacturing_date.isoformat() if b.manufacturing_date else None,
         "expiry_date": b.expiry_date.isoformat() if b.expiry_date else None,
@@ -147,6 +150,17 @@ def register_stock_batch(
         raise HTTPException(status_code=400, detail=f"quality_status must be one of {', '.join(VALID_QUALITY_STATUSES)}")
     if manufacturing_date and expiry_date and expiry_date < manufacturing_date:
         raise HTTPException(status_code=400, detail="expiry_date cannot precede manufacturing_date")
+
+    if supplier_id is not None and not db.get(Supplier, supplier_id):
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    if purchase_order_id is not None:
+        po_obj = db.get(PurchaseOrder, purchase_order_id)
+        if not po_obj or po_obj.canteen_id != inv.canteen_id:
+            raise HTTPException(status_code=400, detail="Purchase order not found for this canteen")
+    if goods_receipt_id is not None:
+        grn_obj = db.get(GoodsReceipt, goods_receipt_id)
+        if not grn_obj or grn_obj.canteen_id != inv.canteen_id:
+            raise HTTPException(status_code=400, detail="Goods receipt not found for this canteen")
 
     now = datetime.now(timezone.utc)
     eff_cost = unit_cost if unit_cost is not None else inv.unit_cost
@@ -248,7 +262,29 @@ def update_batch_quality(
         batch.block_reason = block_reason.strip()[:255]
     if storage_location is not None:
         batch.storage_location = storage_location.strip()[:120]
-    inv = db.get(InventoryItem, batch.inventory_item_id)
+    inv = db.scalar(select(InventoryItem).where(InventoryItem.id == batch.inventory_item_id).with_for_update())
+    if inv and q_st == "rejected" and prev != "rejected" and batch.remaining_quantity > Decimal("0.000"):
+        rej_qty = batch.remaining_quantity
+        batch.rejected_quantity = (batch.rejected_quantity or Decimal("0.000")) + rej_qty
+        batch.remaining_quantity = Decimal("0.000")
+        inv.current_quantity = max(Decimal("0.000"), inv.current_quantity - rej_qty)
+        db.add(
+            StockMovement(
+                inventory_item_id=inv.id,
+                batch_id=batch.id,
+                movement_type="wastage",
+                quantity_delta=-rej_qty,
+                balance_after=inv.current_quantity,
+                reference_type="batch_quality_rejected",
+                reference_id=str(batch.id),
+                created_by_user_id=actor_user_id,
+                notes=f"Batch {batch.batch_number} rejected: {batch.block_reason or 'Quality failure'}",
+            )
+        )
+    if inv:
+        from app.services.inventory_service import refresh_food_item_ingredient_sufficiency
+
+        refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
     record_audit_log(
         db,
         action="traceability.batch_quality_updated",
@@ -261,6 +297,35 @@ def update_batch_quality(
     db.refresh(batch)
     ing = db.get(Ingredient, inv.ingredient_id) if inv else None
     return _serialize_batch(batch, ingredient_name=ing.name if ing else None, unit=inv.unit if inv else None)
+
+
+def list_batch_movements(db: Session, batch_id: UUID) -> list[dict]:
+    batch = db.get(StockBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Stock batch not found")
+    inv = db.get(InventoryItem, batch.inventory_item_id)
+    rows = db.scalars(
+        select(StockMovement)
+        .where(StockMovement.batch_id == batch_id)
+        .order_by(StockMovement.created_at.desc())
+        .limit(200)
+    ).all()
+    return [
+        {
+            "id": str(m.id),
+            "batch_id": str(m.batch_id) if m.batch_id else None,
+            "inventory_item_id": str(m.inventory_item_id),
+            "unit": inv.unit if inv else None,
+            "movement_type": m.movement_type,
+            "quantity_delta": str(m.quantity_delta),
+            "balance_after": str(m.balance_after),
+            "reference_type": m.reference_type,
+            "reference_id": m.reference_id,
+            "notes": m.notes,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        }
+        for m in rows
+    ]
 
 
 def allocate_stock_batches(
@@ -415,15 +480,22 @@ def get_batch_traceability_chain(db: Session, batch_id: UUID) -> dict:
         if food_ids
         else {}
     )
+    recipes = (
+        list(db.scalars(select(Recipe).where(Recipe.food_item_id.in_(food_ids))).all())
+        if food_ids
+        else []
+    )
 
     trace_rows = list(
         db.scalars(select(TraceabilityRecord).where(TraceabilityRecord.stock_batch_id == batch.id)).all()
     )
     order_ids = list({tr.order_id for tr in trace_rows if tr.order_id})
-    # Also find confirmed orders containing food_items produced by these production batches after production started
+    # Bound related order matching to realistic 3-day shelf/serving window after production
     if prod_batches:
         earliest_prod = min((pb.created_at for pb in prod_batches if pb.created_at), default=None)
+        latest_prod = max((pb.created_at for pb in prod_batches if pb.created_at), default=earliest_prod)
         if food_ids and earliest_prod:
+            window_end = (latest_prod or earliest_prod) + timedelta(days=3)
             related_order_ids = db.scalars(
                 select(Order.id)
                 .join(OrderItem, OrderItem.order_id == Order.id)
@@ -431,6 +503,7 @@ def get_batch_traceability_chain(db: Session, batch_id: UUID) -> dict:
                     Order.canteen_id == (inv.canteen_id if inv else None),
                     Order.payment_status == "CONFIRMED",
                     Order.created_at >= earliest_prod,
+                    Order.created_at <= window_end,
                     OrderItem.food_item_id.in_(food_ids),
                 )
                 .limit(200)
@@ -467,6 +540,16 @@ def get_batch_traceability_chain(db: Session, batch_id: UUID) -> dict:
         "vendor": {"id": str(sup.id), "name": sup.name, "phone": sup.phone} if sup else None,
         "purchase_order": {"id": str(po.id), "po_number": po.po_number, "status": po.status} if po else None,
         "goods_receipt": {"id": str(grn.id), "grn_number": grn.grn_number, "received_at": grn.received_at.isoformat() if grn.received_at else None} if grn else None,
+        "recipes": [
+            {
+                "id": str(r.id),
+                "food_item_id": str(r.food_item_id),
+                "food_item_name": food_map.get(r.food_item_id),
+                "yield_portions": r.yield_portions,
+                "is_verified": bool(r.is_verified),
+            }
+            for r in recipes
+        ],
         "production_batches": [
             {
                 "id": str(pb.id),
@@ -574,6 +657,9 @@ def initiate_recall(
     )
     db.add(rec)
     db.flush()
+    from app.services.inventory_service import refresh_food_item_ingredient_sufficiency
+
+    refresh_food_item_ingredient_sufficiency(db, canteen_id)
     record_audit_log(
         db,
         action="traceability.recall_initiated",
@@ -618,6 +704,9 @@ def approve_recall(db: Session, recall_id: UUID, *, actor_user_id: UUID) -> dict
             batch.quality_status = "recalled"
             batch.block_reason = f"Active Recall {rec.recall_number}: {rec.reason}"[:255]
 
+    from app.services.inventory_service import refresh_food_item_ingredient_sufficiency
+
+    refresh_food_item_ingredient_sufficiency(db, rec.canteen_id)
     record_audit_log(
         db,
         action="traceability.recall_approved",
@@ -656,6 +745,19 @@ def update_recall(
         st = status.strip().lower()
         if st not in ("resolved", "closed"):
             raise HTTPException(status_code=400, detail="Use /approve to activate a recall, or set status to resolved/closed")
+        if rec.status == "closed":
+            raise HTTPException(status_code=409, detail="Closed recall incident cannot transition")
+        if rec.status == "under_review" and st == "resolved":
+            raise HTTPException(
+                status_code=409,
+                detail="Recall under review must be approved first via /approve before resolving, or closed with investigation_notes",
+            )
+        eff_notes = investigation_notes if investigation_notes is not None else rec.investigation_notes
+        eff_ca = corrective_actions if corrective_actions is not None else rec.corrective_actions
+        if st == "resolved" and not (eff_ca and eff_ca.strip()):
+            raise HTTPException(status_code=400, detail="corrective_actions are required to mark a recall resolved")
+        if rec.status == "under_review" and st == "closed" and not (eff_notes and eff_notes.strip()):
+            raise HTTPException(status_code=400, detail="investigation_notes are required to close an unapproved recall")
         if st == "resolved":
             rec.resolved_at = datetime.now(timezone.utc)
         rec.status = st
@@ -713,32 +815,114 @@ def export_recall_pdf(db: Session, recall_id: UUID) -> bytes:
     _w, h = A4
     y = h - 45
 
+    def _ensure_space(need: int = 20):
+        nonlocal y
+        if y < 65 + need:
+            c.showPage()
+            y = h - 45
+            c.setFont("Helvetica", 8.5)
+
+    def _draw_wrapped(prefix: str, text: str, x: int = 40, font: str = "Helvetica", size: float = 8.5, max_chars: int = 92):
+        nonlocal y
+        c.setFont(font, size)
+        full = f"{prefix}{text}"
+        words = full.split()
+        line = ""
+        for w in words:
+            cand = f"{line} {w}".strip()
+            if len(cand) > max_chars and line:
+                _ensure_space(13)
+                c.setFont(font, size)
+                c.drawString(x, y, line)
+                y -= 13
+                line = w
+            else:
+                line = cand
+        if line:
+            _ensure_space(13)
+            c.setFont(font, size)
+            c.drawString(x, y, line)
+            y -= 13
+
     c.setFont("Helvetica-Bold", 14)
     c.drawString(40, y, f"CollegeBites Food Traceability & Recall Report — {rec.recall_number}")
     y -= 20
     c.setFont("Helvetica", 9)
     c.drawString(40, y, f"Canteen: {canteen.name if canteen else rec.canteen_id} | Status: {rec.status.upper()} | Severity: {rec.severity.upper()}")
+    y -= 15
+    c.drawString(
+        40,
+        y,
+        f"Initiated: {rec.created_at.isoformat()[:19] if rec.created_at else 'N/A'} | Approved: {rec.approved_at.isoformat()[:19] if rec.approved_at else 'Pending'} | Resolved: {rec.resolved_at.isoformat()[:19] if rec.resolved_at else 'Open'}",
+    )
     y -= 16
-    c.drawString(40, y, f"Title: {rec.title[:90]}")
-    y -= 16
-    c.drawString(40, y, f"Reason: {rec.reason[:95]}")
-    y -= 20
+    _draw_wrapped("Title: ", rec.title, font="Helvetica-Bold", size=9.5)
+    _draw_wrapped("Reason: ", rec.reason, font="Helvetica", size=9)
+    if rec.investigation_notes:
+        _draw_wrapped("Investigation Notes: ", rec.investigation_notes, font="Helvetica", size=8.5)
+    y -= 8
+
+    _ensure_space(28)
     c.setFont("Helvetica-Bold", 10)
     c.drawString(40, y, f"Affected Stock Batches ({len(rec.affected_stock_batch_ids or [])}):")
     y -= 14
-    c.setFont("Helvetica", 8)
     for bid in (rec.affected_stock_batch_ids or []):
         b = db.get(StockBatch, UUID(bid))
-        label = f"- {b.batch_number} (status={b.quality_status}, expiry={b.expiry_date})" if b else f"- {bid}"
-        c.drawString(50, y, label[:95])
-        y -= 13
-    y -= 8
+        if b:
+            sup = db.get(Supplier, b.supplier_id) if b.supplier_id else None
+            po = db.get(PurchaseOrder, b.purchase_order_id) if b.purchase_order_id else None
+            grn = db.get(GoodsReceipt, b.goods_receipt_id) if b.goods_receipt_id else None
+            label = (
+                f"- {b.batch_number} | status={b.quality_status} | rem={b.remaining_quantity} | expiry={b.expiry_date or 'N/A'} "
+                f"| vendor={sup.name if sup else 'N/A'} | PO={po.po_number if po else 'N/A'} | GRN={grn.grn_number if grn else 'N/A'}"
+            )
+        else:
+            label = f"- {bid}"
+        _draw_wrapped("", label, x=48, font="Helvetica", size=8)
+
+    y -= 6
+    _ensure_space(28)
+    prod_ids = [UUID(pid) for pid in (rec.affected_production_batch_ids or [])]
+    prod_rows = list(db.scalars(select(ProductionBatch).where(ProductionBatch.id.in_(prod_ids))).all()) if prod_ids else []
+    food_ids = list({pb.food_item_id for pb in prod_rows if pb.food_item_id})
+    food_map = {f.id: f.name for f in db.scalars(select(FoodItem).where(FoodItem.id.in_(food_ids))).all()} if food_ids else {}
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(40, y, f"Affected Production Batches: {len(rec.affected_production_batch_ids or [])} | Affected Orders: {len(rec.affected_order_ids or [])}")
-    y -= 18
-    c.setFont("Helvetica", 9)
+    c.drawString(40, y, f"Affected Production Batches ({len(rec.affected_production_batch_ids or [])}):")
+    y -= 14
+    if not prod_rows:
+        _draw_wrapped("", "None recorded.", x=48, size=8)
+    else:
+        for pb in prod_rows:
+            _draw_wrapped(
+                "",
+                f"- {pb.batch_code} | Dish: {food_map.get(pb.food_item_id, str(pb.food_item_id))} | Status: {pb.status} | Planned: {pb.planned_quantity} | Actual: {pb.actual_quantity or 0}",
+                x=48,
+                size=8,
+            )
+
+    y -= 6
+    _ensure_space(28)
+    ord_ids = [UUID(oid) for oid in (rec.affected_order_ids or [])]
+    ord_rows = list(db.scalars(select(Order).where(Order.id.in_(ord_ids))).all()) if ord_ids else []
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(40, y, f"Affected Confirmed Customer Orders ({len(rec.affected_order_ids or [])}):")
+    y -= 14
+    if not ord_rows:
+        _draw_wrapped("", "None recorded.", x=48, size=8)
+    else:
+        for o in ord_rows[:80]:
+            _draw_wrapped(
+                "",
+                f"- {o.order_number} | Status: {o.status} | Created: {o.created_at.isoformat()[:19] if o.created_at else 'N/A'}",
+                x=48,
+                size=8,
+            )
+        if len(ord_rows) > 80:
+            _draw_wrapped("", f"... and {len(ord_rows) - 80} additional order(s).", x=48, size=8)
+
     if rec.corrective_actions:
-        c.drawString(40, y, f"Corrective Actions: {rec.corrective_actions[:95]}")
+        y -= 6
+        _draw_wrapped("Corrective Actions: ", rec.corrective_actions, font="Helvetica-Bold", size=8.5)
     c.showPage()
     c.save()
     return buf.getvalue()

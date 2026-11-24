@@ -73,3 +73,14 @@ def list_models(
 ):
     enforce_canteen_scope(principal, canteen_id)
     return forecast_service.list_forecast_models(db, canteen_id)
+
+
+@router.get("/canteens/{canteen_id}/evaluations")
+def get_evaluations(
+    canteen_id: UUID,
+    lookback_days: int = Query(default=30, ge=1, le=180),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*FC_VIEW_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return forecast_service.evaluate_past_forecasts(db, canteen_id, lookback_days=lookback_days)

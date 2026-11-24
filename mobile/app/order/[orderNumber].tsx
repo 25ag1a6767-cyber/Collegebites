@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Linking, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
+import { Alert, Linking, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import QRCode from "react-native-qrcode-svg";
@@ -141,7 +141,7 @@ export default function OrderDetailScreen() {
     }
   };
 
-  const cancelOrder = async () => {
+  const performCancelOrder = async () => {
     setErrMsg("");
     try {
       await ordersApi.cancelOrder(order.id, "Cancelled by customer from mobile app", gToken);
@@ -149,6 +149,24 @@ export default function OrderDetailScreen() {
     } catch (e: unknown) {
       setErrMsg(getMobileApiError(e, "Cannot cancel order at this stage"));
     }
+  };
+
+  const cancelOrder = () => {
+    if (Platform.OS === "web") {
+      if (typeof window !== "undefined" && !window.confirm("Cancel this order? No in-app refunds are processed per policy.")) {
+        return;
+      }
+      void performCancelOrder();
+      return;
+    }
+    Alert.alert(
+      "Cancel Order?",
+      "Are you sure you want to cancel this order? No in-app refunds are processed per college policy.",
+      [
+        { text: "Keep Order", style: "cancel" },
+        { text: "Cancel Order", style: "destructive", onPress: () => void performCancelOrder() },
+      ]
+    );
   };
 
   const downloadOrShareReceipt = async () => {
@@ -212,11 +230,27 @@ export default function OrderDetailScreen() {
               {order.queue_position && order.queue_position > 0
                 ? ` • Queue #${order.queue_position} (${order.orders_ahead_count ?? 0} ahead)`
                 : ""}
-              {order.dynamic_wait_minutes !== null && order.dynamic_wait_minutes !== undefined
-                ? ` • Est ${order.dynamic_wait_minutes}m`
+            </Text>
+            <Text style={{ color: "#fdedce", fontSize: 11, fontWeight: "700", marginTop: 4, textAlign: "center" }}>
+              {order.status === "READY"
+                ? "Estimated Wait: 0 min — Ready for Pickup"
+                : order.waiting_time_available === false
+                ? order.waiting_time_message || "Waiting time currently unavailable."
+                : order.dynamic_wait_minutes !== null && order.dynamic_wait_minutes !== undefined
+                ? `Estimated Wait: ~${order.dynamic_wait_minutes} min${
+                    order.estimated_pickup_at
+                      ? ` • Est. Pickup ${new Date(order.estimated_pickup_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                      : ""
+                  }`
                 : order.estimated_prep_minutes
-                ? ` • Est ${order.estimated_prep_minutes + (order.delayed_minutes || 0)}m`
-                : ""}
+                ? `Estimated Wait: ~${order.estimated_prep_minutes + (order.delayed_minutes || 0)} min`
+                : "Waiting time currently unavailable."}
+            </Text>
+            <Text style={{ color: "#cbd5e1", fontSize: 10, marginTop: 2 }}>
+              Last updated:{" "}
+              {order.last_updated_at
+                ? new Date(order.last_updated_at).toLocaleTimeString()
+                : new Date(order.confirmed_at || order.created_at).toLocaleTimeString()}
             </Text>
             {order.delayed_minutes > 0 && (
               <Text style={{ color: "#fbbf24", fontSize: 12, fontWeight: "800", marginTop: 4 }}>

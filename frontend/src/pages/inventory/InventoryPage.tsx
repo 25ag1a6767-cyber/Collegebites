@@ -468,7 +468,7 @@ export const InventoryPage: React.FC = () => {
 
       {/* 3.1 Inventory Manager Dashboard KPIs (Real DB Records Only) */}
       {section === "traceability_reorder" && (
-        <TraceabilityReorderingTab activeCanteenId={activeId} suppliers={suppliers} />
+        <TraceabilityReorderingTab activeCanteenId={activeId} suppliers={suppliers} items={items} />
       )}
       {dashError ? (
         <Card className="p-4 border-red-200 bg-red-50 text-xs text-red-800">

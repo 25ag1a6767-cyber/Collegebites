@@ -111,6 +111,7 @@ def get_analytics_report(
     paid_filters = order_filters + [Order.payment_status == "CONFIRMED"]
 
     # 1. Sales & Operations aggregates collapsed into 2 single-pass SQL queries (down from 13 queries)
+    has_item_or_cat_filter = bool(food_item_id or category_id)
     sales_row = db.execute(
         select(
             func.count(Order.id),
@@ -125,6 +126,24 @@ def get_analytics_report(
     discounts = Decimal(str(sales_row[2] or 0))
     tax_collected = Decimal(str(sales_row[3] or 0))
     net_sales = Decimal(str(sales_row[4] or 0))
+    if has_item_or_cat_filter:
+        oi_rev_stmt = (
+            select(
+                func.coalesce(func.sum(OrderItem.line_subtotal), 0),
+                func.coalesce(func.sum(OrderItem.line_total), 0),
+            )
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(*paid_filters)
+        )
+        if food_item_id:
+            oi_rev_stmt = oi_rev_stmt.where(OrderItem.food_item_id == food_item_id)
+        elif category_id:
+            oi_rev_stmt = oi_rev_stmt.join(FoodItem, FoodItem.id == OrderItem.food_item_id).where(
+                FoodItem.category_id == category_id
+            )
+        oi_sub, oi_tot = db.execute(oi_rev_stmt).one()
+        gross_sales = Decimal(str(oi_sub or 0)).quantize(Decimal("0.01"))
+        net_sales = Decimal(str(oi_tot or 0)).quantize(Decimal("0.01"))
     aov = (net_sales / Decimal(max(1, total_orders))).quantize(Decimal("0.01")) if total_orders else Decimal("0.00")
 
     # Today's real-time snapshot in college timezone (1 single conditional aggregate query)
@@ -183,6 +202,7 @@ def get_analytics_report(
     hourly_revenue: dict[int, Decimal] = {h: Decimal("0.00") for h in range(24)}
     prep_durations: list[float] = []
     wait_durations: list[float] = []
+    completion_durations: list[float] = []
     status_counts: dict[str, int] = {}
     channel_counts: dict[str, dict[str, Any]] = {}
 
@@ -227,6 +247,8 @@ def get_analytics_report(
             prep_durations.append(max(0.0, (o_ready - o_confirmed).total_seconds() / 60.0))
         if o_ready and o_completed:
             wait_durations.append(max(0.0, (o_completed - o_ready).total_seconds() / 60.0))
+        if o_confirmed and o_completed:
+            completion_durations.append(max(0.0, (o_completed - o_confirmed).total_seconds() / 60.0))
 
     daily_series = [
         {"date": v["date"], "orders": v["orders"], "revenue": float(v["revenue"])}
@@ -256,46 +278,59 @@ def get_analytics_report(
     ]
 
     # Top food items & least ordered active food items
-    item_sales_rows = db.execute(
+    item_sales_stmt = (
         select(
             OrderItem.food_item_id,
             OrderItem.item_name,
             func.sum(OrderItem.quantity),
             func.coalesce(func.sum(OrderItem.line_total), 0),
+            func.count(func.distinct(OrderItem.order_id)),
         )
         .join(Order, Order.id == OrderItem.order_id)
         .where(*paid_filters)
-        .group_by(OrderItem.food_item_id, OrderItem.item_name)
-    ).all()
+    )
+    if food_item_id:
+        item_sales_stmt = item_sales_stmt.where(OrderItem.food_item_id == food_item_id)
+    elif category_id:
+        item_sales_stmt = item_sales_stmt.join(FoodItem, FoodItem.id == OrderItem.food_item_id).where(
+            FoodItem.category_id == category_id
+        )
+    item_sales_rows = db.execute(item_sales_stmt.group_by(OrderItem.food_item_id, OrderItem.item_name)).all()
 
-    sold_by_food_id: dict[UUID, tuple[int, float]] = {}
-    sold_by_name: dict[str, tuple[int, float]] = {}
-    for fid, iname, qty, rev in item_sales_rows:
+    sold_by_food_id: dict[UUID, tuple[int, float, int]] = {}
+    sold_by_name: dict[str, tuple[int, float, int]] = {}
+    for fid, iname, qty, rev, ocnt in item_sales_rows:
         q_i = int(qty or 0)
         r_f = float(rev or 0)
+        o_i = int(ocnt or 0)
         if fid:
-            prev_q, prev_r = sold_by_food_id.get(fid, (0, 0.0))
-            sold_by_food_id[fid] = (prev_q + q_i, round(prev_r + r_f, 2))
-        prev_nq, prev_nr = sold_by_name.get(iname, (0, 0.0))
-        sold_by_name[iname] = (prev_nq + q_i, round(prev_nr + r_f, 2))
+            prev_q, prev_r, prev_o = sold_by_food_id.get(fid, (0, 0.0, 0))
+            sold_by_food_id[fid] = (prev_q + q_i, round(prev_r + r_f, 2), prev_o + o_i)
+        prev_nq, prev_nr, prev_no = sold_by_name.get(iname, (0, 0.0, 0))
+        sold_by_name[iname] = (prev_nq + q_i, round(prev_nr + r_f, 2), prev_no + o_i)
 
     top_items = [
-        {"item_name": name, "quantity_sold": q, "revenue": r}
-        for name, (q, r) in sorted(sold_by_name.items(), key=lambda kv: (-kv[1][0], -kv[1][1], kv[0]))[:15]
+        {"item_name": name, "quantity_sold": q, "order_count": oc, "revenue": r}
+        for name, (q, r, oc) in sorted(sold_by_name.items(), key=lambda kv: (-kv[1][0], -kv[1][1], kv[0]))[:15]
     ]
 
     food_stmt = select(FoodItem, FoodCategory.name).join(FoodCategory, FoodCategory.id == FoodItem.category_id).where(FoodItem.is_active.is_(True))
     if canteen_id:
         food_stmt = food_stmt.where(FoodItem.canteen_id == canteen_id)
+    if category_id:
+        food_stmt = food_stmt.where(FoodItem.category_id == category_id)
+    if food_item_id:
+        food_stmt = food_stmt.where(FoodItem.id == food_item_id)
     active_foods = db.execute(food_stmt.order_by(FoodItem.name.asc())).all()
     all_food_perf = []
     for fi, cat_name in active_foods:
-        q_sold, rev_amt = sold_by_food_id.get(fi.id, (0, 0.0))
+        q_sold, rev_amt, o_cnt = sold_by_food_id.get(fi.id, (0, 0.0, 0))
         all_food_perf.append({
             "food_item_id": str(fi.id),
             "item_name": fi.name,
             "category_name": cat_name,
             "quantity_sold": q_sold,
+            "order_count": o_cnt,
             "revenue": rev_amt,
             "is_available": fi.is_available,
         })
@@ -481,7 +516,7 @@ def get_analytics_report(
                 "is_low_stock": bool(inv.current_quantity <= inv.reorder_level),
             },
         )
-        if sm.movement_type in ("order_deduct", "order_deduction"):
+        if sm.movement_type in ("order_deduct", "order_deduction", "production_use"):
             qty_abs = abs(delta)
             bucket["consumed_qty"] = round(bucket["consumed_qty"] + qty_abs, 3)
             entry["consumed_quantity"] = round(entry["consumed_quantity"] + qty_abs, 3)
@@ -663,7 +698,15 @@ def get_analytics_report(
     recorded_wastage_loss = Decimal(str(total_wastage)).quantize(Decimal("0.01"))
     total_recorded_direct_costs = (verified_ingredient_cost + recorded_wastage_loss).quantize(Decimal("0.01"))
 
-    if verified_ingredient_cost > Decimal("0.00") and net_sales > Decimal("0.00"):
+    if has_item_or_cat_filter:
+        est_margin = None
+        est_margin_pct = None
+        margin_status = "whole_canteen_scope_required"
+        margin_note = (
+            "Canteen-wide ingredient consumption costs cannot be isolated to a single category or product filter. "
+            "Clear category/product filters to view estimated gross margin. Verified revenue is NOT labeled as profit."
+        )
+    elif verified_ingredient_cost > Decimal("0.00") and net_sales > Decimal("0.00"):
         est_margin = (net_sales - total_recorded_direct_costs).quantize(Decimal("0.01"))
         est_margin_pct = round(float((est_margin / net_sales) * Decimal("100")), 1)
         margin_status = "estimated_from_verified_ingredient_costs"
@@ -798,6 +841,11 @@ def get_analytics_report(
             "completion_rate_percent": completion_rate,
             "avg_prep_minutes": round(sum(prep_durations) / len(prep_durations), 1) if prep_durations else 0.0,
             "avg_pickup_wait_minutes": round(sum(wait_durations) / len(wait_durations), 1) if wait_durations else 0.0,
+            "avg_completion_minutes": round(sum(completion_durations) / len(completion_durations), 1) if completion_durations else 0.0,
+            "kitchen_workload_percent": round(
+                min(100.0, (active_pending_orders / max(1, sum(c["max_queue_capacity"] for c in counter_performance) or 25)) * 100.0),
+                1,
+            ),
             "peak_hours": peak_hours,
         },
         "inventory": {
@@ -1050,7 +1098,7 @@ def get_inventory_details_page(
         ).all():
             c_q, p_q, w_q = mov_agg.get(sm.inventory_item_id, (0.0, 0.0, 0.0))
             d = float(sm.quantity_delta or 0)
-            if sm.movement_type in ("order_deduct", "order_deduction"):
+            if sm.movement_type in ("order_deduct", "order_deduction", "production_use"):
                 c_q += abs(d)
             elif sm.movement_type == "purchase" or d > 0:
                 p_q += max(0.0, d)
@@ -1112,6 +1160,8 @@ def export_report_xlsx(report: dict[str, Any]) -> bytes:
     inv = report["inventory"]
     ps = report.get("payment_stats", {})
     td = report.get("today_summary", {})
+    fin = report.get("financial_analytics", {})
+    pc = report.get("period_comparison")
     summary_rows = [
         ["Range", f"{report['range']['start_date']} to {report['range']['end_date']} ({report['range'].get('preset', '')})"],
         ["Orders Today", td.get("total_orders_today", 0)],
@@ -1119,10 +1169,20 @@ def export_report_xlsx(report: dict[str, Any]) -> bytes:
         ["Active Queue Now", td.get("active_pending_orders", 0)],
         ["Revenue Today", td.get("revenue_today", "0.00")],
         ["Confirmed Orders (Range)", s["total_orders"]],
-        ["Gross Sales", s["gross_sales"]],
-        ["Discounts", s["discounts"]],
-        ["Tax Collected", s["tax_collected"]],
-        ["Net Sales", s["net_sales"]],
+        ["Verified Gross Sales", fin.get("verified_gross_sales", s["gross_sales"])],
+        ["Historical Discounts", fin.get("historical_discounts", s["discounts"])],
+        ["Historical Taxes", fin.get("historical_taxes", s["tax_collected"])],
+        ["Verified Net Revenue (Actual — NOT Profit)", fin.get("verified_net_revenue", s["net_sales"])],
+        ["Verified Ingredient Consumption Cost", fin.get("verified_ingredient_cost", "0.00")],
+        ["Recorded Wastage Loss", fin.get("recorded_wastage_loss", inv["total_wastage_loss"])],
+        ["Total Recorded Direct Costs", fin.get("total_recorded_direct_costs", "0.00")],
+        [
+            "Estimated Gross Margin",
+            f"{fin['estimated_gross_margin']} ({fin['estimated_gross_margin_percent']}%)"
+            if fin.get("estimated_gross_margin") is not None
+            else "Unavailable",
+        ],
+        ["Financial Methodology Note", fin.get("margin_note", "")],
         ["Average Order Value", s["average_order_value"]],
         ["Payment Success Rate %", ps.get("success_rate_percent", 0)],
         ["Completed Orders", op["completed_orders"]],
@@ -1130,11 +1190,20 @@ def export_report_xlsx(report: dict[str, Any]) -> bytes:
         ["Delayed Orders", op["delayed_orders"]],
         ["Avg Prep Minutes", op["avg_prep_minutes"]],
         ["Avg Pickup Wait Minutes", op["avg_pickup_wait_minutes"]],
+        ["Avg End-to-End Completion Minutes", op.get("avg_completion_minutes", 0)],
         ["Tracked Ingredients", inv["tracked_ingredients"]],
         ["Low Stock Count", inv["low_stock_count"]],
         ["Total Wastage Loss", inv["total_wastage_loss"]],
         ["Total Purchases Received", inv["total_purchases_received"]],
     ]
+    if pc:
+        summary_rows.extend([
+            ["Previous Period Range", f"{pc['previous_range']['start_date']} to {pc['previous_range']['end_date']}"],
+            ["Previous Period Orders", pc["previous_orders"]],
+            ["Previous Period Net Revenue", pc["previous_net_revenue"]],
+            ["Orders Change %", pc["orders_change_percent"] if pc["orders_change_percent"] is not None else "N/A"],
+            ["Revenue Change %", pc["revenue_change_percent"] if pc["revenue_change_percent"] is not None else "N/A"],
+        ])
     _style_sheet(ws_sum, ["Metric", "Value"], summary_rows)
 
     # 2. Daily_Trend
@@ -1229,6 +1298,21 @@ def export_report_csv(report: dict[str, Any]) -> str:
         writer.writerow(["TODAY SUMMARY"])
         for k, v in report["today_summary"].items():
             writer.writerow([k, v])
+        writer.writerow([])
+    if report.get("financial_analytics"):
+        writer.writerow(["FINANCIAL ANALYTICS (REVENUE SEPARATED FROM COSTS & MARGIN)"])
+        for k, v in report["financial_analytics"].items():
+            writer.writerow([k, v])
+        writer.writerow([])
+    if report.get("period_comparison"):
+        pc = report["period_comparison"]
+        writer.writerow(["PERIOD COMPARISON"])
+        writer.writerow(["previous_start_date", pc["previous_range"]["start_date"]])
+        writer.writerow(["previous_end_date", pc["previous_range"]["end_date"]])
+        writer.writerow(["previous_orders", pc["previous_orders"]])
+        writer.writerow(["previous_net_revenue", pc["previous_net_revenue"]])
+        writer.writerow(["orders_change_percent", pc["orders_change_percent"]])
+        writer.writerow(["revenue_change_percent", pc["revenue_change_percent"]])
         writer.writerow([])
     writer.writerow(["SALES SUMMARY"])
     for k, v in report["sales"].items():
@@ -1367,6 +1451,30 @@ def export_report_pdf(report: dict[str, Any]) -> bytes:
         ("Net Sales", f"Rs.{s['net_sales']}"),
         ("Average Order Value", f"Rs.{s['average_order_value']}"),
     ])
+    fin = report.get("financial_analytics")
+    if fin:
+        section("Financial Analytics (Revenue vs Direct Costs)", [
+            ("Verified Net Revenue (Actual, NOT Profit)", f"Rs.{fin.get('verified_net_revenue', s['net_sales'])}"),
+            ("Verified Ingredient Consumption Cost", f"Rs.{fin.get('verified_ingredient_cost', '0.00')}"),
+            ("Recorded Wastage Loss", f"Rs.{fin.get('recorded_wastage_loss', '0.00')}"),
+            ("Total Recorded Direct Costs", f"Rs.{fin.get('total_recorded_direct_costs', '0.00')}"),
+            (
+                "Estimated Gross Margin",
+                f"Rs.{fin['estimated_gross_margin']} ({fin['estimated_gross_margin_percent']}%)"
+                if fin.get("estimated_gross_margin") is not None
+                else "Unavailable (see note)",
+            ),
+            ("Methodology Note", (fin.get("margin_note") or "")[:92]),
+        ])
+    pc = report.get("period_comparison")
+    if pc:
+        section("Period-over-Period Comparison", [
+            ("Previous Range", f"{pc['previous_range']['start_date']} to {pc['previous_range']['end_date']}"),
+            ("Previous Confirmed Orders", pc["previous_orders"]),
+            ("Previous Net Revenue", f"Rs.{pc['previous_net_revenue']}"),
+            ("Orders Delta", f"{pc['orders_change_percent']}%" if pc["orders_change_percent"] is not None else "N/A"),
+            ("Revenue Delta", f"{pc['revenue_change_percent']}%" if pc["revenue_change_percent"] is not None else "N/A"),
+        ])
     ps = report.get("payment_stats", {})
     if ps:
         section("Payment Gateway & POS Statistics", [

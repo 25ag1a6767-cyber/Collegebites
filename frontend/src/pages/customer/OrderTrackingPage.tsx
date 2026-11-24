@@ -407,6 +407,8 @@ export const OrderTrackingPage: React.FC = () => {
                       <span className="text-lg font-black text-emerald-700">
                         {order.status === "READY"
                           ? "0 min"
+                          : (order as any).waiting_time_available === false
+                          ? (order as any).waiting_time_message || "Waiting time currently unavailable."
                           : order.dynamic_wait_minutes != null || order.estimated_prep_minutes > 0
                           ? `~${order.dynamic_wait_minutes ?? order.estimated_prep_minutes + order.delayed_minutes} min`
                           : "Waiting time currently unavailable."}
@@ -414,7 +416,12 @@ export const OrderTrackingPage: React.FC = () => {
                       {order.is_priority && <Badge tone="red">PRIORITY</Badge>}
                     </div>
                     <div className="text-[10px] text-slate-400">
-                      Last updated: {orderLastSyncedAt ? new Date(orderLastSyncedAt).toLocaleTimeString() : new Date(nowMs).toLocaleTimeString()}
+                      Last updated:{" "}
+                      {(order as any).last_updated_at
+                        ? new Date((order as any).last_updated_at).toLocaleTimeString()
+                        : orderLastSyncedAt
+                        ? new Date(orderLastSyncedAt).toLocaleTimeString()
+                        : new Date(order.confirmed_at || order.created_at).toLocaleTimeString()}
                     </div>
                   </div>
                 </div>

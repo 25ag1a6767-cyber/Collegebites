@@ -67,6 +67,9 @@ export const AdminConsolePage: React.FC = () => {
   const [reportPreset, setReportPreset] = useState("last_30_days");
   const [reportStartDate, setReportStartDate] = useState("");
   const [reportEndDate, setReportEndDate] = useState("");
+  const [reportCategoryId, setReportCategoryId] = useState("");
+  const [reportFoodItemId, setReportFoodItemId] = useState("");
+  const [reportComparePrevious, setReportComparePrevious] = useState(true);
   const [expandedTicketId, setExpandedTicketId] = useState<string | null>(null);
   const [ticketThreadMap, setTicketThreadMap] = useState<Record<string, any[]>>({});
 
@@ -75,6 +78,9 @@ export const AdminConsolePage: React.FC = () => {
   if (reportPreset && reportPreset !== "custom") reportParams.set("preset", reportPreset);
   if (reportStartDate) reportParams.set("start_date", reportStartDate);
   if (reportEndDate) reportParams.set("end_date", reportEndDate);
+  if (reportCategoryId) reportParams.set("category_id", reportCategoryId);
+  if (reportFoodItemId) reportParams.set("food_item_id", reportFoodItemId);
+  if (reportComparePrevious) reportParams.set("compare_previous", "true");
   const reportQueryCanteen = reportParams.toString() ? `?${reportParams.toString()}` : "";
 
   const streamCanteenScope =
@@ -90,8 +96,18 @@ export const AdminConsolePage: React.FC = () => {
     queryKeys: [["admin-report"], ["admin-queue"], ["admin-all-orders"]],
   });
 
-  const { data: report } = useQuery<any>({
-    queryKey: ["admin-report", activeCanteenId, scopeReportToCanteen, reportPreset, reportStartDate, reportEndDate],
+  const { data: report, isLoading: reportLoading, isError: reportError } = useQuery<any>({
+    queryKey: [
+      "admin-report",
+      activeCanteenId,
+      scopeReportToCanteen,
+      reportPreset,
+      reportStartDate,
+      reportEndDate,
+      reportCategoryId,
+      reportFoodItemId,
+      reportComparePrevious,
+    ],
     enabled: tab === "analytics",
     queryFn: async () => (await api.get(`/reports/dashboard${reportQueryCanteen}`)).data,
     refetchInterval: adminSyncStatus === "live" ? 30000 : 6000,
@@ -99,13 +115,13 @@ export const AdminConsolePage: React.FC = () => {
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
     queryKey: ["admin-menu", activeCanteenId],
-    enabled: Boolean(activeCanteenId && (tab === "menu" || tab === "meal_events_invoices")),
+    enabled: Boolean(activeCanteenId && (tab === "menu" || tab === "meal_events_invoices" || tab === "analytics")),
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items?include_inactive=true`)).data,
   });
 
   const { data: categories = [], refetch: refetchCategories } = useQuery<any[]>({
     queryKey: ["admin-cats", activeCanteenId],
-    enabled: Boolean(activeCanteenId && tab === "menu"),
+    enabled: Boolean(activeCanteenId && (tab === "menu" || tab === "analytics")),
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/categories?include_inactive=true`)).data,
   });
 
@@ -232,6 +248,12 @@ export const AdminConsolePage: React.FC = () => {
         />
       )}
 
+      {tab === "analytics" && reportLoading && !report && (
+        <Card className="p-6 text-center text-xs text-slate-500">Loading verified BI analytics report...</Card>
+      )}
+      {tab === "analytics" && reportError && !report && (
+        <Card className="p-4 border-red-200 bg-red-50 text-xs text-red-700">Failed to load BI analytics report.</Card>
+      )}
       {tab === "analytics" && report && (
         <BiAnalyticsPanel
           report={report}
@@ -244,13 +266,21 @@ export const AdminConsolePage: React.FC = () => {
           setReportStartDate={setReportStartDate}
           reportEndDate={reportEndDate}
           setReportEndDate={setReportEndDate}
+          reportCategoryId={reportCategoryId}
+          setReportCategoryId={setReportCategoryId}
+          reportFoodItemId={reportFoodItemId}
+          setReportFoodItemId={setReportFoodItemId}
+          reportComparePrevious={reportComparePrevious}
+          setReportComparePrevious={setReportComparePrevious}
+          categories={categories}
+          menuItems={menuItems}
           reportQueryCanteen={reportQueryCanteen}
           downloadBlob={downloadBlob}
         />
       )}
 
       {tab === "ai_forecast_assistant" && (
-        <ForecastingAssistantTab activeCanteenId={activeCanteenId} canTrainForecast />
+        <ForecastingAssistantTab activeCanteenId={activeCanteenId} canTrainForecast canViewForecast canViewAudit />
       )}
 
       {tab === "orders" && <OrdersUsersTab activeCanteenId={activeCanteenId} />}

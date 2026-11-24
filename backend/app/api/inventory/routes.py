@@ -39,6 +39,7 @@ class SupplierCreate(BaseModel):
     business_details: Optional[str] = None
     supplied_products: Optional[list[str]] = None
     payment_terms: Optional[str] = None
+    lead_time_days: Optional[int] = Field(default=None, ge=0, le=90)
     is_active: bool = True
 
 
@@ -83,7 +84,7 @@ class POItemIn(BaseModel):
 class POCreateIn(BaseModel):
     canteen_id: UUID
     supplier_id: UUID
-    initial_status: str = Field(default="ordered", pattern="^(draft|pending_approval|approved|ordered)$")
+    initial_status: Optional[str] = Field(default=None, pattern="^(draft|pending_approval|approved|ordered)$")
     expected_delivery_date: Optional[date] = None
     notes: Optional[str] = None
     items: list[POItemIn] = Field(min_length=1)
@@ -135,6 +136,7 @@ class SupplierUpdate(BaseModel):
     business_details: Optional[str] = None
     supplied_products: Optional[list[str]] = None
     payment_terms: Optional[str] = None
+    lead_time_days: Optional[int] = Field(default=None, ge=0, le=90)
     is_active: Optional[bool] = None
 
 
@@ -412,7 +414,10 @@ def create_po(
     db: Session = Depends(get_db),
 ):
     enforce_canteen_scope(principal, payload.canteen_id)
-    return inventory_service.create_purchase_order(db, payload.model_dump(), principal.user.id)
+    can_approve = principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)
+    return inventory_service.create_purchase_order(
+        db, payload.model_dump(), principal.user.id, can_approve=can_approve
+    )
 
 
 @router.post("/purchase-orders/{po_id}/status")

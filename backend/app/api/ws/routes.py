@@ -214,9 +214,11 @@ async def ws_board(websocket: WebSocket, canteen_id: str):
     if canteen_id == "all":
         await _serve_room("board:all", websocket, watch_kind="board", target_id=None)
         return
-    target: Optional[UUID] = None
-    with contextlib.suppress(ValueError):
+    try:
         target = UUID(canteen_id)
+    except ValueError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     await _serve_room(f"board:{canteen_id}", websocket, watch_kind="board", target_id=target)
 
 

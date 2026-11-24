@@ -1,4 +1,4 @@
-from datetime import date, time
+from datetime import date, datetime, time, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -9,8 +9,10 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
+    ROLE_CASHIER,
     ROLE_COLLEGE_ADMIN,
     ROLE_KITCHEN_STAFF,
+    ROLE_PICKUP_STAFF,
     ROLE_SUPER_ADMIN,
     AuthenticatedPrincipal,
     enforce_canteen_scope,
@@ -46,8 +48,34 @@ class PickupSlotUpsert(BaseModel):
 
 
 @router.get("/canteens/{canteen_id}")
-def get_live_queue(canteen_id: UUID, db: Session = Depends(get_db)):
-    return queue_service.get_live_queue_dashboard(db, canteen_id)
+def get_live_queue(
+    canteen_id: UUID,
+    principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
+    db: Session = Depends(get_db),
+):
+    dash = queue_service.get_live_queue_dashboard(db, canteen_id)
+    is_authorized_staff = bool(
+        principal
+        and principal.has_role(
+            ROLE_SUPER_ADMIN,
+            ROLE_COLLEGE_ADMIN,
+            ROLE_CANTEEN_MANAGER,
+            ROLE_KITCHEN_STAFF,
+            ROLE_PICKUP_STAFF,
+            ROLE_CASHIER,
+        )
+        and (
+            principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)
+            or principal.assigned_canteen_id == canteen_id
+        )
+    )
+    if not is_authorized_staff:
+        # Public / customer callers receive aggregate queue & crowd status only — zero customer PII
+        public_dash = dict(dash)
+        public_dash["active_orders_queue"] = []
+        public_dash["delayed_orders"] = []
+        return public_dash
+    return dash
 
 
 @router.get("/canteens/{canteen_id}/estimate")
@@ -107,6 +135,9 @@ def get_order_queue_status(
         staff_canteen_id=staff_cid,
         guest_access_token=guest_token or x_guest_token,
     )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    wait_available = bool(order_out.waiting_time_available)
+    wait_msg = order_out.waiting_time_message or (None if wait_available else "Waiting time currently unavailable.")
     return {
         "order_id": str(order_out.id),
         "order_number": order_out.order_number,
@@ -117,9 +148,14 @@ def get_order_queue_status(
         "queue_position": order_out.queue_position,
         "orders_ahead_count": order_out.orders_ahead_count,
         "counter_queue_position": order_out.counter_queue_position,
-        "dynamic_wait_minutes": order_out.dynamic_wait_minutes,
+        "dynamic_wait_minutes": order_out.dynamic_wait_minutes if wait_available else None,
         "estimated_prep_minutes": order_out.estimated_prep_minutes,
+        "estimated_pickup_at": order_out.estimated_pickup_at.isoformat() if order_out.estimated_pickup_at else None,
         "delayed_minutes": order_out.delayed_minutes,
+        "waiting_time_available": wait_available,
+        "waiting_time_message": wait_msg,
+        "data_classification": "estimated",
+        "last_updated_at": order_out.last_updated_at.isoformat() if order_out.last_updated_at else now_iso,
     }
 
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { memo, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Maximize2, Minimize2, Volume2, VolumeX } from "lucide-react";
@@ -10,6 +10,35 @@ import { playOrderAlertChime } from "../../utils/notifications";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Select } from "../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
+
+const PreparingTokenCard = memo(({ t }: { t: any }) => (
+  <div className="rounded-2xl border border-slate-700/80 bg-slate-800/90 p-4 text-center">
+    <div className="text-4xl md:text-5xl font-black tracking-wider text-white font-mono">{t.token_code}</div>
+    <div className="mt-2 flex items-center justify-center gap-1.5">
+      <Badge tone={t.order_status === "PREPARING" ? "amber" : "slate"}>{t.order_status}</Badge>
+      {Boolean(t.delayed_minutes && t.delayed_minutes > 0) && <Badge tone="red">+{t.delayed_minutes}m</Badge>}
+    </div>
+    <div className="mt-1.5 text-xs font-semibold text-slate-400">{t.counter_name}</div>
+  </div>
+));
+
+const ReadyTokenCard = memo(({ t, showCanteen }: { t: any; showCanteen: boolean }) => (
+  <div className="flex items-center justify-between gap-3 rounded-2xl border border-emerald-400/60 bg-emerald-900/60 px-6 py-5 shadow-lg">
+    <div className="text-5xl md:text-6xl font-black tracking-wider text-white font-mono">{t.token_code}</div>
+    <div className="text-right">
+      <div className="text-xs font-bold uppercase tracking-wider text-emerald-300">Collect at</div>
+      <div className="text-lg md:text-xl font-extrabold text-white">{t.counter_name}</div>
+      {showCanteen && t.canteen_name && <div className="text-xs text-emerald-200/80">{t.canteen_name}</div>}
+    </div>
+  </div>
+));
+
+const CompletedTokenCard = memo(({ t }: { t: any }) => (
+  <div className="rounded-xl border border-slate-800 bg-slate-800/60 p-3 text-center">
+    <div className="text-2xl md:text-3xl font-black font-mono text-slate-200">{t.token_code}</div>
+    <div className="text-[11px] text-slate-400 mt-0.5 truncate">{t.counter_name}</div>
+  </div>
+));
 
 export const TokenBoardPage: React.FC = () => {
   const { canteenId: routeCanteenId } = useParams<{ canteenId?: string }>();
@@ -47,7 +76,10 @@ export const TokenBoardPage: React.FC = () => {
     wsPath,
     queryKeys: [["digital-board", activeScope]],
     onSnapshot: (snapshot) => {
-      if (snapshot?.version && snapshot.version !== lastCachedVerRef.current) {
+      if (snapshot?.version && snapshot.version === lastCachedVerRef.current) {
+        return;
+      }
+      if (snapshot?.version) {
         lastCachedVerRef.current = snapshot.version;
         saveOfflineCache(`digital-board:${activeScope}`, snapshot);
       }
@@ -55,7 +87,7 @@ export const TokenBoardPage: React.FC = () => {
     },
   });
 
-  const { data: board, dataUpdatedAt } = useQuery<DigitalBoardResponse>({
+  const { data: board, isLoading: boardLoading, isError: boardError, dataUpdatedAt } = useQuery<DigitalBoardResponse>({
     queryKey: ["digital-board", activeScope],
     enabled: Boolean(activeScope),
     queryFn: async () => {
@@ -175,7 +207,7 @@ export const TokenBoardPage: React.FC = () => {
               </span>
               <RealtimeStatusBadge status={displaySyncStatus} lastSyncedAt={effectiveSyncedAt} darkSurface />
               <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold text-emerald-300">
-                Auto-refresh: 1s
+                {syncStatus === "live" ? "Live Push + 5s Safety Sync" : syncStatus === "offline" ? "Offline Cache" : "Fallback Sync: 1s"}
               </span>
             </div>
             <h1 className="text-2xl md:text-4xl font-black tracking-tight">
@@ -230,6 +262,17 @@ export const TokenBoardPage: React.FC = () => {
         </div>
       </div>
 
+      {boardError && !board && (
+        <div className="rounded-2xl border border-red-500/50 bg-red-950/60 px-5 py-3 text-sm text-red-200">
+          Unable to load live pickup board from server. Retrying automatically...
+        </div>
+      )}
+      {boardLoading && !board && (
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 px-5 py-3 text-sm text-slate-300">
+          Connecting to live pickup token board...
+        </div>
+      )}
+
       {latestReadyBanner && (
         <div className="rounded-2xl border border-emerald-400 bg-emerald-600/90 px-6 py-3 text-center text-lg md:text-2xl font-black tracking-wide text-white shadow-lg animate-pulse">
           {latestReadyBanner}
@@ -256,21 +299,7 @@ export const TokenBoardPage: React.FC = () => {
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 gap-3.5 content-start">
               {board.now_preparing.map((t) => (
-                <div
-                  key={t.order_id || t.token_code}
-                  className="rounded-2xl border border-slate-700/80 bg-slate-800/90 p-4 text-center"
-                >
-                  <div className="text-4xl md:text-5xl font-black tracking-wider text-white font-mono">
-                    {t.token_code}
-                  </div>
-                  <div className="mt-2 flex items-center justify-center gap-1.5">
-                    <Badge tone={t.order_status === "PREPARING" ? "amber" : "slate"}>{t.order_status}</Badge>
-                    {Boolean(t.delayed_minutes && t.delayed_minutes > 0) && (
-                      <Badge tone="red">+{t.delayed_minutes}m</Badge>
-                    )}
-                  </div>
-                  <div className="mt-1.5 text-xs font-semibold text-slate-400">{t.counter_name}</div>
-                </div>
+                <PreparingTokenCard key={t.order_id || t.token_code} t={t} />
               ))}
             </div>
           )}
@@ -294,21 +323,7 @@ export const TokenBoardPage: React.FC = () => {
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2 content-start">
               {board.ready_for_pickup.map((t) => (
-                <div
-                  key={t.order_id || t.token_code}
-                  className="flex items-center justify-between gap-3 rounded-2xl border border-emerald-400/60 bg-emerald-900/60 px-6 py-5 shadow-lg"
-                >
-                  <div className="text-5xl md:text-6xl font-black tracking-wider text-white font-mono">
-                    {t.token_code}
-                  </div>
-                  <div className="text-right">
-                    <div className="text-xs font-bold uppercase tracking-wider text-emerald-300">Collect at</div>
-                    <div className="text-lg md:text-xl font-extrabold text-white">{t.counter_name}</div>
-                    {activeScope === "all" && t.canteen_name && (
-                      <div className="text-xs text-emerald-200/80">{t.canteen_name}</div>
-                    )}
-                  </div>
-                </div>
+                <ReadyTokenCard key={t.order_id || t.token_code} t={t} showCanteen={activeScope === "all"} />
               ))}
             </div>
           )}
@@ -332,13 +347,7 @@ export const TokenBoardPage: React.FC = () => {
           ) : (
             <div className="grid grid-cols-2 gap-3 content-start">
               {board.recently_completed.map((t) => (
-                <div
-                  key={t.order_id || t.token_code}
-                  className="rounded-xl border border-slate-800 bg-slate-800/60 p-3 text-center"
-                >
-                  <div className="text-2xl md:text-3xl font-black font-mono text-slate-200">{t.token_code}</div>
-                  <div className="text-[11px] text-slate-400 mt-0.5 truncate">{t.counter_name}</div>
-                </div>
+                <CompletedTokenCard key={t.order_id || t.token_code} t={t} />
               ))}
             </div>
           )}

@@ -2,7 +2,7 @@
 
 ## 1. Test Environment & Safety Compliance
 - **Live Production Untouched:** `https://collegebites-alpha.vercel.app/board` was **NOT** load-tested or stressed.
-- **Test Harness:** Local staging single-worker Uvicorn ASGI server (`127.0.0.1`) running the upgraded CollegeBites FastAPI application (`407` routes, `e5f6a7b8c9d0` schema) tested with **Grafana k6** (`performance-testing/bin/k6.exe`).
+- **Test Harness:** Local staging single-worker Uvicorn ASGI server (`127.0.0.1`) running the upgraded CollegeBites FastAPI application (`412` mounted ASGI routes, `f6a7b8c9d0e1` schema head) tested with **Grafana k6** (`performance-testing/bin/k6.exe`).
 - **Workload Mix:** Realistic mixed campus traffic across `GET /api/v1/canteens`, `GET /api/v1/menus/canteens/{id}/items`, `GET /api/v1/queue/canteens/{id}`, `GET /api/v1/pickup/board/{id}`, authenticated `GET /api/v1/food-safety/dashboard`, and authenticated `POST /api/v1/orders/checkout`.
 - **Integrity Disclaimer:** All numbers below are **100% real measured outputs** from `k6.exe` summary exports (`performance-testing/enterprise-master/results.json` and `results_wal.json`). Higher concurrency tiers beyond the local single-worker SQLite breaking point were **not fabricated or extrapolated**.
 

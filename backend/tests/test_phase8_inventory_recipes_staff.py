@@ -48,7 +48,8 @@ def test_inventory_deduction_no_duplicate_po_wastage_and_auto_unavailability(cli
     assert waste.status_code == 200
     assert "Hyderabadi Chicken Dum Biryani" in waste.json()["blocked_items"]
 
-    # Receive Purchase Order restores stock and unblocks biryani
+    # Receive Purchase Order restores stock and unblocks biryani (manager approves before receipt)
+    mgr = login_as(client, "manager@collegebites.edu", "Staff@12345")
     suppliers = client.get("/api/v1/inventory/suppliers", headers=inv_mgr["headers"]).json()
     po = client.post(
         "/api/v1/inventory/purchase-orders",
@@ -66,6 +67,9 @@ def test_inventory_deduction_no_duplicate_po_wastage_and_auto_unavailability(cli
             ],
         },
     ).json()
+    assert po["status"] == "pending_approval"
+    assert client.post(f"/api/v1/inventory/purchase-orders/{po['id']}/status", headers=mgr["headers"], json={"status": "approved"}).status_code == 200
+    assert client.post(f"/api/v1/inventory/purchase-orders/{po['id']}/status", headers=inv_mgr["headers"], json={"status": "ordered"}).status_code == 200
     rec = client.post(f"/api/v1/inventory/purchase-orders/{po['id']}/receive", headers=inv_mgr["headers"])
     assert rec.status_code == 200
     alerts = client.get(f"/api/v1/inventory/canteens/{cid}/alerts", headers=inv_mgr["headers"]).json()

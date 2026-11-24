@@ -47,7 +47,7 @@ export const VendorProcurementTab: React.FC<VendorProcurementTabProps> = ({
 
   // PO creation state
   const [poSupplierId, setPoSupplierId] = useState("");
-  const [poInitStatus, setPoInitStatus] = useState("ordered");
+  const [poInitStatus, setPoInitStatus] = useState(canApprovePo ? "ordered" : "pending_approval");
   const [poExpectedDate, setPoExpectedDate] = useState("");
   const [poNotes, setPoNotes] = useState("");
   const [poLines, setPoLines] = useState<
@@ -382,7 +382,7 @@ export const VendorProcurementTab: React.FC<VendorProcurementTabProps> = ({
             <div>
               <label className="font-bold text-slate-600 block mb-1">Initial Lifecycle Status</label>
               <Select value={poInitStatus} onChange={(e) => setPoInitStatus(e.target.value)}>
-                <option value="ordered">Ordered (Direct Issue)</option>
+                {canApprovePo && <option value="ordered">Ordered (Direct Issue)</option>}
                 <option value="pending_approval">Pending Admin Approval</option>
                 <option value="draft">Draft</option>
               </Select>

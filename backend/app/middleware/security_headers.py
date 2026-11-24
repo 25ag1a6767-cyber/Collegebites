@@ -1,11 +1,10 @@
-import time
 from uuid import uuid4
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 
 class SecurityHeadersMiddleware:
-    """Pure ASGI middleware attaching security headers and correlation ID with zero body buffering."""
+    """Pure ASGI middleware attaching security headers and unified correlation ID with zero body buffering."""
 
     _STATIC_HEADERS: tuple[tuple[bytes, bytes], ...] = (
         (b"x-content-type-options", b"nosniff"),
@@ -22,22 +21,22 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
-        request_id: bytes | None = None
-        for key, value in scope.get("headers") or ():
-            if key == b"x-request-id" and value:
-                request_id = value
-                break
+        # Reuse the canonical request_id established by RequestObservabilityMiddleware when present
+        state_rid = (scope.get("state") or {}).get("request_id")
+        request_id: bytes | None = state_rid.encode("ascii") if isinstance(state_rid, str) and state_rid else None
         if request_id is None:
-            request_id = str(uuid4()).encode("ascii")
-
-        started = time.perf_counter()
+            for key, value in scope.get("headers") or ():
+                if key.lower() == b"x-request-id" and value:
+                    request_id = value
+                    break
+        if request_id is None:
+            request_id = uuid4().hex[:16].encode("ascii")
 
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers") or [])
-                elapsed_ms = f"{round((time.perf_counter() - started) * 1000, 2)}".encode("ascii")
-                headers.append((b"x-request-id", request_id))
-                headers.append((b"x-process-time-ms", elapsed_ms))
+                if not any(k.lower() == b"x-request-id" for k, _ in headers):
+                    headers.append((b"x-request-id", request_id))
                 headers.extend(self._STATIC_HEADERS)
                 message = {**message, "headers": headers}
             await send(message)

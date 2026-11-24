@@ -38,6 +38,21 @@ def scan_inventory_alerts_task() -> dict:
 
 
 @celery_app.task
+def notify_overdue_cleaning_tasks_task() -> dict:
+    """Emit overdue food safety cleaning reminders for all active canteens."""
+    from sqlalchemy import select
+    from app.models.college import Canteen
+    from app.services import food_safety_service
+
+    total = 0
+    with SessionLocal() as db:
+        for canteen in db.scalars(select(Canteen).where(Canteen.is_active.is_(True))).all():
+            res = food_safety_service.notify_overdue_cleaning_tasks(db, canteen.id)
+            total += int(res.get("notified_overdue_tasks", 0))
+    return {"notified_overdue_tasks": total}
+
+
+@celery_app.task
 def scheduled_backup_and_reconcile_task() -> dict:
     """Run automated financial reconciliation and encrypted database backup when due."""
     with SessionLocal() as db:

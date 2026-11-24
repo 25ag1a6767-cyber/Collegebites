@@ -21,10 +21,10 @@
    ```bash
    pg_restore --clean --if-exists --no-owner --dbname="$STAGING_DB_URL" collegebites_YYYYMMDD_HHMMSS.dump
    ```
-3. Run `alembic current` and verify schema head matches `e5f6a7b8c9d0`.
-4. Verify critical row counts (`orders`, `payments`, `stock_batches`, `food_safety_inspections`, `production_batches`, `audit_logs`) and run read-only smoke queries against `/health/ready`, `/api/v1/canteens`, and `/api/v1/reports/dashboard`.
+3. Run `alembic current` and verify schema head matches `f6a7b8c9d0e1`.
+4. Verify PostgreSQL `order_number_seq` and `invoice_number_seq` resynchronization (`backup_service.restore_backup` automatically runs `setval(...)` on PostgreSQL post-restore), verify critical row counts (`orders`, `payments`, `stock_batches`, `food_safety_inspections`, `production_batches`, `audit_logs`), and run read-only smoke queries against `/health/ready`, `/api/v1/canteens`, and `/api/v1/reports/dashboard`.
 5. Destroy the temporary staging restore database once verified.
 
 ## 4. Verification Status in This Upgrade
-- Isolated backup creation (`POST /api/v1/backups`), SHA-256 integrity verification (`POST /api/v1/backups/{id}/verify`), and non-destructive `dry_run: true` restore simulation (`POST /api/v1/backups/{id}/restore`) were executed and verified in `test_phase35_enterprise_master_platform.py`.
+- Encrypted backup creation (`POST /api/v1/backups`), SHA-256 integrity verification (`POST /api/v1/backups/{id}/verify`), checksum tampering detection + critical `SecurityAlert`, non-destructive `dry_run: true` restore simulation, and full isolated database restore drill (`orders >= 1`, `payments >= 1`, `pickup_tokens >= 1`) were executed and verified in `test_phase28_backup_recovery.py` and `test_phase35_enterprise_master_platform.py`.
 - Full PostgreSQL `pg_dump`/`pg_restore` against production Neon Postgres was **not executed** on live production in accordance with strict non-destructive safety rules.

@@ -150,6 +150,21 @@ def update_batch_quality(
     )
 
 
+@router.get("/batches/{batch_id}/movements")
+def list_batch_movements(
+    batch_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*TRACE_VIEW_ROLES)),
+    db: Session = Depends(get_db),
+):
+    batch = db.get(StockBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Stock batch not found")
+    inv = db.get(InventoryItem, batch.inventory_item_id)
+    if inv:
+        enforce_canteen_scope(principal, inv.canteen_id)
+    return traceability_service.list_batch_movements(db, batch_id)
+
+
 @router.get("/batches/{batch_id}/chain")
 def get_batch_chain(
     batch_id: UUID,

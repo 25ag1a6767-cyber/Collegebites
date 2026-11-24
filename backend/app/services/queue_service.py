@@ -3,20 +3,20 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect as sa_inspect, or_, select, union
 from sqlalchemy.orm import Session
 
 from app.core.cache import NS_QUEUE, cache_manager, invalidate_board_and_queue
 from app.core.redis_client import safe_redis
-from app.core.time_utils import today_college
+from app.core.time_utils import now_college, today_college
 from app.models.auth import StaffProfile, User
-from app.models.college import Canteen, Counter, Kitchen
+from app.models.college import Canteen, CollegeHoliday, Counter, Kitchen
 from app.models.menu import FoodItem
 from app.models.order import Order, OrderItem, PickupSlot
 from app.models.payment import PickupToken
 from app.models.staff import StaffAttendance
 from app.services.audit_service import record_audit_log
-from app.services.college_service import ACTIVE_CROWD_STATUSES, compute_canteen_live_status
+from app.services.college_service import ACTIVE_CROWD_STATUSES, compute_canteen_live_status, get_college_config_snapshot
 from app.websockets import emit_order_event_sync
 
 ACTIVE_QUEUE_WAITING_STATUSES = ("PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING")
@@ -39,24 +39,19 @@ def _canteen_on_duty_staff_count(db: Session, canteen_id: UUID) -> int:
     if hit and isinstance(cached, int):
         return cached
     local_today = today_college()
-    on_duty_ids = set(
-        db.scalars(
-            select(StaffProfile.user_id).where(
-                StaffProfile.assigned_canteen_id == canteen_id, StaffProfile.is_on_duty.is_(True)
-            )
-        ).all()
+    staff_union = union(
+        select(StaffProfile.user_id.label("uid")).where(
+            StaffProfile.assigned_canteen_id == canteen_id,
+            StaffProfile.is_on_duty.is_(True),
+        ),
+        select(StaffAttendance.staff_user_id.label("uid")).where(
+            StaffAttendance.canteen_id == canteen_id,
+            StaffAttendance.attendance_date == local_today,
+            StaffAttendance.status == "present",
+            StaffAttendance.check_out_at.is_(None),
+        ),
     )
-    checked_in_ids = set(
-        db.scalars(
-            select(StaffAttendance.staff_user_id).where(
-                StaffAttendance.canteen_id == canteen_id,
-                StaffAttendance.attendance_date == local_today,
-                StaffAttendance.status == "present",
-                StaffAttendance.check_out_at.is_(None),
-            )
-        ).all()
-    )
-    count = len(on_duty_ids | checked_in_ids)
+    count = int(db.scalar(select(func.count()).select_from(staff_union.subquery())) or 0)
     cache_manager.set_json(cache_ns, "on_duty_staff", count, ttl_seconds=15, l1_ttl=2.0)
     return count
 
@@ -89,6 +84,8 @@ def compute_order_queue_metrics_map(
     precomputed_canteens: Optional[dict[UUID, Canteen]] = None,
     precomputed_staff_counts: Optional[dict[UUID, int]] = None,
     precomputed_avg_prep: Optional[dict[UUID, float]] = None,
+    precomputed_active_counter_counts: Optional[dict[UUID, int]] = None,
+    precomputed_tz_name: Optional[str] = None,
 ) -> dict[UUID, dict]:
     """Compute real-time queue position, orders ahead, counter position, and dynamic wait from DB."""
     if not orders:
@@ -122,20 +119,99 @@ def compute_order_queue_metrics_map(
             for cid in waiting_by_canteen:
                 waiting_by_canteen[cid].sort(key=_queue_sort_key)
 
-    pos_lookup: dict[UUID, tuple[int, int, int]] = {}
+    pos_lookup: dict[UUID, tuple[int, int, int, int, int]] = {}
     staff_cache: dict[UUID, int] = dict(precomputed_staff_counts or {})
     avg_prep_cache: dict[UUID, float] = dict(precomputed_avg_prep or {})
+    active_counter_counts: dict[UUID, int] = dict(precomputed_active_counter_counts or {})
+    canteen_open_map: dict[UUID, bool] = {}
+
+    all_waiting_ids = [wo.id for q_list in waiting_by_canteen.values() for wo in q_list]
+    waiting_item_units: dict[UUID, int] = {}
+    # Reuse already eager-loaded order.items from the caller to avoid redundant SQL round-trips
+    for o in orders:
+        if "items" not in sa_inspect(o).unloaded:
+            waiting_item_units[o.id] = max(1, sum(int(it.quantity or 0) for it in o.items))
+    missing_item_ids = [oid for oid in all_waiting_ids if oid not in waiting_item_units]
+    if missing_item_ids:
+        for oid, qty_sum in db.execute(
+            select(OrderItem.order_id, func.coalesce(func.sum(OrderItem.quantity), 0))
+            .where(OrderItem.order_id.in_(missing_item_ids))
+            .group_by(OrderItem.order_id)
+        ).all():
+            waiting_item_units[oid] = int(qty_sum or 1)
+
+    missing_counter_cids = [cid for cid in waiting_canteen_ids if cid not in active_counter_counts]
+    if missing_counter_cids:
+        for cid_cnt, cnt_num in db.execute(
+            select(Counter.canteen_id, func.count(Counter.id))
+            .where(Counter.canteen_id.in_(missing_counter_cids), Counter.is_active.is_(True))
+            .group_by(Counter.canteen_id)
+        ).all():
+            active_counter_counts[cid_cnt] = int(cnt_num or 0)
+
+    tz_name = precomputed_tz_name
+    today_holidays: Optional[list[CollegeHoliday]] = None
+    now_local = None
+    active_check_cids = [
+        cid
+        for cid in waiting_by_canteen
+        if (c_o := canteens.get(cid)) is not None and c_o.is_active and not c_o.is_temporarily_closed and not c_o.ordering_paused
+    ]
+    if active_check_cids:
+        if tz_name is None:
+            tz_name = get_college_config_snapshot(db).get("college_timezone")
+        now_local = now_college(tz_name)
+        today_holidays = list(
+            db.scalars(
+                select(CollegeHoliday).where(
+                    CollegeHoliday.is_active.is_(True),
+                    CollegeHoliday.holiday_date == now_local.date(),
+                    or_(CollegeHoliday.canteen_id.in_(active_check_cids), CollegeHoliday.canteen_id.is_(None)),
+                )
+            ).all()
+        )
+
     for cid, q_list in waiting_by_canteen.items():
         counter_ranks: dict[UUID, int] = {}
+        counter_ahead_units: dict[UUID, int] = {}
+        counter_ahead_delays: dict[UUID, int] = {}
         for idx, wo in enumerate(q_list, start=1):
             c_pos = counter_ranks.get(wo.counter_id, 0) + 1
             counter_ranks[wo.counter_id] = c_pos
-            pos_lookup[wo.id] = (idx, idx - 1, c_pos)
+            ahead_u = counter_ahead_units.get(wo.counter_id, 0)
+            ahead_d = counter_ahead_delays.get(wo.counter_id, 0)
+            pos_lookup[wo.id] = (idx, idx - 1, c_pos, ahead_u, ahead_d)
+            counter_ahead_units[wo.counter_id] = ahead_u + max(1, waiting_item_units.get(wo.id, 1))
+            counter_ahead_delays[wo.counter_id] = ahead_d + max(0, int(wo.delayed_minutes or 0))
         if cid not in staff_cache:
             staff_cache[cid] = max(1, _canteen_on_duty_staff_count(db, cid))
+        c_obj = canteens.get(cid)
         if cid not in avg_prep_cache:
-            c_obj = canteens.get(cid)
             avg_prep_cache[cid] = _canteen_avg_prep_minutes(db, cid, float(c_obj.default_prep_time_minutes if c_obj else 10))
+        if c_obj is not None:
+            op_loaded = "operating_hours" not in sa_inspect(c_obj).unloaded
+            pre_op = None
+            if op_loaded and now_local is not None:
+                wd = now_local.weekday()
+                pre_op = next((oh for oh in c_obj.operating_hours if oh.day_of_week == wd), None)
+            is_open_c, crowd_c, _eta_c, _act_c = compute_canteen_live_status(
+                db,
+                c_obj,
+                now=now_local,
+                precomputed_active_count=len(q_list),
+                precomputed_tz_name=tz_name,
+                precomputed_holidays=today_holidays,
+                precomputed_op_hour=pre_op,
+                op_hour_loaded=op_loaded and now_local is not None,
+            )
+            canteen_open_map[cid] = bool(
+                is_open_c
+                and not c_obj.ordering_paused
+                and crowd_c != "TEMPORARILY_UNAVAILABLE"
+                and active_counter_counts.get(cid, 1) > 0
+            )
+        else:
+            canteen_open_map[cid] = True
 
     metrics: dict[UUID, dict] = {}
     for o in orders:
@@ -145,6 +221,9 @@ def compute_order_queue_metrics_map(
                 "orders_ahead_count": 0,
                 "counter_queue_position": 0,
                 "dynamic_wait_minutes": 0,
+                "waiting_time_available": True,
+                "waiting_time_message": None,
+                "last_updated_at": now,
             }
             continue
         if o.status not in ACTIVE_QUEUE_WAITING_STATUSES:
@@ -153,13 +232,18 @@ def compute_order_queue_metrics_map(
                 "orders_ahead_count": None,
                 "counter_queue_position": None,
                 "dynamic_wait_minutes": 0 if o.status == "COMPLETED" else None,
+                "waiting_time_available": True,
+                "waiting_time_message": None,
+                "last_updated_at": now,
             }
             continue
 
-        q_pos, ahead_total, cnt_pos = pos_lookup.get(o.id, (1, 0, 1))
+        q_pos, ahead_total, cnt_pos, ahead_units, ahead_delays = pos_lookup.get(o.id, (1, 0, 1, 0, 0))
         cnt_ahead = max(0, cnt_pos - 1)
         staff_cnt = staff_cache.get(o.canteen_id, 1)
+        cnt_active_counters = max(1, active_counter_counts.get(o.canteen_id, 1))
         avg_prep = avg_prep_cache.get(o.canteen_id, float(o.estimated_prep_minutes or 10))
+        wait_avail = canteen_open_map.get(o.canteen_id, True)
 
         base_target = max(1, int(o.estimated_prep_minutes or 10) + int(o.delayed_minutes or 0))
         if o.status == "PREPARING" and o.preparing_at:
@@ -169,15 +253,21 @@ def compute_order_queue_metrics_map(
         else:
             self_rem = base_target
 
-        per_order_factor = max(1.0, min(6.0, avg_prep / max(1, staff_cnt)))
-        queue_delay = max(cnt_ahead, round(cnt_ahead * per_order_factor)) if cnt_ahead > 0 else 0
+        parallel_capacity = max(1, staff_cnt + max(0, cnt_active_counters - 1))
+        per_order_factor = max(1.0, min(6.0, avg_prep / parallel_capacity))
+        complexity_extra = min(10, int(ahead_units // max(3, parallel_capacity * 2))) if cnt_ahead > 0 else 0
+        ahead_delay_carry = min(15, round(ahead_delays / max(1, parallel_capacity) * 0.5)) if ahead_delays > 0 else 0
+        queue_delay = (max(cnt_ahead, round(cnt_ahead * per_order_factor)) + complexity_extra + ahead_delay_carry) if cnt_ahead > 0 else 0
         dynamic_wait = max(1, int(self_rem + queue_delay))
 
         metrics[o.id] = {
             "queue_position": q_pos,
             "orders_ahead_count": ahead_total,
             "counter_queue_position": cnt_pos,
-            "dynamic_wait_minutes": dynamic_wait,
+            "dynamic_wait_minutes": dynamic_wait if wait_avail else None,
+            "waiting_time_available": wait_avail,
+            "waiting_time_message": None if wait_avail else "Waiting time currently unavailable.",
+            "last_updated_at": now,
         }
     return metrics
 
@@ -517,8 +607,23 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         })
 
     avg_wait_minutes = round(sum(waiting_waits) / len(waiting_waits), 1) if waiting_waits else float(base_eta)
-    waiting_available = bool(is_open and not canteen.ordering_paused)
+    waiting_available = bool(is_open and not canteen.ordering_paused and crowd != "TEMPORARILY_UNAVAILABLE" and len(counters) > 0)
     waiting_msg = None if waiting_available else "Waiting time currently unavailable."
+
+    congestion_warnings: list[str] = []
+    if canteen.ordering_paused:
+        congestion_warnings.append(f"Ordering is currently paused ({canteen.pause_reason or 'peak crowd management'}).")
+    elif not is_open:
+        congestion_warnings.append("Canteen is currently outside operating hours.")
+    if crowd in ("HIGH", "VERY_HIGH"):
+        congestion_warnings.append(f"Crowd level is {crowd} ({active_count} active orders in queue).")
+    if kitchen_workload_pct >= 85.0:
+        congestion_warnings.append(f"Kitchen workload is at {kitchen_workload_pct}% of configured capacity.")
+    overloaded_counters = [cw["name"] for cw in counter_workloads if cw["is_overloaded"]]
+    if overloaded_counters:
+        congestion_warnings.append(f"Overloaded pickup counter(s): {', '.join(overloaded_counters)}.")
+    if delayed_orders:
+        congestion_warnings.append(f"{len(delayed_orders)} order(s) currently delayed or past estimated prep window.")
 
     result = {
         "canteen_id": str(canteen.id),
@@ -527,6 +632,7 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         "ordering_paused": canteen.ordering_paused,
         "pause_reason": canteen.pause_reason,
         "crowd_level": crowd,
+        "congestion_warnings": congestion_warnings,
         "data_classification": "estimated",
         "last_updated_at": now.isoformat(),
         "waiting_time_available": waiting_available,

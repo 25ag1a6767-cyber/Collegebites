@@ -212,8 +212,10 @@ def mark_order_ready(db: Session, order_id: UUID, staff_user_id: UUID) -> OrderO
     try:
         from app.services.queue_service import finalize_queue_estimate_for_order
         finalize_queue_estimate_for_order(db, order)
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("Queue estimate finalization failed for order %s: %s", order.order_number, exc)
 
     record_audit_log(db, action="kitchen.order_ready", entity_type="order", entity_id=order.order_number, actor_user_id=staff_user_id)
     db.commit()
@@ -283,12 +285,6 @@ def report_order_delay(db: Session, order_id: UUID, payload: DelayReportRequest,
         "order.delayed",
         {"delayed_minutes": order.delayed_minutes, "reason": payload.reason},
     )
-    if loaded.customer_id:
-        emit_user_notification_sync(
-            str(loaded.customer_id),
-            "order_delayed",
-            {"title": f"Order Delayed +{payload.additional_minutes} min", "order_number": loaded.order_number},
-        )
     return serialize_order(db, loaded)
 
 
@@ -377,18 +373,19 @@ def toggle_item_availability_from_kitchen(
         raise HTTPException(status_code=404, detail="Food item not found")
     item.is_available = payload.is_available
     if not payload.is_available:
-        for role_name in ("inventory_manager", "canteen_manager"):
-            db.add(
-                Notification(
-                    role_target=role_name,
-                    canteen_id=item.canteen_id,
-                    channel="in_app",
-                    title=f"Item Marked Unavailable • {item.name}",
-                    message=f"Kitchen disabled {item.name}: {payload.reason}",
-                    event_type="item_unavailable",
-                    delivery_status="sent",
-                )
-            )
+        from app.services.notification_service import create_role_notifications
+
+        create_role_notifications(
+            db,
+            roles=["inventory_manager", "canteen_manager"],
+            canteen_id=item.canteen_id,
+            event_type="item_unavailable",
+            category="inventory",
+            priority="high",
+            title=f"Item Marked Unavailable • {item.name}",
+            message=f"Kitchen disabled {item.name}: {payload.reason}",
+            event_id_base=f"item_unavail:{item.id}:{int(datetime.now(timezone.utc).timestamp() // 60)}",
+        )
     record_audit_log(
         db,
         action="kitchen.item_availability_changed",
@@ -430,15 +427,10 @@ def reject_order_from_kitchen(db: Session, order_id: UUID, reason: str, staff_us
             event_type="order_rejected",
             title=f"Order {order.order_number} Rejected",
             message=f"Rejected by kitchen ({reason}). Payment record is retained; contact college finance for exceptional adjustments.",
+            priority="high",
             send_external=True,
         )
         db.commit()
-        if order.customer_id:
-            emit_user_notification_sync(
-                str(order.customer_id),
-                "order_rejected",
-                {"title": f"Order {order.order_number} Rejected", "order_number": order.order_number},
-            )
     return out
 
 
@@ -494,18 +486,19 @@ def report_ingredient_unavailable(db: Session, inventory_item_id: UUID, reason: 
             )
         )
     blocked = refresh_food_item_ingredient_sufficiency(db, inv.canteen_id)
-    for role_name in ("inventory_manager", "canteen_manager"):
-        db.add(
-            Notification(
-                role_target=role_name,
-                canteen_id=inv.canteen_id,
-                channel="in_app",
-                title=f"Kitchen Ingredient Out of Stock • {ing.name if ing else inv.id}",
-                message=f"Reported unavailable by kitchen: {reason}. Blocked dishes: {', '.join(blocked) or 'None'}",
-                event_type="ingredient_unavailable",
-                delivery_status="sent",
-            )
-        )
+    from app.services.notification_service import create_role_notifications
+
+    create_role_notifications(
+        db,
+        roles=["inventory_manager", "canteen_manager"],
+        canteen_id=inv.canteen_id,
+        event_type="ingredient_unavailable",
+        category="inventory",
+        priority="critical",
+        title=f"Kitchen Ingredient Out of Stock • {ing.name if ing else inv.id}",
+        message=f"Reported unavailable by kitchen: {reason}. Blocked dishes: {', '.join(blocked) or 'None'}",
+        event_id_base=f"ing_unavail:{inv.id}:{int(datetime.now(timezone.utc).timestamp() // 60)}",
+    )
     record_audit_log(
         db,
         action="kitchen.ingredient_unavailable",

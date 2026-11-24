@@ -155,6 +155,7 @@ def _consume_batches(
 
 
 def _expired_batch_totals_map(db: Session, inv_ids: list[UUID]) -> dict[UUID, Decimal]:
+    """Sum remaining batch quantities that are unusable (expired, blocked, rejected, or recalled)."""
     if not inv_ids:
         return {}
     today = today_college()
@@ -163,8 +164,10 @@ def _expired_batch_totals_map(db: Session, inv_ids: list[UUID]) -> dict[UUID, De
         .where(
             StockBatch.inventory_item_id.in_(inv_ids),
             StockBatch.remaining_quantity > 0,
-            StockBatch.expiry_date.is_not(None),
-            StockBatch.expiry_date < today,
+            or_(
+                StockBatch.expiry_date < today,
+                StockBatch.quality_status.in_(("blocked", "rejected", "recalled")),
+            ),
         )
         .group_by(StockBatch.inventory_item_id)
     ).all()
@@ -632,6 +635,7 @@ def _serialize_supplier(sup: Supplier, perf: Optional[dict] = None) -> dict:
         "business_details": sup.business_details,
         "supplied_products": list(sup.supplied_products or []),
         "payment_terms": sup.payment_terms,
+        "lead_time_days": int(sup.lead_time_days) if sup.lead_time_days is not None else 2,
         "is_active": sup.is_active,
         "created_at": sup.created_at.isoformat() if sup.created_at else None,
         "updated_at": sup.updated_at.isoformat() if sup.updated_at else None,
@@ -684,6 +688,8 @@ def create_supplier(db: Session, data: dict, actor_user_id: UUID) -> dict:
     payload = dict(data)
     if payload.get("supplied_products") is None:
         payload["supplied_products"] = []
+    if payload.get("lead_time_days") is None:
+        payload.pop("lead_time_days", None)
     sup = Supplier(**payload)
     db.add(sup)
     record_audit_log(db, action="supplier.created", entity_type="supplier", entity_id=sup.name, actor_user_id=actor_user_id)
@@ -1086,6 +1092,9 @@ def upsert_recipe(db: Session, food_item_id: UUID, yield_portions: int, ingredie
         db.flush()
     else:
         recipe.yield_portions = yield_portions
+        recipe.is_verified = False
+        recipe.verified_by_user_id = None
+        recipe.verified_at = None
         for old in db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == recipe.id)).all():
             db.delete(old)
         db.flush()
@@ -1271,16 +1280,29 @@ def list_purchase_orders(
     ]
 
 
-def create_purchase_order(db: Session, data: dict, actor_user_id: UUID) -> dict:
+def create_purchase_order(
+    db: Session,
+    data: dict,
+    actor_user_id: UUID,
+    *,
+    can_approve: bool = False,
+    commit: bool = True,
+) -> dict:
     sup = db.get(Supplier, data["supplier_id"])
     if not sup:
         raise HTTPException(status_code=404, detail="Vendor / supplier not found")
     if not sup.is_active:
         raise HTTPException(status_code=400, detail="Cannot create purchase order for an inactive vendor")
 
-    init_status = (data.get("initial_status") or data.get("status") or "ordered").strip().lower()
+    raw_init = data.get("initial_status") or data.get("status")
+    init_status = (raw_init.strip().lower() if isinstance(raw_init, str) and raw_init.strip() else ("ordered" if can_approve else "pending_approval"))
     if init_status not in ("draft", "pending_approval", "approved", "ordered"):
         raise HTTPException(status_code=400, detail=f"Invalid initial purchase order status: {init_status}")
+    if init_status in ("approved", "ordered") and not can_approve:
+        raise HTTPException(
+            status_code=403,
+            detail="Only College Admin or Canteen Manager can create pre-approved or ordered purchase orders; submit as draft or pending_approval",
+        )
 
     now = datetime.now(timezone.utc)
     po_number = f"PO-{now.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6].upper()}"
@@ -1355,8 +1377,11 @@ def create_purchase_order(db: Session, data: dict, actor_user_id: UUID) -> dict:
         )
     except Exception:
         pass
-    db.commit()
-    db.refresh(po)
+    if commit:
+        db.commit()
+        db.refresh(po)
+    else:
+        db.flush()
     return _serialize_purchase_order(db, po)
 
 
@@ -1382,6 +1407,11 @@ def transition_purchase_order_status(
 
     if target == "approved" and not can_approve:
         raise HTTPException(status_code=403, detail="Only College Admin or Canteen Manager can approve purchase orders")
+    if target == "ordered" and not po.approved_at and not can_approve:
+        raise HTTPException(
+            status_code=403,
+            detail="Purchase order must be approved by College Admin or Canteen Manager before moving to ordered",
+        )
 
     now = datetime.now(timezone.utc)
     if target == "approved":
@@ -1402,7 +1432,7 @@ def transition_purchase_order_status(
         actor_user_id=actor_user_id,
         details={"status": po.status, "notes": notes},
     )
-    if target in ("approved", "ordered"):
+    if target in ("pending_approval", "approved", "ordered", "cancelled"):
         try:
             from app.services.notification_service import notify_procurement_event
 
@@ -1411,9 +1441,9 @@ def transition_purchase_order_status(
                 canteen_id=po.canteen_id,
                 event_type=f"purchase_order_{target}",
                 po_number=po.po_number,
-                title=f"Purchase Order {target.title()} • {po.po_number}",
+                title=f"Purchase Order {target.replace('_', ' ').title()} • {po.po_number}",
                 message=f"PO {po.po_number} moved to {target.upper()} status.",
-                priority="normal",
+                priority="high" if target in ("pending_approval", "cancelled") else "normal",
             )
         except Exception:
             pass
@@ -1631,6 +1661,18 @@ def receive_purchase_order(
     po.status = "received" if all_done else ("partial" if any_done else po.status)
     if all_done:
         po.received_at = now
+        try:
+            from app.models.enterprise import ReorderRecommendation
+
+            for rec in db.scalars(
+                select(ReorderRecommendation).where(
+                    ReorderRecommendation.purchase_order_id == po.id,
+                    ReorderRecommendation.status == "draft_po_created",
+                )
+            ).all():
+                rec.status = "fulfilled"
+        except Exception:
+            pass
     refresh_food_item_ingredient_sufficiency(db, po.canteen_id)
     record_audit_log(
         db,

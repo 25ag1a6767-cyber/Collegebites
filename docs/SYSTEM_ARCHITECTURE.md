@@ -18,7 +18,7 @@
 [Vercel / ASGI Edge → Pure ASGI Middleware Stack (CORS → RequestObservability → SecurityHeaders → RateLimit → GZip)]
                           │
                           ▼
-[FastAPI Application (35 Routers, 407 Routes under /api/v1)]
+[FastAPI Application (35 Routers, 412 Mounted ASGI Routes: 402 /api/v1 HTTP + 6 Health/Docs + 4 WebSockets, 132 Tables)]
  ├── Core Ordering, Exact Pricing & Online Payments (Razorpay HMAC, Status Sync & Webhooks)
  ├── QR/Token Engine, Digital Token Board & Thermal ESC/POS Printing
  ├── Smart Queue Prediction & Accuracy History Engine

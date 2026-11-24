@@ -4,7 +4,7 @@ import { AlertTriangle, Flame, Layers, RefreshCw, Timer, Zap } from "lucide-reac
 import { api, getApiError } from "../../../api/client";
 import { useRealtimeSync } from "../../../hooks/useRealtimeSync";
 import { RealtimeStatusBadge } from "../../../components/ui/RealtimeStatusBadge";
-import { Badge, Button, Card, Input, useToast } from "../../../components/ui/Primitives";
+import { Badge, Button, Card, ConfirmModal, Input, useToast } from "../../../components/ui/Primitives";
 export { StaffTab } from "./StaffManagementPanel";
 
 export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refetchQueue: () => void }> = ({
@@ -22,6 +22,15 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
   const [slotCap, setSlotCap] = useState("40");
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
   const [escalating, setEscalating] = useState(false);
+  const [confirmPauseOpen, setConfirmPauseOpen] = useState(false);
+  const [pauseBusy, setPauseBusy] = useState(false);
+
+  const { data: accuracyData, isLoading: accLoading, isError: accError } = useQuery<any>({
+    queryKey: ["queue-accuracy", activeCanteenId],
+    enabled: Boolean(activeCanteenId),
+    queryFn: async () => (await api.get(`/queue/canteens/${activeCanteenId}/accuracy?days=30`)).data,
+    refetchInterval: 60000,
+  });
 
   const { status: queueSyncStatus, lastSyncedAt: queueLastSyncedAt } = useRealtimeSync<{ queue?: any }>({
     enabled: Boolean(activeCanteenId),
@@ -161,6 +170,67 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
           <div className="text-[11px] text-slate-500">{queueDash?.on_duty_staff_count ?? 0} staff on duty</div>
         </Card>
       </div>
+
+      {queueDash?.waiting_time_available === false && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 font-semibold">
+          {queueDash?.waiting_time_message || "Waiting time currently unavailable."}
+        </div>
+      )}
+
+      {(queueDash?.congestion_warnings?.length || 0) > 0 && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50/70 p-3.5 text-xs text-amber-950 space-y-1">
+          <div className="font-bold flex items-center gap-1.5">
+            <AlertTriangle className="h-4 w-4 text-amber-600" /> Live Queue Congestion &amp; Capacity Warnings
+          </div>
+          <ul className="list-disc pl-5 space-y-0.5">
+            {queueDash.congestion_warnings.map((w: string, i: number) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Prediction Accuracy Telemetry (Real QueueEstimateHistory vs Actual Ready Time) */}
+      <Card className="p-4 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-bold text-slate-900">Wait-Time Prediction Accuracy (30-Day Real Audit)</h3>
+          <Badge tone="slate">Data: {accuracyData?.data_classification || "calculated"}</Badge>
+        </div>
+        {accLoading ? (
+          <div className="text-xs text-slate-500">Loading prediction accuracy metrics...</div>
+        ) : accError ? (
+          <div className="text-xs text-red-700">Unable to load wait-time accuracy telemetry.</div>
+        ) : !accuracyData || accuracyData.sample_count === 0 ? (
+          <div className="text-xs text-slate-500">
+            {accuracyData?.message || "Insufficient historical data to evaluate queue prediction accuracy."}
+          </div>
+        ) : (
+          <div className="grid gap-2.5 grid-cols-2 sm:grid-cols-5 text-xs">
+            <div className="rounded-xl bg-slate-50 p-2.5">
+              <div className="text-[10px] font-bold uppercase text-slate-500">Samples</div>
+              <div className="text-base font-black text-slate-900">{accuracyData.sample_count}</div>
+            </div>
+            <div className="rounded-xl bg-slate-50 p-2.5">
+              <div className="text-[10px] font-bold uppercase text-slate-500">MAE</div>
+              <div className="text-base font-black text-slate-900">{accuracyData.mae_minutes}m</div>
+            </div>
+            <div className="rounded-xl bg-slate-50 p-2.5">
+              <div className="text-[10px] font-bold uppercase text-slate-500">Median Error</div>
+              <div className="text-base font-black text-slate-900">{accuracyData.median_error_minutes}m</div>
+            </div>
+            <div className="rounded-xl bg-emerald-50 p-2.5">
+              <div className="text-[10px] font-bold uppercase text-emerald-700">Within ±5 min</div>
+              <div className="text-base font-black text-emerald-800">{accuracyData.within_5_min_percent}%</div>
+            </div>
+            <div className="rounded-xl bg-slate-50 p-2.5">
+              <div className="text-[10px] font-bold uppercase text-slate-500">Est vs Actual Avg</div>
+              <div className="text-sm font-black text-slate-900">
+                {accuracyData.average_estimated_minutes}m / {accuracyData.average_actual_minutes}m
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
 
       {delayedOrders.length > 0 && (
         <div className="rounded-2xl border border-red-200 bg-red-50 p-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -335,15 +405,24 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
             <Button
               size="sm"
               variant={queueDash?.ordering_paused ? "success" : "danger"}
+              disabled={pauseBusy}
               onClick={async () => {
+                if (!queueDash?.ordering_paused) {
+                  setConfirmPauseOpen(true);
+                  return;
+                }
+                setPauseBusy(true);
                 try {
                   await api.patch(`/queue/canteens/${activeCanteenId}/controls`, {
-                    ordering_paused: !queueDash?.ordering_paused,
-                    pause_reason: !queueDash?.ordering_paused ? "Paused by manager due to peak crowd" : null,
+                    ordering_paused: false,
+                    pause_reason: null,
                   });
+                  pushToast("Ordering resumed for this canteen", "success");
                   refetchQueue();
                 } catch (err) {
                   pushToast(getApiError(err), "error");
+                } finally {
+                  setPauseBusy(false);
                 }
               }}
             >
@@ -478,6 +557,30 @@ export const QueueTab: React.FC<{ activeCanteenId: string; queueDash: any; refet
           )}
         </Card>
       </div>
+      <ConfirmModal
+        open={confirmPauseOpen}
+        title="Pause Canteen Ordering?"
+        message="Customers will temporarily be prevented from placing new orders until you resume ordering. Active paid orders continue to be prepared."
+        confirmLabel="Pause Ordering"
+        busy={pauseBusy}
+        onCancel={() => setConfirmPauseOpen(false)}
+        onConfirm={async () => {
+          setPauseBusy(true);
+          try {
+            await api.patch(`/queue/canteens/${activeCanteenId}/controls`, {
+              ordering_paused: true,
+              pause_reason: "Paused by manager due to peak crowd",
+            });
+            setConfirmPauseOpen(false);
+            pushToast("Canteen ordering paused", "info");
+            refetchQueue();
+          } catch (err) {
+            pushToast(getApiError(err), "error");
+          } finally {
+            setPauseBusy(false);
+          }
+        }}
+      />
     </div>
   );
 };

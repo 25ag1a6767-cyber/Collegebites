@@ -23,12 +23,12 @@ export default function BoardScreen() {
     queryKeys: [["m-board", activeId]],
   });
 
-  const { data: board } = useQuery<any>({
+  const { data: board, isLoading: boardLoading, isError: boardError } = useQuery<any>({
     queryKey: ["m-board", activeId],
     enabled: Boolean(activeId),
     queryFn: () => tokensApi.getBoard(activeId),
     staleTime: 0,
-    refetchInterval: 1000,
+    refetchInterval: syncStatus === "live" ? false : 3000,
   });
 
   return (
@@ -36,9 +36,13 @@ export default function BoardScreen() {
       <View style={styles.statusRow}>
         <Text style={styles.boardTitle}>{board?.canteen_name || "Live Token Board"}</Text>
         <View style={[styles.syncBadge, syncStatus === "live" ? styles.syncLive : styles.syncWarn]}>
-          <Text style={styles.syncTxt}>{syncStatus === "live" ? "LIVE" : "RECONNECTING"}</Text>
+          <Text style={styles.syncTxt}>{syncStatus === "live" ? "LIVE WS" : "POLLING 3S"}</Text>
         </View>
       </View>
+      {boardLoading && !board && <Text style={styles.emptyTxt}>Loading live token board...</Text>}
+      {boardError && !board && (
+        <Text style={[styles.emptyTxt, { color: "#fca5a5" }]}>Unable to load live token board. Retrying...</Text>
+      )}
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
         <Pressable

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 from fastapi.testclient import TestClient
 from sqlalchemy import update
 
@@ -163,7 +164,7 @@ def test_smart_queue_positions_routing_reassignment_and_autoremoval(client: Test
     with SessionLocal() as db:
         db.execute(
             update(Order)
-            .where(Order.id == o1["id"])
+            .where(Order.id == UUID(o1["id"]))
             .values(confirmed_at=datetime.now(timezone.utc) - timedelta(minutes=90), is_priority=False)
         )
         db.commit()
