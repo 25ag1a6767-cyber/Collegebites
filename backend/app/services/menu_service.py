@@ -265,15 +265,14 @@ def list_categories(db: Session, canteen_id: UUID, include_inactive: bool = Fals
 def list_categories_cached(db: Session, canteen_id: UUID, include_inactive: bool = False) -> list[dict]:
     from app.schemas.menu import FoodCategoryOut
 
-    canteen = db.get(Canteen, canteen_id)
-    if not canteen or (not include_inactive and not canteen.is_active):
-        raise HTTPException(status_code=404, detail="Canteen not found")
-
     cache_ns = f"{NS_MENU}:{canteen_id}"
     cache_key = f"cats:inc={int(bool(include_inactive))}"
     hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=3.0)
     if hit and isinstance(cached, list):
         return cached
+    canteen = db.get(Canteen, canteen_id)
+    if not canteen or (not include_inactive and not canteen.is_active):
+        raise HTTPException(status_code=404, detail="Canteen not found")
     rows = list_categories(db, canteen_id, include_inactive=include_inactive)
     out = [FoodCategoryOut.model_validate(c).model_dump(mode="json") for c in rows]
     cache_manager.set_json(cache_ns, cache_key, out, ttl_seconds=60, l1_ttl=3.0)
@@ -327,10 +326,6 @@ def list_food_items(
     include_inactive: bool = False,
     sort_by: str = "popularity",
 ) -> list[FoodItemOut]:
-    canteen = db.get(Canteen, canteen_id)
-    if not canteen or (not include_inactive and not canteen.is_active):
-        raise HTTPException(status_code=404, detail="Canteen not found")
-
     cache_ns = f"{NS_MENU}:{canteen_id}"
     q_norm = (q or "").strip().lower()
     cache_key = (
@@ -341,6 +336,10 @@ def list_food_items(
     hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=2.0)
     if hit and isinstance(cached, list):
         return [FoodItemOut.model_validate(x) for x in cached]
+
+    canteen = db.get(Canteen, canteen_id)
+    if not canteen or (not include_inactive and not canteen.is_active):
+        raise HTTPException(status_code=404, detail="Canteen not found")
 
     stmt = (
         select(FoodItem)
