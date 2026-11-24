@@ -54,14 +54,122 @@ class AnnouncementCreateIn(BaseModel):
     ends_at: Optional[datetime] = None
 
 
+class SystemMaintenanceIn(BaseModel):
+    canteen_id: Optional[UUID] = None
+    title: str = Field(min_length=2, max_length=200)
+    message: str = Field(min_length=2, max_length=1000)
+    priority: str = Field(default="high", pattern="^(low|normal|high|critical)$")
+
+
 @router.get("/my")
 def get_my_notifications(
+    q: Optional[str] = Query(default=None),
+    priority: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    event_type: Optional[str] = Query(default=None),
+    delivery_status: Optional[str] = Query(default=None),
+    is_read: Optional[bool] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
     return notification_service.list_my_notifications(
-        db, principal.user.id, principal.roles, assigned_canteen_id=principal.assigned_canteen_id
+        db,
+        principal.user.id,
+        principal.roles,
+        assigned_canteen_id=principal.assigned_canteen_id,
+        q=q,
+        priority=priority,
+        category=category,
+        event_type=event_type,
+        delivery_status=delivery_status,
+        is_read=is_read,
+        limit=limit,
+        offset=offset,
     )
+
+
+@router.get("/unread-count")
+def get_unread_count(
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    return {
+        "unread_count": notification_service.get_unread_count(
+            db, principal.user.id, principal.roles, assigned_canteen_id=principal.assigned_canteen_id
+        )
+    }
+
+
+@router.get("/history")
+def get_notification_history(
+    q: Optional[str] = Query(default=None),
+    priority: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    event_type: Optional[str] = Query(default=None),
+    delivery_status: Optional[str] = Query(default=None),
+    is_read: Optional[bool] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: AuthenticatedPrincipal = Depends(get_current_principal),
+    db: Session = Depends(get_db),
+):
+    return notification_service.get_notification_history(
+        db,
+        principal.user.id,
+        principal.roles,
+        assigned_canteen_id=principal.assigned_canteen_id,
+        q=q,
+        priority=priority,
+        category=category,
+        event_type=event_type,
+        delivery_status=delivery_status,
+        is_read=is_read,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/deliveries")
+def list_deliveries(
+    canteen_id: Optional[UUID] = Query(default=None),
+    status_filter: Optional[str] = Query(default=None),
+    channel: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=200),
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    eff_cid = scoped_canteen_for_principal(principal, canteen_id)
+    return notification_service.list_notification_deliveries(
+        db, canteen_id=eff_cid, status_filter=status_filter, channel=channel, limit=limit
+    )
+
+
+@router.post("/{notification_id}/retry")
+def retry_notification(
+    notification_id: UUID,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
+    db: Session = Depends(get_db),
+):
+    return notification_service.retry_failed_notification(db, notification_id, principal.user.id)
+
+
+@router.post("/system-maintenance", status_code=status.HTTP_201_CREATED)
+def broadcast_system_maintenance(
+    payload: SystemMaintenanceIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    rows = notification_service.notify_system_maintenance(
+        db,
+        title=payload.title,
+        message=payload.message,
+        priority=payload.priority,
+        canteen_id=payload.canteen_id,
+        actor_user_id=principal.user.id,
+    )
+    return {"broadcasted_targets": len(rows), "title": payload.title, "priority": payload.priority}
 
 
 @router.post("/{notification_id}/read")

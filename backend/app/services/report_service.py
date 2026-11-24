@@ -72,13 +72,19 @@ def get_analytics_report(
     preset: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    category_id: Optional[UUID] = None,
+    food_item_id: Optional[UUID] = None,
+    compare_previous: bool = False,
 ) -> dict[str, Any]:
     college_tz = get_college_tz()
     local_today = today_college()
     s_date, e_date, resolved_preset = resolve_report_date_range(preset, start_date, end_date)
 
     cache_ns = f"{NS_REPORTS}:{canteen_id}" if canteen_id else NS_REPORTS
-    cache_key = f"dash:{canteen_id or 'all'}:{resolved_preset}:{s_date.isoformat()}:{e_date.isoformat()}"
+    cache_key = (
+        f"dash:{canteen_id or 'all'}:{resolved_preset}:{s_date.isoformat()}:{e_date.isoformat()}"
+        f":{category_id or 'all'}:{food_item_id or 'all'}:{int(compare_previous)}"
+    )
     hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=2.0)
     if hit and isinstance(cached, dict):
         return cached
@@ -89,6 +95,18 @@ def get_analytics_report(
     order_filters = [Order.created_at >= s_dt, Order.created_at <= e_dt]
     if canteen_id:
         order_filters.append(Order.canteen_id == canteen_id)
+    if food_item_id:
+        order_filters.append(
+            Order.id.in_(select(OrderItem.order_id).where(OrderItem.food_item_id == food_item_id))
+        )
+    elif category_id:
+        order_filters.append(
+            Order.id.in_(
+                select(OrderItem.order_id)
+                .join(FoodItem, FoodItem.id == OrderItem.food_item_id)
+                .where(FoodItem.category_id == category_id)
+            )
+        )
 
     paid_filters = order_filters + [Order.payment_status == "CONFIRMED"]
 
@@ -623,8 +641,118 @@ def get_analytics_report(
             "status_updates": u_actions,
         })
 
+    # 7. Financial Analytics (STRICT separation of Revenue vs Verified Costs vs Estimated Margin — NEVER label revenue as profit)
+    verified_ingredient_cost = Decimal("0.00")
+    batch_ids_used = {sm.batch_id for sm, _inv, _ing in mov_rows if sm.batch_id}
+    batch_cost_map = (
+        {
+            b.id: Decimal(str(b.unit_cost or 0))
+            for b in db.scalars(select(StockBatch).where(StockBatch.id.in_(list(batch_ids_used)))).all()
+        }
+        if batch_ids_used
+        else {}
+    )
+    for sm, inv, _ing_name in mov_rows:
+        if sm.movement_type in ("order_deduct", "order_deduction", "production_use"):
+            qty_abs = abs(Decimal(str(sm.quantity_delta or 0)))
+            uc = batch_cost_map.get(sm.batch_id) if sm.batch_id else None
+            if uc is None or uc <= Decimal("0.00"):
+                uc = Decimal(str(inv.unit_cost or 0))
+            verified_ingredient_cost += (qty_abs * uc)
+    verified_ingredient_cost = verified_ingredient_cost.quantize(Decimal("0.01"))
+    recorded_wastage_loss = Decimal(str(total_wastage)).quantize(Decimal("0.01"))
+    total_recorded_direct_costs = (verified_ingredient_cost + recorded_wastage_loss).quantize(Decimal("0.01"))
+
+    if verified_ingredient_cost > Decimal("0.00") and net_sales > Decimal("0.00"):
+        est_margin = (net_sales - total_recorded_direct_costs).quantize(Decimal("0.01"))
+        est_margin_pct = round(float((est_margin / net_sales) * Decimal("100")), 1)
+        margin_status = "estimated_from_verified_ingredient_costs"
+        margin_note = (
+            "Estimated gross margin = Verified Net Revenue - (Verified Ingredient Consumption Cost + Recorded Wastage Loss). "
+            "Excludes unrecorded overhead such as rent, utilities, and labor."
+        )
+    else:
+        est_margin = None
+        est_margin_pct = None
+        margin_status = "insufficient_cost_data"
+        margin_note = (
+            "Insufficient verified ingredient cost data to calculate gross margin. "
+            "Verified net revenue is displayed separately and is NOT labeled as profit."
+        )
+
+    period_comparison = None
+    if compare_previous:
+        prev_end = s_date - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=max(0, span_days - 1))
+        prev_s_dt = datetime.combine(prev_start, time.min, tzinfo=college_tz)
+        prev_e_dt = datetime.combine(prev_end, time.max, tzinfo=college_tz)
+        prev_filters = [
+            Order.created_at >= prev_s_dt,
+            Order.created_at <= prev_e_dt,
+            Order.payment_status == "CONFIRMED",
+        ]
+        if canteen_id:
+            prev_filters.append(Order.canteen_id == canteen_id)
+        if food_item_id:
+            prev_filters.append(
+                Order.id.in_(select(OrderItem.order_id).where(OrderItem.food_item_id == food_item_id))
+            )
+        elif category_id:
+            prev_filters.append(
+                Order.id.in_(
+                    select(OrderItem.order_id)
+                    .join(FoodItem, FoodItem.id == OrderItem.food_item_id)
+                    .where(FoodItem.category_id == category_id)
+                )
+            )
+        prev_row = db.execute(
+            select(func.count(Order.id), func.coalesce(func.sum(Order.total_amount), 0)).where(*prev_filters)
+        ).one()
+        prev_orders = int(prev_row[0] or 0)
+        prev_rev = Decimal(str(prev_row[1] or 0)).quantize(Decimal("0.01"))
+        orders_change_pct = (
+            round(((total_orders - prev_orders) / prev_orders) * 100.0, 1) if prev_orders > 0 else None
+        )
+        rev_change_pct = (
+            round(float(((net_sales - prev_rev) / prev_rev) * Decimal("100")), 1) if prev_rev > Decimal("0.00") else None
+        )
+        period_comparison = {
+            "previous_range": {"start_date": prev_start.isoformat(), "end_date": prev_end.isoformat()},
+            "previous_orders": prev_orders,
+            "previous_net_revenue": f"{prev_rev:.2f}",
+            "orders_change_percent": orders_change_pct,
+            "revenue_change_percent": rev_change_pct,
+            "data_classification": "actual",
+        }
+
     report_payload = {
         "range": {"start_date": s_date.isoformat(), "end_date": e_date.isoformat(), "preset": resolved_preset},
+        "filters": {
+            "canteen_id": str(canteen_id) if canteen_id else None,
+            "category_id": str(category_id) if category_id else None,
+            "food_item_id": str(food_item_id) if food_item_id else None,
+            "compare_previous": compare_previous,
+        },
+        "empty": total_orders == 0,
+        "empty_message": "No data available for the selected date range." if total_orders == 0 else None,
+        "data_classification": "actual",
+        "financial_analytics": {
+            "verified_gross_sales": f"{Decimal(str(gross_sales)):.2f}",
+            "historical_discounts": f"{Decimal(str(discounts)):.2f}",
+            "historical_taxes": f"{Decimal(str(tax_collected)):.2f}",
+            "verified_net_revenue": f"{Decimal(str(net_sales)):.2f}",
+            "revenue_classification": "actual",
+            "verified_ingredient_cost": f"{verified_ingredient_cost:.2f}",
+            "recorded_wastage_loss": f"{recorded_wastage_loss:.2f}",
+            "total_recorded_direct_costs": f"{total_recorded_direct_costs:.2f}",
+            "cost_classification": "calculated",
+            "estimated_gross_margin": f"{est_margin:.2f}" if est_margin is not None else None,
+            "estimated_gross_margin_percent": est_margin_pct,
+            "margin_classification": "estimated" if est_margin is not None else "unavailable",
+            "margin_status": margin_status,
+            "margin_note": margin_note,
+        },
+        "period_comparison": period_comparison,
         "today_summary": {
             "date": local_today.isoformat(),
             "total_orders_today": int(total_orders_today),

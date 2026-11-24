@@ -29,7 +29,7 @@ def test_promotions_notifications_reviews_support_and_reports(client: TestClient
             headers=admin["headers"],
             json={"code": "FLAT20", "title": "Flat ₹20 Off", "discount_type": "fixed", "discount_value": "20.00"},
         ).status_code
-        in (201, 404, 405)
+        in (400, 404, 405)
     )
 
     promo = client.post(

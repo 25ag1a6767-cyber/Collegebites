@@ -3,6 +3,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import anyio
 from fastapi import FastAPI, Response
@@ -29,7 +30,7 @@ perf_logger = logging.getLogger("collegebites.perf")
 
 
 class RequestObservabilityMiddleware:
-    """Pure ASGI timing, slow-request logging, and timeout guard (zero BaseHTTPMiddleware overhead)."""
+    """Pure ASGI correlation ID, timing, slow-request logging, and timeout guard (zero BaseHTTPMiddleware overhead)."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -43,6 +44,15 @@ class RequestObservabilityMiddleware:
         path = scope.get("path") or ""
         method = scope.get("method") or "GET"
         is_stream = "/realtime/" in path or path.endswith("/stream")
+        incoming_rid = None
+        for k, v in scope.get("headers") or ():
+            if k.lower() == b"x-request-id":
+                raw = v.decode("ascii", errors="ignore").strip()
+                if raw and len(raw) <= 64:
+                    incoming_rid = raw
+                break
+        request_id = incoming_rid or uuid4().hex[:16]
+        scope.setdefault("state", {})["request_id"] = request_id
         response_started = False
         status_code = 200
 
@@ -53,6 +63,8 @@ class RequestObservabilityMiddleware:
                 status_code = int(message.get("status", 200))
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 headers = list(message.get("headers") or [])
+                if not any(k.lower() == b"x-request-id" for k, _ in headers):
+                    headers.append((b"x-request-id", request_id.encode("ascii")))
                 headers.append((b"x-response-time-ms", f"{elapsed_ms:.2f}".encode("ascii")))
                 message = {**message, "headers": headers}
             await send(message)
@@ -67,18 +79,29 @@ class RequestObservabilityMiddleware:
                 )
         except asyncio.TimeoutError:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
-            perf_logger.error("Request timed out after %.1fms: %s %s", elapsed_ms, method, path)
+            perf_logger.error("Request timed out [req=%s] after %.1fms: %s %s", request_id, elapsed_ms, method, path)
             if not response_started:
                 resp = JSONResponse(
                     status_code=504,
-                    content={"detail": "Request timed out while processing. Please retry shortly."},
+                    content={
+                        "detail": "Request timed out while processing. Please retry shortly.",
+                        "request_id": request_id,
+                    },
+                    headers={"X-Request-ID": request_id},
                 )
                 await resp(scope, receive, send)
             return
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         if elapsed_ms >= 500.0 and not is_stream:
-            perf_logger.warning("Slow request %.1fms %s %s -> %s", elapsed_ms, method, path, status_code)
+            perf_logger.warning(
+                "Slow request [req=%s] %.1fms %s %s -> %s",
+                request_id,
+                elapsed_ms,
+                method,
+                path,
+                status_code,
+            )
 
 
 @asynccontextmanager

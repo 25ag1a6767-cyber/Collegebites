@@ -517,6 +517,8 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         })
 
     avg_wait_minutes = round(sum(waiting_waits) / len(waiting_waits), 1) if waiting_waits else float(base_eta)
+    waiting_available = bool(is_open and not canteen.ordering_paused)
+    waiting_msg = None if waiting_available else "Waiting time currently unavailable."
 
     result = {
         "canteen_id": str(canteen.id),
@@ -525,6 +527,10 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         "ordering_paused": canteen.ordering_paused,
         "pause_reason": canteen.pause_reason,
         "crowd_level": crowd,
+        "data_classification": "estimated",
+        "last_updated_at": now.isoformat(),
+        "waiting_time_available": waiting_available,
+        "waiting_time_message": waiting_msg,
         "active_order_count": active_count,
         "waiting_prep_count": int(placed_count + accepted_count),
         "placed_count": int(placed_count),
@@ -534,8 +540,8 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         "delayed_order_count": max(int(delayed_count), len(delayed_orders)),
         "orders_per_minute": orders_per_min,
         "average_prep_time_minutes": avg_prep,
-        "average_wait_minutes": avg_wait_minutes,
-        "estimated_wait_minutes": base_eta,
+        "average_wait_minutes": avg_wait_minutes if waiting_available else None,
+        "estimated_wait_minutes": base_eta if waiting_available else None,
         "kitchen_workload_percent": kitchen_workload_pct,
         "on_duty_staff_count": int(on_duty_staff),
         "max_concurrent_orders": canteen.max_concurrent_orders,
@@ -551,6 +557,20 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
 def estimate_prep_time(db: Session, canteen_id: UUID, item_ids: list[UUID]) -> dict:
     dash = get_live_queue_dashboard(db, canteen_id)
     canteen = db.get(Canteen, canteen_id)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if not dash.get("waiting_time_available", True):
+        return {
+            "canteen_id": str(canteen_id),
+            "crowd_level": dash["crowd_level"],
+            "data_classification": "estimated",
+            "waiting_time_available": False,
+            "waiting_time_message": "Waiting time currently unavailable.",
+            "estimated_minutes": None,
+            "active_order_count": dash["active_order_count"],
+            "on_duty_staff_count": dash["on_duty_staff_count"],
+            "peak_buffer_minutes": 0,
+            "last_updated_at": now_iso,
+        }
     max_item_prep = canteen.default_prep_time_minutes if canteen else 5
     complexity_bonus = 0
     if item_ids:
@@ -566,17 +586,173 @@ def estimate_prep_time(db: Session, canteen_id: UUID, item_ids: list[UUID]) -> d
         else 0
     )
     hist_blend = round(dash["average_prep_time_minutes"]) if dash["active_order_count"] > 0 else max_item_prep
+    base_est = dash["estimated_wait_minutes"] or max_item_prep
     estimated = max(
-        dash["estimated_wait_minutes"],
+        base_est,
         max(max_item_prep, hist_blend) + complexity_bonus + queue_penalty + peak_buffer,
     )
     return {
         "canteen_id": str(canteen_id),
         "crowd_level": dash["crowd_level"],
+        "data_classification": "estimated",
+        "waiting_time_available": True,
+        "waiting_time_message": None,
         "estimated_minutes": int(estimated),
         "active_order_count": dash["active_order_count"],
         "on_duty_staff_count": dash["on_duty_staff_count"],
         "peak_buffer_minutes": int(peak_buffer),
+        "last_updated_at": now_iso,
+    }
+
+
+def record_queue_estimate_for_order(db: Session, order: Order) -> None:
+    """Persist initial wait estimate when an order is confirmed for accuracy auditing (never alters Order timestamps)."""
+    from app.models.enterprise import QueueEstimateHistory
+
+    existing = db.scalar(select(QueueEstimateHistory.id).where(QueueEstimateHistory.order_id == order.id))
+    if existing:
+        return
+    canteen = db.get(Canteen, order.canteen_id)
+    metrics = compute_order_queue_metrics_map(db, [order]).get(order.id, {})
+    on_duty = _canteen_on_duty_staff_count(db, order.canteen_id)
+    active_cnt = int(
+        db.scalar(
+            select(func.count(Order.id)).where(
+                Order.canteen_id == order.canteen_id,
+                Order.status.in_(ACTIVE_QUEUE_WAITING_STATUSES),
+            )
+        )
+        or 0
+    )
+    est_wait = int(metrics.get("dynamic_wait_minutes") or order.estimated_prep_minutes or 10)
+    db.add(
+        QueueEstimateHistory(
+            canteen_id=order.canteen_id,
+            counter_id=order.counter_id,
+            order_id=order.id,
+            estimated_wait_minutes=est_wait,
+            estimated_prep_minutes=int(order.estimated_prep_minutes or 10),
+            queue_position_at_creation=int(metrics.get("queue_position") or 1),
+            active_orders_at_creation=active_cnt,
+            on_duty_staff_at_creation=max(1, on_duty),
+            estimated_at=datetime.now(timezone.utc),
+            data_classification="estimated",
+        )
+    )
+    if canteen:
+        _is_open, crowd, base_eta, _act = compute_canteen_live_status(db, canteen, precomputed_active_count=active_cnt)
+        if crowd in ("HIGH", "VERY_HIGH"):
+            try:
+                from app.services.notification_service import notify_queue_congestion
+
+                notify_queue_congestion(
+                    db,
+                    canteen_id=canteen.id,
+                    canteen_name=canteen.name,
+                    crowd_level=crowd,
+                    active_orders=active_cnt,
+                    est_wait_minutes=int(base_eta or est_wait),
+                )
+            except Exception:
+                pass
+
+
+def finalize_queue_estimate_for_order(db: Session, order: Order) -> None:
+    """Record actual wait & prep duration when order becomes READY without altering historical Order timestamps."""
+    from app.models.enterprise import QueueEstimateHistory
+
+    row = db.scalar(select(QueueEstimateHistory).where(QueueEstimateHistory.order_id == order.id))
+    if not row:
+        return
+    ready_at = order.ready_at or datetime.now(timezone.utc)
+    if ready_at.tzinfo is None:
+        ready_at = ready_at.replace(tzinfo=timezone.utc)
+    est_at = row.estimated_at
+    if est_at and est_at.tzinfo is None:
+        est_at = est_at.replace(tzinfo=timezone.utc)
+    confirm_anchor = order.confirmed_at or est_at or order.created_at
+    if confirm_anchor and confirm_anchor.tzinfo is None:
+        confirm_anchor = confirm_anchor.replace(tzinfo=timezone.utc)
+    actual_wait = max(0.0, (ready_at - confirm_anchor).total_seconds() / 60.0)
+    prep_anchor = order.preparing_at or confirm_anchor
+    if prep_anchor and prep_anchor.tzinfo is None:
+        prep_anchor = prep_anchor.replace(tzinfo=timezone.utc)
+    actual_prep = max(0.0, (ready_at - prep_anchor).total_seconds() / 60.0)
+    row.actual_ready_at = ready_at
+    row.actual_wait_minutes = round(actual_wait, 2)
+    row.actual_prep_minutes = round(actual_prep, 2)
+    row.absolute_error_minutes = round(abs(float(row.estimated_wait_minutes) - actual_wait), 2)
+
+
+def get_queue_accuracy_metrics(db: Session, canteen_id: UUID, days: int = 30) -> dict:
+    """Compute real queue estimate vs actual ready-time error metrics from QueueEstimateHistory (zero fabrication)."""
+    from app.models.enterprise import QueueEstimateHistory
+
+    canteen = db.get(Canteen, canteen_id)
+    if not canteen or not canteen.is_active:
+        raise HTTPException(status_code=404, detail="Canteen not found")
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365)))
+    rows = db.scalars(
+        select(QueueEstimateHistory)
+        .join(Order, Order.id == QueueEstimateHistory.order_id)
+        .where(
+            QueueEstimateHistory.canteen_id == canteen_id,
+            QueueEstimateHistory.estimated_at >= since,
+            QueueEstimateHistory.actual_wait_minutes.is_not(None),
+            Order.status.in_(("READY", "COMPLETED")),
+        )
+        .order_by(QueueEstimateHistory.estimated_at.desc())
+        .limit(1000)
+    ).all()
+    if not rows:
+        return {
+            "canteen_id": str(canteen_id),
+            "canteen_name": canteen.name,
+            "lookback_days": days,
+            "sample_count": 0,
+            "data_classification": "calculated",
+            "status": "insufficient_data",
+            "message": "Insufficient historical data to evaluate queue prediction accuracy.",
+            "mae_minutes": None,
+            "median_error_minutes": None,
+            "within_5_min_percent": None,
+            "average_estimated_minutes": None,
+            "average_actual_minutes": None,
+            "recent_samples": [],
+        }
+
+    errors = sorted(float(r.absolute_error_minutes or 0.0) for r in rows)
+    n = len(errors)
+    mae = round(sum(errors) / n, 2)
+    median = round(errors[n // 2] if n % 2 == 1 else (errors[n // 2 - 1] + errors[n // 2]) / 2.0, 2)
+    within_5 = round((sum(1 for e in errors if e <= 5.0) / n) * 100.0, 1)
+    avg_est = round(sum(float(r.estimated_wait_minutes) for r in rows) / n, 2)
+    avg_act = round(sum(float(r.actual_wait_minutes or 0.0) for r in rows) / n, 2)
+    return {
+        "canteen_id": str(canteen_id),
+        "canteen_name": canteen.name,
+        "lookback_days": days,
+        "sample_count": n,
+        "data_classification": "calculated",
+        "status": "ok",
+        "message": None,
+        "mae_minutes": mae,
+        "median_error_minutes": median,
+        "within_5_min_percent": within_5,
+        "average_estimated_minutes": avg_est,
+        "average_actual_minutes": avg_act,
+        "recent_samples": [
+            {
+                "order_id": str(r.order_id),
+                "estimated_wait_minutes": r.estimated_wait_minutes,
+                "actual_wait_minutes": float(r.actual_wait_minutes),
+                "absolute_error_minutes": float(r.absolute_error_minutes),
+                "queue_position": r.queue_position_at_creation,
+                "estimated_at": r.estimated_at.isoformat() if r.estimated_at else None,
+                "ready_at": r.actual_ready_at.isoformat() if r.actual_ready_at else None,
+            }
+            for r in rows[:25]
+        ],
     }
 
 

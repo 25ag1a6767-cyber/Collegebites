@@ -1,0 +1,57 @@
+{
+  "target": "local_staging_uvicorn_1_worker_sqlite_wal_mock_gateway",
+  "live_production_touched": false,
+  "breaking_point_vu": 50,
+  "tiers": [
+    {
+      "vus": 1,
+      "total_requests": 88,
+      "rps": 14.55,
+      "avg_ms": 17.65,
+      "p50_ms": 7.48,
+      "p95_ms": 41.87,
+      "p99_ms": 128.53,
+      "error_rate_pct": 0.0
+    },
+    {
+      "vus": 5,
+      "total_requests": 354,
+      "rps": 58.49,
+      "avg_ms": 34.11,
+      "p50_ms": 24.8,
+      "p95_ms": 90.81,
+      "p99_ms": 167.7,
+      "error_rate_pct": 0.0
+    },
+    {
+      "vus": 10,
+      "total_requests": 491,
+      "rps": 80.21,
+      "avg_ms": 72.28,
+      "p50_ms": 53.52,
+      "p95_ms": 212.23,
+      "p99_ms": 343.82,
+      "error_rate_pct": 0.0
+    },
+    {
+      "vus": 25,
+      "total_requests": 566,
+      "rps": 91.67,
+      "avg_ms": 217.81,
+      "p50_ms": 190.98,
+      "p95_ms": 433.88,
+      "p99_ms": 729.11,
+      "error_rate_pct": 0.0
+    },
+    {
+      "vus": 50,
+      "total_requests": 137,
+      "rps": 15.01,
+      "avg_ms": 3169.05,
+      "p50_ms": 547.7,
+      "p95_ms": 8001.1,
+      "p99_ms": 8001.4,
+      "error_rate_pct": 36.5
+    }
+  ]
+}

@@ -164,6 +164,9 @@ class Recipe(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     yield_portions: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    verified_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     ingredients: Mapped[list["RecipeIngredient"]] = relationship(back_populates="recipe", cascade="all, delete-orphan")
 

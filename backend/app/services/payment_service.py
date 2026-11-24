@@ -114,6 +114,11 @@ def _finalize_confirmed_payment(
             metadata={"order_status": order.status, "payment_reference": payment_reference},
             dedupe_minutes=15,
         )
+        try:
+            from app.services.notification_service import notify_duplicate_payment_investigation
+            notify_duplicate_payment_investigation(db, order, payment_reference)
+        except Exception:
+            pass
         db.commit()
         raise HTTPException(
             status_code=409,
@@ -138,6 +143,11 @@ def _finalize_confirmed_payment(
                 order_id=order.id,
                 metadata={"existing_payment_id": str(dup_pay.id), "provider_payment_id": provider_payment_id},
             )
+            try:
+                from app.services.notification_service import notify_duplicate_payment_investigation
+                notify_duplicate_payment_investigation(db, order, provider_payment_id)
+            except Exception:
+                pass
             db.commit()
             raise HTTPException(status_code=409, detail="Payment reference already used for another order")
 
@@ -241,11 +251,14 @@ def _finalize_confirmed_payment(
         .where(Order.id == order_id_val)
     )
 
-    # Dispatch notifications AFTER commit so external SMTP/SMS/Push never hold DB row locks
+    # Dispatch notifications & snapshot queue wait estimate AFTER commit so external I/O never holds DB row locks
     if loaded is not None:
         try:
             from app.services.notification_service import notify_order_confirmed
+            from app.services.queue_service import record_queue_estimate_for_order
+
             notify_order_confirmed(db, loaded, token_code_val)
+            record_queue_estimate_for_order(db, loaded)
             db.commit()
         except Exception:
             db.rollback()
@@ -616,6 +629,13 @@ def mark_payment_failed(db: Session, *, order: Order, payment: Payment, reason: 
         )
     )
     db.commit()
+    try:
+        from app.services.notification_service import notify_payment_failed
+
+        notify_payment_failed(db, order, reason)
+        db.commit()
+    except Exception:
+        db.rollback()
     return order
 
 

@@ -22,7 +22,7 @@ def test_coupons_completely_removed_everywhere(client: TestClient):
             headers=admin["headers"],
             json={"code": "TESTP13", "title": "Test", "discount_type": "fixed", "discount_value": "10.00", "is_active": False},
         ).status_code
-        in (201, 404, 405)
+        in (400, 404, 405)
     )
     assert (
         client.post("/api/v1/carts/coupon", headers=student["headers"], json={"canteen_id": cid, "coupon_code": "CAMPUS10"}).status_code

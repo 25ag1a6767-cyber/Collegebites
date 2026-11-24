@@ -59,6 +59,19 @@ def estimate_prep(
     return queue_service.estimate_prep_time(db, canteen_id, item_ids)
 
 
+@router.get("/canteens/{canteen_id}/accuracy")
+def get_queue_accuracy(
+    canteen_id: UUID,
+    days: int = Query(default=30, ge=1, le=365),
+    principal: AuthenticatedPrincipal = Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER, ROLE_KITCHEN_STAFF)
+    ),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return queue_service.get_queue_accuracy_metrics(db, canteen_id, days=days)
+
+
 @router.patch("/canteens/{canteen_id}/controls")
 def update_controls(
     canteen_id: UUID,

@@ -1,4 +1,5 @@
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -60,25 +61,40 @@ def _quantize(val: Decimal) -> Decimal:
     return val.quantize(Decimal("0.01"))
 
 
+_ORDER_SEQ_LOCK = threading.Lock()
+_ORDER_SEQ_FALLBACK: dict[str, int] = {}
+
+
 def _generate_order_number(db: Session) -> str:
-    if db.bind and db.bind.dialect.name == "postgresql":
-        db.execute(text("SELECT pg_advisory_xact_lock(918273645)"))
+    """Lock-free monotonic order number generator (PG sequence; thread-safe monotonic counter on SQLite)."""
     today_str = today_college().strftime("%Y%m%d")
     prefix = f"CB-{today_str}-"
-    max_num = db.scalar(select(func.max(Order.order_number)).where(Order.order_number.like(f"{prefix}%")))
-    if max_num:
+    if db.bind and db.bind.dialect.name == "postgresql":
         try:
-            seq = int(max_num.rsplit("-", 1)[-1]) + 1
-        except ValueError:
-            seq = 1
-    else:
-        seq = 1
-    while True:
-        candidate = f"{prefix}{seq:06d}"
-        exists = db.scalar(select(Order.id).where(Order.order_number == candidate))
-        if not exists:
-            return candidate
-        seq += 1
+            seq_val = int(db.execute(text("SELECT nextval('order_number_seq')")).scalar_one())
+            return f"{prefix}{seq_val:06d}"
+        except Exception:
+            # Ensure sequence exists in fresh PostgreSQL environments without locking orders table
+            db.execute(text("CREATE SEQUENCE IF NOT EXISTS order_number_seq START WITH 1 INCREMENT BY 1"))
+            seq_val = int(db.execute(text("SELECT nextval('order_number_seq')")).scalar_one())
+            return f"{prefix}{seq_val:06d}"
+
+    with _ORDER_SEQ_LOCK:
+        max_num = db.scalar(select(func.max(Order.order_number)).where(Order.order_number.like(f"{prefix}%")))
+        db_seq = 0
+        if max_num:
+            try:
+                db_seq = int(max_num.rsplit("-", 1)[-1])
+            except ValueError:
+                db_seq = 0
+        seq = max(db_seq, _ORDER_SEQ_FALLBACK.get(today_str, 0)) + 1
+        while True:
+            candidate = f"{prefix}{seq:06d}"
+            exists = db.scalar(select(Order.id).where(Order.order_number == candidate))
+            if not exists:
+                _ORDER_SEQ_FALLBACK[today_str] = seq
+                return candidate
+            seq += 1
 
 
 def rollback_unpaid_incentives(db: Session, order: Order) -> None:

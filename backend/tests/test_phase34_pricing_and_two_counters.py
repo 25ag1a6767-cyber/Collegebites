@@ -20,6 +20,7 @@ from sqlalchemy import create_engine, select, text
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.integrations.razorpay_client import razorpay_gateway
+from app.integrations.stripe_client import stripe_gateway
 from app.models.base import Base
 from app.models.college import Canteen, Counter, Kitchen
 from app.models.menu import FoodCategory, FoodItem
@@ -38,6 +39,10 @@ def _rzp_sig(order_id: str, payment_id: str) -> str:
 
 def _rzp_webhook_sig(raw_body: bytes) -> str:
     return razorpay_gateway.compute_test_webhook_signature(raw_body=raw_body)
+
+
+def _stripe_sig(payment_intent_id: str) -> str:
+    return stripe_gateway.compute_test_payment_signature(stripe_payment_intent_id=payment_intent_id)
 
 
 def _get_counters(client: TestClient) -> tuple[dict, dict]:
@@ -363,9 +368,9 @@ def test_06_discounts_coupons_loyalty_and_extra_tax_disabled_everywhere(client: 
     assert Decimal(p0["tax_amount"]) == Decimal("0.00")
     assert Decimal(p0["total_price"]) == Decimal(p0["price"])
     sub = client.post(
-        "/api/v1/meal-plans/subscribe",
+        f"/api/v1/meal-plans/{p0['id']}/subscribe",
         headers=student["headers"],
-        json={"meal_plan_id": p0["id"], "payment_method": "razorpay"},
+        json={"payment_method": "razorpay"},
     )
     assert sub.status_code == 201, sub.text
     assert Decimal(sub.json()["tax_amount"]) == Decimal("0.00")
@@ -444,7 +449,11 @@ def test_07_successful_payment_exact_amount_razorpay_and_stripe(client: TestClie
     ver_s = client.post(
         "/api/v1/payments/stripe/verify",
         headers=student["headers"],
-        json={"order_id": ord_s["id"], "stripe_payment_intent_id": ord_s["stripe_payment_intent_id"]},
+        json={
+            "order_id": ord_s["id"],
+            "stripe_payment_intent_id": ord_s["stripe_payment_intent_id"],
+            "stripe_signature": _stripe_sig(ord_s["stripe_payment_intent_id"]),
+        },
     )
     assert ver_s.status_code == 200, ver_s.text
     assert ver_s.json()["payment_status"] == "CONFIRMED"
@@ -570,7 +579,11 @@ def test_10_order_history_matches_exact_totals(client: TestClient):
     client.post(
         "/api/v1/payments/stripe/verify",
         headers=student["headers"],
-        json={"order_id": co["id"], "stripe_payment_intent_id": co["stripe_payment_intent_id"]},
+        json={
+            "order_id": co["id"],
+            "stripe_payment_intent_id": co["stripe_payment_intent_id"],
+            "stripe_signature": _stripe_sig(co["stripe_payment_intent_id"]),
+        },
     )
 
     my_orders = client.get("/api/v1/orders/my", headers=student["headers"]).json()
@@ -606,7 +619,11 @@ def test_11_invoice_generation_statutory_compliance_and_historical_preservation(
     client.post(
         "/api/v1/payments/stripe/verify",
         headers=student["headers"],
-        json={"order_id": co["id"], "stripe_payment_intent_id": co["stripe_payment_intent_id"]},
+        json={
+            "order_id": co["id"],
+            "stripe_payment_intent_id": co["stripe_payment_intent_id"],
+            "stripe_signature": _stripe_sig(co["stripe_payment_intent_id"]),
+        },
     )
 
     inv_res = client.get(f"/api/v1/invoices/{co['id']}", headers=student["headers"])
@@ -797,12 +814,20 @@ def test_18_to_22_independent_menus_orders_kds_queues_and_tokens(client: TestCli
     conf_m = client.post(
         "/api/v1/payments/stripe/verify",
         headers=student["headers"],
-        json={"order_id": co_m["id"], "stripe_payment_intent_id": co_m["stripe_payment_intent_id"]},
+        json={
+            "order_id": co_m["id"],
+            "stripe_payment_intent_id": co_m["stripe_payment_intent_id"],
+            "stripe_signature": _stripe_sig(co_m["stripe_payment_intent_id"]),
+        },
     ).json()
     conf_s = client.post(
         "/api/v1/payments/stripe/verify",
         headers=student["headers"],
-        json={"order_id": co_s["id"], "stripe_payment_intent_id": co_s["stripe_payment_intent_id"]},
+        json={
+            "order_id": co_s["id"],
+            "stripe_payment_intent_id": co_s["stripe_payment_intent_id"],
+            "stripe_signature": _stripe_sig(co_s["stripe_payment_intent_id"]),
+        },
     ).json()
 
     # Scenario 22: Pickup tokens generated for correct counter (A... vs S...)
@@ -820,11 +845,10 @@ def test_18_to_22_independent_menus_orders_kds_queues_and_tokens(client: TestCli
     assert co_s["id"] in q_s_ids and co_s["id"] not in q_m_ids
 
     # Scenario 20: Independent KDS processing
-    for st in ("ACCEPTED", "PREPARING", "READY"):
+    for action in ("accept", "start-preparing", "mark-ready"):
         r = client.post(
-            f"/api/v1/kitchen/orders/{co_m['id']}/status",
+            f"/api/v1/kitchen/orders/{co_m['id']}/{action}",
             headers=admin["headers"],
-            json={"status": st},
         )
         assert r.status_code == 200, r.text
 
@@ -835,8 +859,8 @@ def test_18_to_22_independent_menus_orders_kds_queues_and_tokens(client: TestCli
     assert ord_s_now["status"] == "PLACED"
 
     # Digital pickup board filters cleanly by counter
-    board_m = client.get(f"/api/v1/tokens/board?canteen_id={main['id']}").json()
-    board_s = client.get(f"/api/v1/tokens/board?canteen_id={snacks['id']}").json()
+    board_m = client.get(f"/api/v1/pickup/board?canteen_id={main['id']}").json()
+    board_s = client.get(f"/api/v1/pickup/board?canteen_id={snacks['id']}").json()
     assert any(x["token_code"] == conf_m["pickup_token_code"] for x in board_m["ready_for_pickup"])
     assert not any(x["token_code"] == conf_s["pickup_token_code"] for x in board_m["ready_for_pickup"] + board_m["now_preparing"])
     assert any(x["token_code"] == conf_s["pickup_token_code"] for x in board_s["now_preparing"])

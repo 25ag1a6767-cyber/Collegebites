@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
   BellRing,
+  Bot,
   ChefHat,
   CreditCard,
   LayoutDashboard,
@@ -12,6 +13,7 @@ import {
   Monitor,
   Package,
   QrCode,
+  ShieldCheck,
   ShoppingBag,
   Smartphone,
   Tv,
@@ -231,6 +233,22 @@ const NavbarContent: React.FC = () => {
               <Package className="h-3.5 w-3.5" /> Inventory
             </Link>
           )}
+          {isStaff(["food_safety_inspector", "kitchen_staff", "inventory_manager", "canteen_manager", "college_admin"]) && (
+            <Link
+              to="/food-safety"
+              className="inline-flex items-center gap-1 rounded-lg bg-teal-50 px-2.5 py-1.5 text-xs font-semibold text-teal-800 hover:bg-teal-100"
+            >
+              <ShieldCheck className="h-3.5 w-3.5" /> Food Safety
+            </Link>
+          )}
+          {isStaff(["food_safety_inspector", "kitchen_staff", "inventory_manager", "canteen_manager", "college_admin"]) && (
+            <Link
+              to="/assistant"
+              className="inline-flex items-center gap-1 rounded-lg bg-indigo-50 px-2.5 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-100"
+            >
+              <Bot className="h-3.5 w-3.5" /> AI Ops
+            </Link>
+          )}
           {isStaff(["canteen_manager", "college_admin"]) && (
             <Link
               to="/admin"
@@ -335,11 +353,11 @@ const NavbarContent: React.FC = () => {
                           type="button"
                           onClick={() => {
                             setNotifOpen(false);
-                            navigate("/profile");
+                            navigate("/notifications");
                           }}
                           className="text-[11px] font-bold text-[#76010d]"
                         >
-                          Manage
+                          Open Center
                         </button>
                       </div>
                     </div>

@@ -63,6 +63,72 @@ def list_kitchen_orders(
     return result
 
 
+def list_grouped_kitchen_items(
+    db: Session,
+    canteen_id: UUID,
+    *,
+    status_filter: Optional[str] = None,
+    kitchen_id: Optional[UUID] = None,
+    station_id: Optional[UUID] = None,
+) -> list[dict]:
+    """Item-grouped KDS view aggregating live confirmed active orders by FoodItem (zero duplicate order tables)."""
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.items))
+        .where(Order.canteen_id == canteen_id)
+        .order_by(Order.is_priority.desc(), Order.created_at.asc())
+    )
+    if kitchen_id:
+        stmt = stmt.where(Order.kitchen_id == kitchen_id)
+    if status_filter:
+        stmt = stmt.where(Order.status == status_filter)
+    else:
+        stmt = stmt.where(Order.status.in_(("PLACED", "ACCEPTED", "PREPARING")))
+    orders = db.scalars(stmt).all()
+    grouped: dict[str, dict] = {}
+    for o in orders:
+        for oi in o.items:
+            if station_id and oi.station_id != station_id:
+                continue
+            key = f"{oi.food_item_id or oi.item_name}:{oi.variant_name or ''}"
+            entry = grouped.get(key)
+            if not entry:
+                entry = {
+                    "food_item_id": str(oi.food_item_id) if oi.food_item_id else None,
+                    "item_name": oi.item_name,
+                    "variant_name": oi.variant_name,
+                    "total_quantity": 0,
+                    "pending_quantity": 0,
+                    "preparing_quantity": 0,
+                    "ready_quantity": 0,
+                    "priority_order_count": 0,
+                    "orders": [],
+                }
+                grouped[key] = entry
+            qty = int(oi.quantity or 0)
+            entry["total_quantity"] += qty
+            p_st = (oi.prep_status or "PENDING").upper()
+            if p_st == "READY":
+                entry["ready_quantity"] += qty
+            elif p_st == "PREPARING":
+                entry["preparing_quantity"] += qty
+            else:
+                entry["pending_quantity"] += qty
+            if o.is_priority:
+                entry["priority_order_count"] += 1
+            entry["orders"].append(
+                {
+                    "order_id": str(o.id),
+                    "order_number": o.order_number,
+                    "order_status": o.status,
+                    "quantity": qty,
+                    "prep_status": p_st,
+                    "is_priority": bool(o.is_priority),
+                }
+            )
+    return sorted(grouped.values(), key=lambda x: (-x["priority_order_count"], -x["total_quantity"], x["item_name"]))
+
+
 def accept_order(db: Session, order_id: UUID, staff_user_id: UUID) -> OrderOut:
     order = db.scalar(
         select(Order)
@@ -138,6 +204,12 @@ def mark_order_ready(db: Session, order_id: UUID, staff_user_id: UUID) -> OrderO
     except ImportError:
         pass
 
+    try:
+        from app.services.queue_service import finalize_queue_estimate_for_order
+        finalize_queue_estimate_for_order(db, order)
+    except Exception:
+        pass
+
     record_audit_log(db, action="kitchen.order_ready", entity_type="order", entity_id=order.order_number, actor_user_id=staff_user_id)
     db.commit()
     db.expire_all()
@@ -181,6 +253,7 @@ def report_order_delay(db: Session, order_id: UUID, payload: DelayReportRequest,
         event_type="order_delayed",
         title=f"Order Delayed +{payload.additional_minutes} min",
         message=f"Order {order.order_number} delayed by {payload.additional_minutes} mins ({payload.reason}).",
+        priority="high",
         send_external=True,
         dedup_suffix=str(order.delayed_minutes),
     )

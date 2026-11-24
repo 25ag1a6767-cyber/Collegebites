@@ -27,6 +27,9 @@ def get_dashboard_report(
     preset: Optional[str] = Query(default=None),
     start_date: Optional[date] = Query(default=None),
     end_date: Optional[date] = Query(default=None),
+    category_id: Optional[UUID] = Query(default=None),
+    food_item_id: Optional[UUID] = Query(default=None),
+    compare_previous: bool = Query(default=False),
     principal: AuthenticatedPrincipal = Depends(require_roles(*REPORT_ROLES)),
     db: Session = Depends(get_db),
 ):
@@ -37,6 +40,9 @@ def get_dashboard_report(
         preset=preset,
         start_date=start_date,
         end_date=end_date,
+        category_id=category_id,
+        food_item_id=food_item_id,
+        compare_previous=compare_previous,
     )
 
 

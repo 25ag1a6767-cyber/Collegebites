@@ -27,8 +27,9 @@ import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } fro
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 import { FoodWasteTab } from "./components/FoodWasteTab";
 import { VendorProcurementTab } from "./components/VendorProcurementTab";
+import { TraceabilityReorderingTab } from "./components/TraceabilityReorderingTab";
 
-type SectionTab = "all" | "items" | "menu" | "stock" | "waste" | "pricing" | "suppliers" | "recipes" | "audit";
+type SectionTab = "all" | "items" | "menu" | "stock" | "waste" | "pricing" | "suppliers" | "traceability_reorder" | "recipes" | "audit";
 
 export const InventoryPage: React.FC = () => {
   const { user, selectedCanteenId } = useAppStore();
@@ -449,6 +450,7 @@ export const InventoryPage: React.FC = () => {
               }`,
             },
             { k: "suppliers", l: `Suppliers & POs (${pos.length})` },
+            { k: "traceability_reorder", l: "Traceability, Recalls & Reordering" },
             { k: "recipes", l: "Dish Recipes" },
             { k: "audit", l: `Audit & Reports (${auditLogs.length})` },
           ] as const
@@ -465,6 +467,9 @@ export const InventoryPage: React.FC = () => {
       </div>
 
       {/* 3.1 Inventory Manager Dashboard KPIs (Real DB Records Only) */}
+      {section === "traceability_reorder" && (
+        <TraceabilityReorderingTab activeCanteenId={activeId} suppliers={suppliers} />
+      )}
       {dashError ? (
         <Card className="p-4 border-red-200 bg-red-50 text-xs text-red-800">
           Failed to load live inventory metrics from the server.

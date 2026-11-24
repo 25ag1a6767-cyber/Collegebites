@@ -224,6 +224,58 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
         </div>
       )}
 
+      {/* Financial Analytics: Strictly Separated Revenue vs Costs vs Estimated Gross Margin */}
+      {report.empty && (
+        <Card className="p-4 border-amber-200 bg-amber-50 text-xs font-semibold text-amber-900">
+          {report.empty_message || "No data available for the selected date range."}
+        </Card>
+      )}
+
+      {report.financial_analytics && (
+        <Card className="p-4 space-y-3 border-[#76010d]/20 bg-[#fdf8f0]/60">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-bold text-sm text-slate-900">
+              Financial Breakdown (Verified Revenue vs Direct Ingredient/Waste Costs)
+            </div>
+            <div className="flex gap-1.5">
+              <Badge tone="green">REVENUE: ACTUAL</Badge>
+              <Badge tone={report.financial_analytics.estimated_gross_margin !== null ? "blue" : "slate"}>
+                MARGIN: {(report.financial_analytics.margin_classification || "unavailable").toUpperCase()}
+              </Badge>
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+            <div className="rounded-xl bg-white border border-slate-200 p-3">
+              <div className="text-slate-500">Verified Net Revenue</div>
+              <div className="text-xl font-black text-[#76010d]">₹{report.financial_analytics.verified_net_revenue}</div>
+              <div className="text-[11px] text-slate-500">Gross: ₹{report.financial_analytics.verified_gross_sales}</div>
+            </div>
+            <div className="rounded-xl bg-white border border-slate-200 p-3">
+              <div className="text-slate-500">Verified Ingredient Cost</div>
+              <div className="text-xl font-black text-slate-900">₹{report.financial_analytics.verified_ingredient_cost}</div>
+              <div className="text-[11px] text-slate-500">From real stock movements</div>
+            </div>
+            <div className="rounded-xl bg-white border border-slate-200 p-3">
+              <div className="text-slate-500">Recorded Wastage Loss</div>
+              <div className="text-xl font-black text-red-700">₹{report.financial_analytics.recorded_wastage_loss}</div>
+              <div className="text-[11px] text-slate-500">Total direct costs: ₹{report.financial_analytics.total_recorded_direct_costs}</div>
+            </div>
+            <div className="rounded-xl bg-white border border-slate-200 p-3">
+              <div className="text-slate-500">Estimated Gross Margin</div>
+              <div className="text-xl font-black text-emerald-800">
+                {report.financial_analytics.estimated_gross_margin !== null
+                  ? `₹${report.financial_analytics.estimated_gross_margin} (${report.financial_analytics.estimated_gross_margin_percent}%)`
+                  : "Unavailable"}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {report.financial_analytics.estimated_gross_margin !== null ? "Excludes overhead" : "Insufficient cost data"}
+              </div>
+            </div>
+          </div>
+          <div className="text-[11px] text-slate-600">{report.financial_analytics.margin_note}</div>
+        </Card>
+      )}
+
       {/* Range KPIs */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card className="p-4">

@@ -58,6 +58,25 @@ def get_kitchen_orders(
     )
 
 
+@router.get("/canteens/{canteen_id}/grouped-items")
+def get_grouped_kitchen_items(
+    canteen_id: UUID,
+    status: Optional[str] = Query(default=None),
+    kitchen_id: Optional[UUID] = Query(default=None),
+    station_id: Optional[UUID] = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_roles(*KITCHEN_ROLES)),
+    db: Session = Depends(get_db),
+):
+    enforce_canteen_scope(principal, canteen_id)
+    return kitchen_service.list_grouped_kitchen_items(
+        db,
+        canteen_id,
+        status_filter=status,
+        kitchen_id=kitchen_id,
+        station_id=station_id,
+    )
+
+
 @router.post("/orders/{order_id}/accept", response_model=OrderOut)
 def accept_order(
     order_id: UUID,

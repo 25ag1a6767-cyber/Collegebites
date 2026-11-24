@@ -480,6 +480,7 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
             ("kitchen@collegebites.edu", "+919000000005", "Head Chef", "Staff@12345", "staff", ["kitchen_staff"], main_canteen.id, None),
             ("inventory@collegebites.edu", "+919000000006", "Inventory Lead", "Staff@12345", "staff", ["inventory_manager"], main_canteen.id, None),
             ("pickup@collegebites.edu", "+919000000007", "Pickup Counter Staff", "Staff@12345", "staff", ["pickup_staff"], main_canteen.id, main_c2.id),
+            ("inspector@collegebites.edu", "+919000000008", "Food Safety Inspector", "Staff@12345", "staff", ["food_safety_inspector"], None, None),
             ("student@collegebites.edu", "+919876543210", "Aarav Sharma", "Student@12345", "customer", ["customer"], None, None),
         ]
         for idx, (email, phone, name, pw, kind, rnames, cid, cnt_id) in enumerate(demo_accounts):
