@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -47,6 +48,14 @@ from app.schemas.college import (
 from app.services.audit_service import record_audit_log
 
 ACTIVE_CROWD_STATUSES = ("PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING")
+MAX_ACTIVE_CANTEENS = 2
+RETIRED_COUNTER_SLUGS = {"juice-bar", "fresh-juice-shake-bar", "fresh-juice-and-shake-bar"}
+
+
+def _is_retired_counter(name: Optional[str], slug: Optional[str]) -> bool:
+    slug_norm = (slug or "").strip().lower()
+    name_norm = (name or "").strip().lower()
+    return slug_norm in RETIRED_COUNTER_SLUGS or "fresh juice" in name_norm or "shake bar" in name_norm
 
 
 def get_college_config_snapshot(db: Session) -> dict:
@@ -195,6 +204,11 @@ def update_college_settings(
 ) -> CollegeSettings:
     if payload.cash_at_counter_enabled is True or payload.pay_at_pickup_enabled is True:
         raise HTTPException(status_code=400, detail="Cash and Pay-at-Pickup are disabled; CollegeBites accepts online payments only.")
+    if payload.default_tax_rate_percent is not None and payload.default_tax_rate_percent > Decimal("0.00"):
+        raise HTTPException(
+            status_code=400,
+            detail="Additional checkout tax is disabled. Listed item prices are inclusive of applicable statutory taxes.",
+        )
     row = get_or_create_college_settings(db)
     for k, v in payload.model_dump(exclude_unset=True).items():
         setattr(row, k, v)
@@ -222,7 +236,11 @@ def list_canteens(db: Session, include_inactive: bool = False) -> list[CanteenOu
     stmt = select(Canteen).order_by(Canteen.name.asc())
     if not include_inactive:
         stmt = stmt.where(Canteen.is_active.is_(True))
-    rows = db.scalars(stmt).all()
+    rows = [
+        c
+        for c in db.scalars(stmt).all()
+        if not (not c.is_active and _is_retired_counter(c.name, c.slug))
+    ]
     if not rows:
         return []
     cids = [c.id for c in rows]
@@ -289,7 +307,7 @@ def get_canteen_detail(db: Session, canteen_id_or_slug: str) -> CanteenDetailOut
         canteen = db.get(Canteen, cid)
     except ValueError:
         canteen = db.scalar(select(Canteen).where(Canteen.slug == canteen_id_or_slug))
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
 
     tz_name = get_college_config_snapshot(db).get("college_timezone")
@@ -345,10 +363,28 @@ def create_canteen(
 ) -> CanteenOut:
     if payload.allow_cash_at_counter or payload.allow_pay_at_pickup:
         raise HTTPException(status_code=400, detail="Cash and Pay-at-Pickup are disabled; CollegeBites accepts online payments only.")
+    if payload.tax_rate_percent > Decimal("0.00"):
+        raise HTTPException(
+            status_code=400,
+            detail="Additional checkout tax is disabled. Listed prices are inclusive of applicable statutory taxes.",
+        )
+    if _is_retired_counter(payload.name, payload.slug):
+        raise HTTPException(
+            status_code=400,
+            detail="Fresh Juice & Shake Bar has been permanently removed. College Cafeteria operates only Main Canteen and Snacks & Bakery Counter.",
+        )
+    active_count = db.scalar(select(func.count(Canteen.id)).where(Canteen.is_active.is_(True))) or 0
+    if active_count >= MAX_ACTIVE_CANTEENS:
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum of two cafeteria counters allowed (Main Canteen and Snacks & Bakery Counter). Cannot create a third counter.",
+        )
     existing = db.scalar(select(Canteen).where(or_(Canteen.slug == payload.slug, Canteen.code == payload.code)))
     if existing:
         raise HTTPException(status_code=409, detail="Canteen slug or code already exists")
-    canteen = Canteen(**payload.model_dump())
+    data = payload.model_dump()
+    data["tax_rate_percent"] = Decimal("0.00")
+    canteen = Canteen(**data)
     db.add(canteen)
     db.flush()
 
@@ -376,8 +412,27 @@ def update_canteen(
 ) -> CanteenOut:
     if payload.allow_cash_at_counter is True or payload.allow_pay_at_pickup is True:
         raise HTTPException(status_code=400, detail="Cash and Pay-at-Pickup are disabled; CollegeBites accepts online payments only.")
+    if payload.tax_rate_percent is not None and payload.tax_rate_percent > Decimal("0.00"):
+        raise HTTPException(
+            status_code=400,
+            detail="Additional checkout tax is disabled. Listed prices are inclusive of applicable statutory taxes.",
+        )
     canteen = db.get(Canteen, canteen_id)
     if not canteen:
+        raise HTTPException(status_code=404, detail="Canteen not found")
+    if payload.is_active is True and not canteen.is_active:
+        if _is_retired_counter(canteen.name, canteen.slug):
+            raise HTTPException(
+                status_code=400,
+                detail="Fresh Juice & Shake Bar has been permanently retired and cannot be reactivated.",
+            )
+        active_count = db.scalar(select(func.count(Canteen.id)).where(Canteen.is_active.is_(True))) or 0
+        if active_count >= MAX_ACTIVE_CANTEENS:
+            raise HTTPException(
+                status_code=400,
+                detail="Maximum of two active cafeteria counters allowed. Cannot activate a third counter.",
+            )
+    if not canteen.is_active and payload.is_active is not True:
         raise HTTPException(status_code=404, detail="Canteen not found")
     for k, v in payload.model_dump(exclude_unset=True).items():
         setattr(canteen, k, v)
@@ -398,7 +453,7 @@ def update_canteen(
 
 def add_counter(db: Session, canteen_id: UUID, payload: CounterCreate, actor_user_id: UUID) -> Counter:
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
     dup = db.scalar(select(Counter).where(Counter.canteen_id == canteen_id, Counter.code == payload.code))
     if dup:
@@ -420,7 +475,7 @@ def add_counter(db: Session, canteen_id: UUID, payload: CounterCreate, actor_use
 
 def add_kitchen(db: Session, canteen_id: UUID, payload: KitchenCreate, actor_user_id: UUID) -> Kitchen:
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
     dup = db.scalar(select(Kitchen).where(Kitchen.canteen_id == canteen_id, Kitchen.code == payload.code))
     if dup:
@@ -442,7 +497,7 @@ def add_kitchen(db: Session, canteen_id: UUID, payload: KitchenCreate, actor_use
 
 def add_dining_table(db: Session, canteen_id: UUID, payload: DiningTableCreate, actor_user_id: UUID) -> DiningTable:
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
     dup = db.scalar(
         select(DiningTable).where(DiningTable.canteen_id == canteen_id, DiningTable.table_number == payload.table_number)
@@ -468,7 +523,7 @@ def upsert_operating_hours(
     db: Session, canteen_id: UUID, items: list[OperatingHourItem], actor_user_id: UUID
 ) -> list[OperatingHour]:
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
     results: list[OperatingHour] = []
     for item in items:

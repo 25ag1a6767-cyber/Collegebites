@@ -303,7 +303,7 @@ def escalate_overdue_orders(
     actor_user_id: UUID,
 ) -> dict:
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
 
     now = datetime.now(timezone.utc)
@@ -361,7 +361,7 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         return cached
 
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
 
     now = datetime.now(timezone.utc)
@@ -582,7 +582,7 @@ def estimate_prep_time(db: Session, canteen_id: UUID, item_ids: list[UUID]) -> d
 
 def update_queue_controls(db: Session, canteen_id: UUID, updates: dict, actor_user_id: UUID) -> dict:
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
     allowed = {
         "ordering_paused",

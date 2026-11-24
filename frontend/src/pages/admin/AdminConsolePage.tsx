@@ -56,7 +56,7 @@ export const AdminConsolePage: React.FC = () => {
 
   const { data: canteens = [], refetch: refetchCanteens } = useQuery<Canteen[]>({
     queryKey: ["canteens-all"],
-    queryFn: async () => (await api.get("/canteens?include_inactive=true")).data,
+    queryFn: async () => (await api.get("/canteens")).data,
   });
 
   const [canteenId, setCanteenId] = useState(user?.assigned_canteen_id || selectedCanteenId || "");

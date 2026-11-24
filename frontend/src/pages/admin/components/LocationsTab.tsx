@@ -109,36 +109,60 @@ export const LocationsTab: React.FC<Props> = ({ canteens, activeCanteenId, refet
         </Card>
 
         <Card className="p-5 space-y-3">
-          <h2 className="font-bold text-slate-900">Create New Campus Canteen / Counter Location</h2>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (e.g. MBA Block Cafe)" />
-          <div className="grid grid-cols-2 gap-2">
-            <Input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="slug (mba-cafe)" />
-            <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder="code (MBA)" />
-          </div>
-          <Input value={loc} onChange={(e) => setLoc(e.target.value)} placeholder="Building / Floor" />
-          <Button
-            onClick={async () => {
-              try {
-                await api.post("/admin/canteens", {
-                  name,
-                  slug,
-                  code,
-                  location: loc,
-                  token_prefix: code.slice(0, 1).toUpperCase() || "M",
-                });
-                setName("");
-                setSlug("");
-                setCode("");
-                setLoc("");
-                pushToast("Canteen created!", "success");
-                refetchCanteens();
-              } catch (err) {
-                pushToast(getApiError(err), "error");
-              }
-            }}
-          >
-            Add Canteen Location
-          </Button>
+          <h2 className="font-bold text-slate-900">Cafeteria Counter Structure</h2>
+          {canteens.filter((c) => c.is_active).length >= 2 ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-700 space-y-2">
+              <div className="font-bold text-slate-900">Fixed Two-Counter College Cafeteria Policy</div>
+              <p>
+                CollegeBites is configured for exactly two active cafeteria counters located inside the{" "}
+                <strong>College Cafeteria</strong>:
+              </p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>
+                  <strong>Main Canteen</strong> — Location: College Cafeteria
+                </li>
+                <li>
+                  <strong>Snacks &amp; Bakery Counter</strong> — Location: College Cafeteria
+                </li>
+              </ul>
+              <p className="text-[11px] text-slate-500">
+                Creating a third cafeteria counter is disabled. Both counters operate independently with separate menus,
+                orders, queues, pickup tokens, and inventory.
+              </p>
+            </div>
+          ) : (
+            <>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Counter Name" />
+              <div className="grid grid-cols-2 gap-2">
+                <Input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="slug (main-canteen)" />
+                <Input value={code} onChange={(e) => setCode(e.target.value)} placeholder="code (MAIN)" />
+              </div>
+              <Input value={loc} onChange={(e) => setLoc(e.target.value)} placeholder="College Cafeteria" />
+              <Button
+                onClick={async () => {
+                  try {
+                    await api.post("/admin/canteens", {
+                      name,
+                      slug,
+                      code,
+                      location: loc || "College Cafeteria",
+                      token_prefix: code.slice(0, 1).toUpperCase() || "M",
+                    });
+                    setName("");
+                    setSlug("");
+                    setCode("");
+                    setLoc("");
+                    pushToast("Counter created!", "success");
+                    refetchCanteens();
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              >
+                Add Counter Location
+              </Button>
+            </>
+          )}
         </Card>
       </div>
 

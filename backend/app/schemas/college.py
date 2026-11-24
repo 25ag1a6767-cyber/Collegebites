@@ -205,7 +205,7 @@ class CanteenCreate(BaseModel):
     contact_phone: Optional[str] = None
     contact_email: Optional[str] = None
     canteen_type: str = Field(default="canteen")
-    tax_rate_percent: Decimal = Field(default=Decimal("5.00"), ge=0, le=50)
+    tax_rate_percent: Decimal = Field(default=Decimal("0.00"), ge=0, le=0)
     allow_online_payment: bool = True
     allow_cash_at_counter: bool = False
     allow_pay_at_pickup: bool = False

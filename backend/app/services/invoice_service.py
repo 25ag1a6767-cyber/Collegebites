@@ -43,12 +43,21 @@ def _generate_invoice_number(db: Session) -> str:
         seq += 1
 
 
+STATUTORY_TAX_INCLUSIVE_NOTICE = (
+    "All listed item prices are inclusive of applicable statutory taxes. "
+    "No additional checkout tax, discounts, or extra charges applied."
+)
+
+
 def _build_tax_breakdown(tax_amount: Decimal, tax_rate_label: str = "GST") -> dict:
     tot_tax = _quantize(tax_amount)
     cgst = _quantize(tot_tax / Decimal("2.00"))
     sgst = _quantize(tot_tax - cgst)
+    is_inclusive = tot_tax == Decimal("0.00")
     return {
-        "tax_label": tax_rate_label,
+        "tax_label": "Inclusive of applicable statutory taxes" if is_inclusive else tax_rate_label,
+        "tax_inclusive_pricing": is_inclusive,
+        "statutory_notice": STATUTORY_TAX_INCLUSIVE_NOTICE if is_inclusive else f"Historical separate {tax_rate_label} applied.",
         "cgst_amount": str(cgst),
         "sgst_amount": str(sgst),
         "total_tax_amount": str(tot_tax),
@@ -298,12 +307,16 @@ def render_invoice_pdf(db: Session, inv: Invoice) -> bytes:
     c.drawString(40, y, f"Payment Status: {data['payment_status']} | Method: {data['payment_method'].upper()} | Ref: {data['payment_reference'] or '-'}")
     y -= 22
 
+    has_hist_tax = Decimal(str(data["tax_amount"])) > Decimal("0.00")
+    has_hist_discount = Decimal(str(data["discount_amount"])) > Decimal("0.00")
+
     c.setFont("Helvetica-Bold", 10)
     c.drawString(40, y, "Item Description")
     c.drawString(290, y, "Qty")
-    c.drawString(340, y, "Unit Price")
-    c.drawString(415, y, "Tax")
-    c.drawString(485, y, "Line Total")
+    c.drawString(340, y, "Listed Price")
+    if has_hist_tax:
+        c.drawString(415, y, "Tax")
+    c.drawString(485, y, "Item Total")
     y -= 14
     c.setFont("Helvetica", 9)
     for it in data["items"]:
@@ -314,24 +327,31 @@ def render_invoice_pdf(db: Session, inv: Invoice) -> bytes:
         c.drawString(40, y, str(it.get("item_name", "Item"))[:46])
         c.drawString(290, y, str(it.get("quantity", 1)))
         c.drawString(340, y, f"Rs.{it.get('unit_price', '0.00')}")
-        c.drawString(415, y, f"Rs.{it.get('tax_amount', '0.00')}")
+        if has_hist_tax:
+            c.drawString(415, y, f"Rs.{it.get('tax_amount', '0.00')}")
         c.drawString(485, y, f"Rs.{it.get('line_total', '0.00')}")
         y -= 14
 
     y -= 14
     tb = data["tax_breakdown"]
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(360, y, f"Subtotal: Rs.{data['subtotal_amount']}")
+    c.drawString(340, y, f"Order Subtotal: Rs.{data['subtotal_amount']}")
     y -= 14
-    c.drawString(360, y, f"Discount: -Rs.{data['discount_amount']}")
-    y -= 14
-    c.setFont("Helvetica", 9)
-    c.drawString(360, y, f"CGST: Rs.{tb.get('cgst_amount', '0.00')} | SGST: Rs.{tb.get('sgst_amount', '0.00')}")
-    y -= 14
+    if has_hist_discount:
+        c.drawString(340, y, f"Historical Discount: -Rs.{data['discount_amount']}")
+        y -= 14
+    if has_hist_tax:
+        c.setFont("Helvetica", 9)
+        c.drawString(340, y, f"CGST: Rs.{tb.get('cgst_amount', '0.00')} | SGST: Rs.{tb.get('sgst_amount', '0.00')}")
+        y -= 14
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(340, y, f"Total Tax: Rs.{data['tax_amount']}")
+        y -= 16
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(360, y, f"Total Tax: Rs.{data['tax_amount']}")
-    y -= 16
-    c.drawString(360, y, f"Grand Total Paid: Rs.{data['total_amount']}")
+    c.drawString(340, y, f"Final Payable Amount: Rs.{data['total_amount']}")
+    y -= 18
+    c.setFont("Helvetica-Oblique", 8)
+    c.drawString(40, y, tb.get("statutory_notice") or STATUTORY_TAX_INCLUSIVE_NOTICE)
 
     c.showPage()
     c.save()

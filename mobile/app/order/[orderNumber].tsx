@@ -341,15 +341,30 @@ export default function OrderDetailScreen() {
         ))}
         <View style={styles.divider} />
         <View style={styles.itemRow}>
-          <Text style={{ fontSize: 12, color: "#64748b" }}>Subtotal / Discount / Tax</Text>
-          <Text style={{ fontSize: 12, color: "#64748b" }}>
-            ₹{order.subtotal_amount} / -₹{order.discount_amount} / ₹{order.tax_amount}
-          </Text>
+          <Text style={{ fontSize: 12, color: "#64748b" }}>Order Subtotal</Text>
+          <Text style={{ fontSize: 12, color: "#64748b" }}>₹{order.subtotal_amount}</Text>
         </View>
+        {Number(order.discount_amount) > 0 && (
+          <View style={styles.itemRow}>
+            <Text style={{ fontSize: 12, color: "#64748b" }}>Historical Discount</Text>
+            <Text style={{ fontSize: 12, color: "#64748b" }}>-₹{order.discount_amount}</Text>
+          </View>
+        )}
+        {Number(order.tax_amount) > 0 && (
+          <View style={styles.itemRow}>
+            <Text style={{ fontSize: 12, color: "#64748b" }}>Historical Tax</Text>
+            <Text style={{ fontSize: 12, color: "#64748b" }}>₹{order.tax_amount}</Text>
+          </View>
+        )}
         <View style={styles.itemRow}>
-          <Text style={{ fontWeight: "900", fontSize: 16 }}>Total Paid</Text>
+          <Text style={{ fontWeight: "900", fontSize: 16 }}>Final Payable Amount</Text>
           <Text style={{ fontWeight: "900", fontSize: 16 }}>₹{order.total_amount}</Text>
         </View>
+        {Number(order.tax_amount) === 0 && (
+          <Text style={{ fontSize: 10, color: "#64748b" }}>
+            Listed prices inclusive of applicable statutory taxes. No additional checkout tax or extra charges.
+          </Text>
+        )}
         <Text style={{ fontSize: 10, color: "#64748b", marginTop: 4 }}>
           Show your pickup token and QR code only after READY status. Each order can be collected once. No in-app refunds per college policy.
         </Text>
@@ -361,10 +376,11 @@ export default function OrderDetailScreen() {
         <View style={{ gap: 8 }}>
           {invoice && (
             <View style={styles.card}>
-              <Text style={styles.secTitle}>Tax Invoice • {invoice.invoice_number}</Text>
+              <Text style={styles.secTitle}>Invoice • {invoice.invoice_number}</Text>
               <Text style={{ fontSize: 11, color: "#475569" }}>
-                Subtotal: ₹{invoice.subtotal_amount} • CGST: ₹{invoice.tax_breakdown?.cgst_amount || "0.00"} • SGST: ₹
-                {invoice.tax_breakdown?.sgst_amount || "0.00"} • Total: ₹{invoice.total_amount}
+                {Number(invoice.tax_amount) > 0
+                  ? `Subtotal: ₹${invoice.subtotal_amount} • CGST: ₹${invoice.tax_breakdown?.cgst_amount || "0.00"} • SGST: ₹${invoice.tax_breakdown?.sgst_amount || "0.00"} • Total: ₹${invoice.total_amount}`
+                  : `Subtotal: ₹${invoice.subtotal_amount} • Total Paid: ₹${invoice.total_amount} (Inclusive of applicable statutory taxes)`}
               </Text>
               <Pressable
                 onPress={() => {

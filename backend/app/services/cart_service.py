@@ -65,7 +65,7 @@ def calculate_cart_summary(
     guest_session_id: Optional[str] = None,
 ) -> CartSummaryOut:
     canteen = db.get(Canteen, canteen_id)
-    if not canteen:
+    if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
 
     is_open, crowd, eta, active_count = compute_canteen_live_status(db, canteen)
@@ -96,7 +96,6 @@ def calculate_cart_summary(
 
     items_out: list[CartItemOut] = []
     subtotal = Decimal("0.00")
-    line_tax_specs: list[tuple[Decimal, Decimal]] = []
 
     food_ids = list({ci.food_item_id for ci in cart.items})
     variant_ids = list({ci.variant_id for ci in cart.items if ci.variant_id})
@@ -166,8 +165,6 @@ def calculate_cart_summary(
 
         line_sub = _quantize((unit_price + addon_per_unit) * ci.quantity)
         subtotal += line_sub
-        eff_tax = food.tax_rate_percent if food.tax_rate_percent is not None else canteen.tax_rate_percent
-        line_tax_specs.append((line_sub, eff_tax))
         items_out.append(
             CartItemOut(
                 id=ci.id,
@@ -184,49 +181,24 @@ def calculate_cart_summary(
             )
         )
 
+    # Active pricing policy: exact listed prices only.
+    # No discounts, no promotional coupons, and no additional checkout taxes/charges.
+    # Ignore any legacy coupon_code lingering on historical carts.
     discount = Decimal("0.00")
-    applied_coupon_code: Optional[str] = None
-    coupon_valid = True
-    coupon_message: Optional[str] = None
-    if cart.coupon_code and cart.coupon_code.strip():
-        c_res = evaluate_coupon_discount(
-            db,
-            coupon_code=cart.coupon_code,
-            canteen_id=canteen.id,
-            line_items=[
-                {"food_item_id": it.food_item_id, "category_id": food_map[it.food_item_id].category_id, "line_subtotal": it.line_subtotal}
-                for it in items_out
-                if it.food_item_id in food_map
-            ],
-            subtotal=subtotal,
-            user_id=user_id,
-            raise_on_invalid=False,
-        )
-        coupon_valid = c_res["valid"]
-        coupon_message = c_res["message"]
-        if c_res["valid"]:
-            discount = c_res["discount_amount"]
-            applied_coupon_code = c_res["code"]
-
-    discount_ratio = (discount / subtotal) if (subtotal > Decimal("0.00") and discount > Decimal("0.00")) else Decimal("0.00")
     tax = Decimal("0.00")
-    for l_sub, l_rate in line_tax_specs:
-        l_taxable = max(Decimal("0.00"), l_sub * (Decimal("1.00") - discount_ratio))
-        tax += (l_taxable * l_rate) / Decimal("100")
-    tax = _quantize(tax)
-    taxable_sub = max(Decimal("0.00"), subtotal - discount)
-    total = _quantize(taxable_sub + tax)
+    subtotal = _quantize(subtotal)
+    total = subtotal
 
     return CartSummaryOut(
         cart_id=cart.id,
         canteen_id=canteen.id,
         canteen_name=canteen.name,
-        coupon_code=applied_coupon_code,
-        coupon_valid=coupon_valid,
-        coupon_message=coupon_message,
+        coupon_code=None,
+        coupon_valid=True,
+        coupon_message=None,
         items=items_out,
-        subtotal_amount=_quantize(subtotal),
-        discount_amount=_quantize(discount),
+        subtotal_amount=subtotal,
+        discount_amount=discount,
         tax_amount=tax,
         total_amount=total,
         is_canteen_open=is_open,
@@ -246,97 +218,15 @@ def evaluate_coupon_discount(
     user_id: Optional[UUID] = None,
     raise_on_invalid: bool = True,
 ) -> dict:
-    def _fail(msg: str) -> dict:
-        if raise_on_invalid:
-            raise HTTPException(status_code=400, detail=msg)
-        return {"valid": False, "code": code, "discount_amount": Decimal("0.00"), "message": msg, "coupon": None}
-
-    code = (coupon_code or "").strip().upper()
-    if not code:
-        return _fail("Coupon code is empty")
-
-    coupon = db.scalar(select(Coupon).where(Coupon.code == code))
-    if not coupon or not coupon.is_active:
-        return _fail(f"Coupon '{code}' is invalid or inactive")
-    if coupon.canteen_id and coupon.canteen_id != canteen_id:
-        return _fail(f"Coupon '{code}' is not valid for this canteen")
-
-    now = datetime.now(timezone.utc)
-    if coupon.starts_at:
-        st = coupon.starts_at if coupon.starts_at.tzinfo else coupon.starts_at.replace(tzinfo=timezone.utc)
-        if now < st:
-            return _fail(f"Coupon '{code}' is not active yet")
-    if coupon.expires_at:
-        ex = coupon.expires_at if coupon.expires_at.tzinfo else coupon.expires_at.replace(tzinfo=timezone.utc)
-        if now >= ex:
-            return _fail(f"Coupon '{code}' has expired")
-
-    if subtotal <= Decimal("0.00"):
-        return _fail("Add items to cart before applying a coupon")
-    if subtotal < Decimal(str(coupon.min_order_amount or 0)):
-        return _fail(f"Minimum order value of Rs.{coupon.min_order_amount} required for '{code}'")
-
-    if coupon.usage_limit_total is not None and coupon.times_used >= coupon.usage_limit_total:
-        return _fail(f"Coupon '{code}' has reached its maximum usage limit")
-
-    if user_id and coupon.usage_limit_per_user is not None:
-        user_uses = (
-            db.scalar(
-                select(func.count(CouponRedemption.id))
-                .join(Order, Order.id == CouponRedemption.order_id)
-                .where(
-                    CouponRedemption.coupon_id == coupon.id,
-                    CouponRedemption.user_id == user_id,
-                    Order.status.not_in(["CANCELLED", "REJECTED", "PAYMENT_FAILED"]),
-                )
-            )
-            or 0
-        )
-        if user_uses >= coupon.usage_limit_per_user:
-            return _fail(f"You have already used coupon '{code}' the maximum number of times ({coupon.usage_limit_per_user})")
-
-    if coupon.first_order_only:
-        if not user_id:
-            return _fail(f"Sign in to use first-order coupon '{code}'")
-        prior_orders = (
-            db.scalar(
-                select(func.count(Order.id)).where(
-                    Order.customer_id == user_id,
-                    Order.payment_status == "CONFIRMED",
-                )
-            )
-            or 0
-        )
-        if prior_orders > 0:
-            return _fail(f"Coupon '{code}' is valid for first orders only")
-
-    eligible_subtotal = Decimal("0.00")
-    for li in line_items:
-        if coupon.target_food_item_id and str(li.get("food_item_id")) != str(coupon.target_food_item_id):
-            continue
-        if coupon.target_category_id and str(li.get("category_id")) != str(coupon.target_category_id):
-            continue
-        eligible_subtotal += Decimal(str(li.get("line_subtotal") or 0))
-
-    if eligible_subtotal <= Decimal("0.00"):
-        return _fail(f"Coupon '{code}' does not apply to the items in your order")
-
-    disc_val = Decimal(str(coupon.discount_value))
-    if coupon.discount_type == "percentage":
-        raw_disc = (eligible_subtotal * disc_val) / Decimal("100")
-        if coupon.max_discount_amount is not None:
-            raw_disc = min(raw_disc, Decimal(str(coupon.max_discount_amount)))
-    else:
-        raw_disc = disc_val
-
-    # Clamp discount so payable amount is never negative
-    discount = _quantize(min(eligible_subtotal, subtotal, max(Decimal("0.00"), raw_disc)))
+    msg = "Discounts and promotional coupon codes are disabled. All items are billed at exact listed prices."
+    if raise_on_invalid:
+        raise HTTPException(status_code=400, detail=msg)
     return {
-        "valid": True,
-        "code": coupon.code,
-        "discount_amount": discount,
-        "message": f"Coupon '{coupon.code}' applied (-Rs.{discount})",
-        "coupon": coupon,
+        "valid": False,
+        "code": (coupon_code or "").strip().upper(),
+        "discount_amount": Decimal("0.00"),
+        "message": msg,
+        "coupon": None,
     }
 
 
@@ -348,30 +238,10 @@ def apply_coupon_to_cart(
     user_id: Optional[UUID] = None,
     guest_session_id: Optional[str] = None,
 ) -> CartSummaryOut:
-    cart = get_active_cart(db, canteen_id, user_id=user_id, guest_session_id=guest_session_id, create_if_missing=True)
-    summary = calculate_cart_summary(db, canteen_id, user_id=user_id, guest_session_id=guest_session_id)
-    food_ids = [it.food_item_id for it in summary.items]
-    f_map = (
-        {f.id: f for f in db.scalars(select(FoodItem).where(FoodItem.id.in_(food_ids))).all()}
-        if food_ids
-        else {}
+    raise HTTPException(
+        status_code=400,
+        detail="Discounts and promotional coupon codes are disabled. All items are billed at exact listed prices.",
     )
-    evaluate_coupon_discount(
-        db,
-        coupon_code=coupon_code,
-        canteen_id=canteen_id,
-        line_items=[
-            {"food_item_id": it.food_item_id, "category_id": f_map[it.food_item_id].category_id, "line_subtotal": it.line_subtotal}
-            for it in summary.items
-            if it.food_item_id in f_map
-        ],
-        subtotal=summary.subtotal_amount,
-        user_id=user_id,
-        raise_on_invalid=True,
-    )
-    cart.coupon_code = coupon_code.strip().upper()
-    db.commit()
-    return calculate_cart_summary(db, canteen_id, user_id=user_id, guest_session_id=guest_session_id)
 
 
 def remove_coupon_from_cart(

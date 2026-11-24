@@ -52,15 +52,6 @@ export const CheckoutPage: React.FC = () => {
     queryFn: async () => (await api.get(`/orders/slots/${activeCanteen!.id}`)).data,
   });
 
-  const { data: loyalty } = useQuery<any>({
-    queryKey: ["loyalty-me"],
-    enabled: Boolean(user),
-    queryFn: async () => (await api.get("/promotions/loyalty/me")).data,
-  });
-
-  const [couponInput, setCouponInput] = useState("");
-
-  const [redeemPoints, setRedeemPoints] = useState(0);
   const [slotId, setSlotId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"razorpay" | "stripe">("razorpay");
   const [orderType, setOrderType] = useState<"pickup" | "dine_in" | "qr_table">(
@@ -184,7 +175,6 @@ export const CheckoutPage: React.FC = () => {
           order_type: orderType,
           order_channel: scannedLocationQrCode ? "qr" : "web",
           payment_method: paymentMethod,
-          redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
           idempotency_key: checkoutIdemKey,
           guest_name: !user ? guestName : null,
           guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
@@ -496,125 +486,18 @@ export const CheckoutPage: React.FC = () => {
           <Card className="p-5 space-y-4">
             <h2 className="font-bold text-slate-900">Bill Summary (Server Verified)</h2>
 
-            {/* Promotional Coupon Code Application */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs space-y-2">
-              <div className="font-bold text-slate-700">Apply Offer / Coupon Code</div>
-              <div className="flex gap-2">
-                <Input
-                  value={couponInput}
-                  onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
-                  placeholder={cart.coupon_code || "Enter code (e.g. FESTIVE20)"}
-                  className="bg-white"
-                />
-                {cart.coupon_code ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={async () => {
-                      if (!activeCanteen) return;
-                      try {
-                        await api.delete(`/carts/coupon?canteen_id=${activeCanteen.id}`);
-                        setCouponInput("");
-                        refetchCart();
-                        pushToast("Coupon removed", "info");
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      }
-                    }}
-                  >
-                    Remove
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={!couponInput.trim() || !activeCanteen}
-                    onClick={async () => {
-                      if (!activeCanteen) return;
-                      try {
-                        await api.post("/carts/coupon", {
-                          canteen_id: activeCanteen.id,
-                          coupon_code: couponInput.trim().toUpperCase(),
-                        });
-                        setCouponInput("");
-                        refetchCart();
-                        pushToast("Coupon applied to cart!", "success");
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      }
-                    }}
-                  >
-                    Apply
-                  </Button>
-                )}
-              </div>
-              {cart.coupon_message && (
-                <div className={cart.coupon_valid ? "text-emerald-700 font-semibold" : "text-red-600 font-semibold"}>
-                  {cart.coupon_message}
-                </div>
-              )}
-            </div>
-
-            {user && (loyalty?.points_balance || 0) > 0 && (
-              <div className="rounded-xl border border-[#76010d]/25 bg-[#fdf8f0] p-3 text-xs space-y-1.5">
-                <div className="flex items-center justify-between font-bold text-[#380106]">
-                  <span>Redeem Loyalty Points</span>
-                  <span>Avail: {loyalty.points_balance} pts (4 pts = ₹1)</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    min={0}
-                    max={loyalty.points_balance}
-                    step={4}
-                    value={redeemPoints}
-                    onChange={(e) =>
-                      setRedeemPoints(Math.min(loyalty.points_balance, Math.max(0, Number(e.target.value) || 0)))
-                    }
-                    className="w-28 bg-white"
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setRedeemPoints(redeemPoints > 0 ? 0 : loyalty.points_balance)}
-                  >
-                    {redeemPoints > 0 ? "Clear" : "Use Max"}
-                  </Button>
-                  {redeemPoints > 0 && (
-                    <span className="font-bold text-emerald-700">-₹{(redeemPoints / 4).toFixed(2)} est.</span>
-                  )}
-                </div>
-              </div>
-            )}
-
             <div className="space-y-2 border-t border-slate-100 pt-3 text-sm">
               <div className="flex justify-between text-slate-600">
-                <span>Subtotal</span>
+                <span>Order Subtotal</span>
                 <span>₹{cart.subtotal_amount}</span>
               </div>
-              {Number(cart.discount_amount) > 0 && (
-                <div className="flex justify-between text-emerald-700 font-semibold">
-                  <span>Offer Discount {cart.coupon_code ? `(${cart.coupon_code})` : ""}</span>
-                  <span>-₹{cart.discount_amount}</span>
-                </div>
-              )}
-              {redeemPoints > 0 && (
-                <div className="flex justify-between text-emerald-700">
-                  <span>Loyalty Points Discount ({redeemPoints} pts)</span>
-                  <span>-₹{(redeemPoints / 4).toFixed(2)} est.</span>
-                </div>
-              )}
-              <div className="flex justify-between text-slate-600">
-                <span>Tax</span>
-                <span>₹{cart.tax_amount}</span>
-              </div>
               <div className="flex justify-between border-t border-slate-200 pt-2 text-lg font-extrabold text-slate-900">
-                <span>Total Payable</span>
-                <span>₹{Math.max(0, Number(cart.total_amount) - (redeemPoints > 0 ? redeemPoints / 4 : 0)).toFixed(2)}</span>
+                <span>Final Payable Amount</span>
+                <span>₹{cart.total_amount}</span>
               </div>
+              <p className="text-[11px] text-slate-500">
+                Listed prices are inclusive of applicable statutory taxes. No additional checkout tax or extra charges.
+              </p>
             </div>
 
             {/* College Cancellation & Payment Policy */}

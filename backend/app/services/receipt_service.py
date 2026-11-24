@@ -129,6 +129,11 @@ def create_receipt_for_order(db: Session, order: Order, pickup_token: PickupToke
         "discount_amount": f"{order.discount_amount:.2f}",
         "tax_amount": f"{order.tax_amount:.2f}",
         "total_paid": f"{order.total_amount:.2f}",
+        "tax_inclusive_notice": (
+            "Listed prices inclusive of applicable statutory taxes. No additional checkout tax or extra charges."
+            if order.tax_amount == Decimal("0.00")
+            else None
+        ),
         "currency_symbol": college.currency_symbol or "₹",
         "pickup_instructions": PICKUP_INSTRUCTIONS,
     }
@@ -359,9 +364,13 @@ def generate_receipt_pdf_bytes(
 
     draw_sep()
     draw_lr("SUBTOTAL", f"Rs.{Decimal(snap['subtotal_amount']):.2f}", "Helvetica", base_font_sz)
-    draw_lr("DISCOUNT", f"-Rs.{Decimal(snap['discount_amount']):.2f}", "Helvetica", base_font_sz)
-    draw_lr("TAX", f"Rs.{Decimal(snap['tax_amount']):.2f}", "Helvetica", base_font_sz)
+    if Decimal(snap.get("discount_amount", "0.00")) > Decimal("0.00"):
+        draw_lr("DISCOUNT", f"-Rs.{Decimal(snap['discount_amount']):.2f}", "Helvetica", base_font_sz)
+    if Decimal(snap.get("tax_amount", "0.00")) > Decimal("0.00"):
+        draw_lr("TAX", f"Rs.{Decimal(snap['tax_amount']):.2f}", "Helvetica", base_font_sz)
     draw_lr("TOTAL PAID", f"Rs.{Decimal(snap['total_paid']):.2f}", "Helvetica-Bold", base_font_sz + 1.5, 5.2 * mm)
+    if Decimal(snap.get("tax_amount", "0.00")) == Decimal("0.00"):
+        draw_center("Prices inclusive of applicable statutory taxes.", "Helvetica-Oblique", max(6.4, base_font_sz - 1.0), 3.4 * mm)
     draw_lr(f"PAYMENT: {snap['payment_status']}", f"METHOD: {snap['payment_method'].upper()}", "Helvetica-Bold", base_font_sz)
     draw_lr(f"PAY REF: {snap['payment_reference']}", f"STATUS: {snap['order_status']}", "Helvetica", max(6.8, base_font_sz - 0.5))
     draw_sep()

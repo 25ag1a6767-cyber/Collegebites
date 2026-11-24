@@ -265,6 +265,10 @@ def list_categories(db: Session, canteen_id: UUID, include_inactive: bool = Fals
 def list_categories_cached(db: Session, canteen_id: UUID, include_inactive: bool = False) -> list[dict]:
     from app.schemas.menu import FoodCategoryOut
 
+    canteen = db.get(Canteen, canteen_id)
+    if not canteen or (not include_inactive and not canteen.is_active):
+        raise HTTPException(status_code=404, detail="Canteen not found")
+
     cache_ns = f"{NS_MENU}:{canteen_id}"
     cache_key = f"cats:inc={int(bool(include_inactive))}"
     hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=3.0)
@@ -323,6 +327,10 @@ def list_food_items(
     include_inactive: bool = False,
     sort_by: str = "popularity",
 ) -> list[FoodItemOut]:
+    canteen = db.get(Canteen, canteen_id)
+    if not canteen or (not include_inactive and not canteen.is_active):
+        raise HTTPException(status_code=404, detail="Canteen not found")
+
     cache_ns = f"{NS_MENU}:{canteen_id}"
     q_norm = (q or "").strip().lower()
     cache_key = (
@@ -460,6 +468,7 @@ def create_food_item(db: Session, payload: FoodItemCreate, actor_user_id: UUID) 
         raise HTTPException(status_code=409, detail="Food item slug already exists in this canteen")
 
     data = payload.model_dump(exclude={"image_url", "variants", "addon_ids", "allergen_names"})
+    data["tax_rate_percent"] = Decimal("0.00")
     item = FoodItem(**data)
     db.add(item)
     db.flush()
@@ -517,6 +526,8 @@ def update_food_item(db: Session, item_id: UUID, payload: FoodItemUpdate, actor_
             raise HTTPException(status_code=409, detail="Food item slug already exists in this canteen")
 
     updates = payload.model_dump(exclude_unset=True, exclude={"image_url", "addon_ids", "allergen_names"})
+    if "tax_rate_percent" in updates:
+        updates["tax_rate_percent"] = Decimal("0.00")
     for k, v in updates.items():
         setattr(item, k, v)
     if payload.is_available is True and not item.insufficient_ingredients:

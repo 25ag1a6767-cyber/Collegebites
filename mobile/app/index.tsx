@@ -90,12 +90,6 @@ export default function MenuScreen() {
     queryFn: () => canteensApi.listActivePromotions(activeCanteen.id),
   });
 
-  const { data: activeCoupons = [] } = useQuery<any[]>({
-    queryKey: ["m-coupons", activeCanteen?.id],
-    enabled: Boolean(activeCanteen?.id),
-    queryFn: () => cartApi.listActiveCoupons(activeCanteen.id),
-  });
-
   const { data: announcements = [] } = useQuery<any[]>({
     queryKey: ["m-announcements"],
     queryFn: canteensApi.listAnnouncements,
@@ -327,41 +321,6 @@ export default function MenuScreen() {
           );
         })}
       </ScrollView>
-
-      {activeCoupons.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 36, marginBottom: 8 }}>
-          {activeCoupons.map((cp: any) => (
-            <Pressable
-              key={cp.id}
-              onPress={async () => {
-                if (!activeCanteen?.id) return;
-                try {
-                  await cartApi.applyCoupon(activeCanteen.id, cp.code);
-                  qc.invalidateQueries({ queryKey: ["m-cart", activeCanteen.id] });
-                } catch {
-                  // user can apply at checkout once minimum order amount is met
-                }
-              }}
-              style={{
-                backgroundColor: "#ecfdf5",
-                borderColor: "#10b981",
-                borderWidth: 1,
-                borderRadius: 10,
-                paddingHorizontal: 10,
-                paddingVertical: 5,
-                marginRight: 8,
-                justifyContent: "center",
-              }}
-            >
-              <Text style={{ color: "#065f46", fontSize: 11, fontWeight: "800" }}>
-                🏷️ {cp.code} •{" "}
-                {cp.discount_type === "percentage" ? `${cp.discount_value}% OFF` : `₹${cp.discount_value} OFF`} (Min ₹
-                {cp.min_order_amount})
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      )}
 
       <View style={styles.searchRow}>
         <TextInput

@@ -343,20 +343,24 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
               {receipt.subtotal_amount}
             </span>
           </div>
-          <div className="flex justify-between">
-            <span>DISCOUNT</span>
-            <span>
-              -{receipt.currency_symbol}
-              {receipt.discount_amount}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span>TAX</span>
-            <span>
-              {receipt.currency_symbol}
-              {receipt.tax_amount}
-            </span>
-          </div>
+          {Number(receipt.discount_amount) > 0 && (
+            <div className="flex justify-between">
+              <span>DISCOUNT</span>
+              <span>
+                -{receipt.currency_symbol}
+                {receipt.discount_amount}
+              </span>
+            </div>
+          )}
+          {Number(receipt.tax_amount) > 0 && (
+            <div className="flex justify-between">
+              <span>TAX</span>
+              <span>
+                {receipt.currency_symbol}
+                {receipt.tax_amount}
+              </span>
+            </div>
+          )}
           <div className="flex justify-between border-t border-slate-300 pt-1 text-sm font-black">
             <span>TOTAL PAID</span>
             <span>
@@ -364,6 +368,11 @@ export const ReceiptSlip: React.FC<ReceiptSlipProps> = ({
               {receipt.total_paid}
             </span>
           </div>
+          {Number(receipt.tax_amount) === 0 && (
+            <div className="text-[10px] text-slate-500 text-center pt-0.5">
+              Listed prices inclusive of applicable statutory taxes.
+            </div>
+          )}
           <div className="flex justify-between pt-1">
             <span>PAYMENT STATUS</span>
             <span className="font-bold text-emerald-700">{receipt.payment_status}</span>

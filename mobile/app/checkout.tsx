@@ -8,7 +8,6 @@ import { canteensApi } from "../src/api/canteens.api";
 import { cartApi } from "../src/api/cart.api";
 import { getMobileApiError } from "../src/api/client";
 import { ordersApi } from "../src/api/orders.api";
-import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
 import { BrandLogo } from "../src/components/BrandLogo";
 
@@ -54,13 +53,6 @@ export default function CheckoutScreen() {
     queryFn: () => ordersApi.getPickupSlots(activeCanteenId),
   });
 
-  const { data: loyalty } = useQuery<any>({
-    queryKey: ["m-loyalty"],
-    enabled: Boolean(user),
-    queryFn: profileApi.getMyLoyalty,
-  });
-
-  const [redeemPoints, setRedeemPoints] = useState(0);
   const [selectedCounterId, setSelectedCounterId] = useState<string>("");
   const [selectedSlotId, setSelectedSlotId] = useState<string>("");
   const [payMethod, setPayMethod] = useState<"razorpay" | "stripe">("razorpay");
@@ -73,39 +65,9 @@ export default function CheckoutScreen() {
   const [otpNotice, setOtpNotice] = useState<string | null>(null);
   const [acceptedPolicy, setAcceptedPolicy] = useState(false);
   const [orderNotes, setOrderNotes] = useState("");
-  const [couponInput, setCouponInput] = useState("");
-  const [couponMsg, setCouponMsg] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [idemKey] = useState(() => `cb-mob-idem-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-
-  const applyCouponCode = async (codeOverride?: string) => {
-    const code = (codeOverride ?? couponInput).trim().toUpperCase();
-    if (!activeCanteenId || !code) return;
-    setErrorMsg("");
-    setCouponMsg("");
-    try {
-      await cartApi.applyCoupon(activeCanteenId, code);
-      setCouponInput("");
-      setCouponMsg(`Coupon ${code} applied!`);
-      await refetchCart();
-    } catch (e: unknown) {
-      setErrorMsg(getMobileApiError(e, "Invalid or ineligible coupon code"));
-    }
-  };
-
-  const removeCouponCode = async () => {
-    if (!activeCanteenId) return;
-    setErrorMsg("");
-    setCouponMsg("");
-    try {
-      await cartApi.removeCoupon(activeCanteenId);
-      setCouponMsg("Coupon removed.");
-      await refetchCart();
-    } catch (e: unknown) {
-      setErrorMsg(getMobileApiError(e, "Could not remove coupon"));
-    }
-  };
 
   const updateQty = async (cartItemId: string, nextQty: number) => {
     try {
@@ -179,7 +141,6 @@ export default function CheckoutScreen() {
           pickup_slot_id: selectedSlotId || null,
           order_channel: "mobile",
           payment_method: payMethod,
-          redeem_loyalty_points: user && redeemPoints > 0 ? redeemPoints : 0,
           idempotency_key: idemKey,
           guest_name: !user ? guestName.trim() : null,
           guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
@@ -316,51 +277,6 @@ export default function CheckoutScreen() {
         </View>
       )}
 
-      {/* Promotional Coupon Code */}
-      <View style={styles.box}>
-        <Text style={styles.sub}>Promotional Coupon Code</Text>
-        {cart.coupon_code ? (
-          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-            <Text style={{ color: "#047857", fontWeight: "800", fontSize: 12 }}>
-              Applied: {cart.coupon_code} (-₹{cart.discount_amount})
-            </Text>
-            <Pressable onPress={removeCouponCode} style={[styles.btnSec, { backgroundColor: "#dc2626" }]}>
-              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>Remove</Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            <TextInput
-              style={[styles.input, { flex: 1 }]}
-              value={couponInput}
-              onChangeText={setCouponInput}
-              autoCapitalize="characters"
-              placeholder="Enter coupon (e.g. CAMPUS15)"
-            />
-            <Pressable onPress={() => applyCouponCode()} style={styles.btnSec}>
-              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>Apply</Text>
-            </Pressable>
-          </View>
-        )}
-        {Boolean(couponMsg) && <Text style={{ color: "#047857", fontSize: 11, fontWeight: "700" }}>{couponMsg}</Text>}
-      </View>
-
-      {user && (loyalty?.points_balance || 0) > 0 && (
-        <View style={styles.box}>
-          <Text style={styles.sub}>Loyalty Points ({loyalty.points_balance} avail • 4 pts = ₹1)</Text>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Pressable
-              onPress={() => setRedeemPoints(redeemPoints > 0 ? 0 : loyalty.points_balance)}
-              style={[styles.btnSec, redeemPoints > 0 && { backgroundColor: "#76010d" }]}
-            >
-              <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12 }}>
-                {redeemPoints > 0 ? `Redeeming ${redeemPoints} pts (-₹${(redeemPoints / 4).toFixed(2)})` : "Redeem Max Points"}
-              </Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-
       {/* Payment Method */}
       <View style={styles.box}>
         <Text style={styles.sub}>Online Payment Method (Cash Disabled)</Text>
@@ -419,14 +335,16 @@ export default function CheckoutScreen() {
 
       <View style={styles.totalBox}>
         <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-          <Text style={{ color: "#94a3b8", fontSize: 12 }}>
-            Subtotal ₹{cart.subtotal_amount} • Discount -₹{cart.discount_amount} • Tax ₹{cart.tax_amount}
-          </Text>
+          <Text style={{ color: "#fdedce", fontSize: 12 }}>Order Subtotal</Text>
+          <Text style={{ color: "#fdedce", fontSize: 12, fontWeight: "700" }}>₹{cart.subtotal_amount}</Text>
         </View>
         <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
-          <Text style={styles.totalLabel}>Total Payable</Text>
+          <Text style={styles.totalLabel}>Final Payable Amount</Text>
           <Text style={styles.totalVal}>₹{cart.total_amount}</Text>
         </View>
+        <Text style={{ color: "#cbd5e1", fontSize: 10, marginTop: 4 }}>
+          Listed prices inclusive of applicable statutory taxes. No additional checkout tax or extra charges.
+        </Text>
       </View>
 
       <View style={styles.policyRow}>

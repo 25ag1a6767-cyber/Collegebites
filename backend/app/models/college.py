@@ -31,7 +31,7 @@ class CollegeSettings(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     address: Mapped[Optional[str]] = mapped_column(Text)
     contact_phone: Mapped[Optional[str]] = mapped_column(String(32))
     contact_email: Mapped[Optional[str]] = mapped_column(String(160))
-    default_tax_rate_percent: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("5.00"))
+    default_tax_rate_percent: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
     currency_code: Mapped[str] = mapped_column(String(8), nullable=False, default="INR")
     currency_symbol: Mapped[str] = mapped_column(String(8), nullable=False, default="₹")
     cancellation_policy_text: Mapped[str] = mapped_column(
@@ -71,7 +71,7 @@ class Canteen(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     closure_reason: Mapped[Optional[str]] = mapped_column(String(255))
     ordering_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     pause_reason: Mapped[Optional[str]] = mapped_column(String(255))
-    tax_rate_percent: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("5.00"))
+    tax_rate_percent: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
     allow_online_payment: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     allow_cash_at_counter: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     allow_pay_at_pickup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

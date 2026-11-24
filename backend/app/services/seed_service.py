@@ -100,7 +100,7 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
             address="Ankushapur, Ghatkesar, Hyderabad - 501301",
             contact_phone="+91-40-2980-1122",
             contact_email="canteen@aceec.ac.in",
-            default_tax_rate_percent=Decimal("5.00"),
+            default_tax_rate_percent=Decimal("0.00"),
             kiosk_enabled=False,
             razorpay_enabled=True,
             stripe_enabled=True,
@@ -115,17 +115,17 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
     if existing_main:
         return {"college_id": str(college.id), "main_canteen_id": str(existing_main.id)}
 
-    # 1. Canteens & Counters within the same college
+    # 1. Exactly Two Cafeteria Counters within the same college
     main_canteen = Canteen(
         name="Main Canteen",
         slug="main-canteen",
         code="MAIN",
         token_prefix="A",
         description="Central multi-kitchen dining hall serving meals, biryanis, tiffins & hot snacks.",
-        location="Academic Block Ground Floor",
+        location="College Cafeteria",
         contact_phone="+91-90000-11111",
         canteen_type="main_canteen",
-        tax_rate_percent=Decimal("5.00"),
+        tax_rate_percent=Decimal("0.00"),
         max_concurrent_orders=80,
         orders_per_slot_capacity=40,
         default_prep_time_minutes=12,
@@ -139,10 +139,10 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         code="SNK",
         token_prefix="S",
         description="Quick bites, puffs, sandwiches, freshly baked pastries and hot tea/coffee.",
-        location="Central Courtyard",
+        location="College Cafeteria",
         contact_phone="+91-90000-22222",
         canteen_type="snacks_counter",
-        tax_rate_percent=Decimal("5.00"),
+        tax_rate_percent=Decimal("0.00"),
         max_concurrent_orders=60,
         orders_per_slot_capacity=35,
         default_prep_time_minutes=7,
@@ -150,28 +150,11 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         allow_cash_at_counter=False,
         allow_pay_at_pickup=False,
     )
-    juice_canteen = Canteen(
-        name="Fresh Juice & Shake Bar",
-        slug="juice-bar",
-        code="JUC",
-        token_prefix="J",
-        description="Cold-pressed juices, milkshakes, lassi and iced cold coffee.",
-        location="Sports Complex Plaza",
-        contact_phone="+91-90000-33333",
-        canteen_type="juice_counter",
-        tax_rate_percent=Decimal("5.00"),
-        max_concurrent_orders=50,
-        orders_per_slot_capacity=30,
-        default_prep_time_minutes=5,
-        allow_online_payment=True,
-        allow_cash_at_counter=False,
-        allow_pay_at_pickup=False,
-    )
-    db.add_all([main_canteen, snacks_canteen, juice_canteen])
+    db.add_all([main_canteen, snacks_canteen])
     db.flush()
 
     # Operating hours (00:00 - 23:59 default open so dev/test checkout works at any hour; admins can adjust)
-    for c in (main_canteen, snacks_canteen, juice_canteen):
+    for c in (main_canteen, snacks_canteen):
         for day in range(7):
             db.add(
                 OperatingHour(
@@ -187,28 +170,24 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
     main_c1 = Counter(canteen_id=main_canteen.id, name="Counter 1 (Meals & Tiffins)", code="C1", counter_type="both")
     main_c2 = Counter(canteen_id=main_canteen.id, name="Counter 2 (Biryani & Chinese)", code="C2", counter_type="pickup")
     snk_c1 = Counter(canteen_id=snacks_canteen.id, name="Bakery Express Counter", code="B1", counter_type="both")
-    juc_c1 = Counter(canteen_id=juice_canteen.id, name="Juice Pickup Counter", code="J1", counter_type="both")
-    db.add_all([main_c1, main_c2, snk_c1, juc_c1])
+    db.add_all([main_c1, main_c2, snk_c1])
     db.flush()
 
     db.add_all([
         PickupLocation(canteen_id=main_canteen.id, counter_id=main_c1.id, name="Bay 1", display_code="BAY-1"),
         PickupLocation(canteen_id=main_canteen.id, counter_id=main_c2.id, name="Bay 2", display_code="BAY-2"),
         PickupLocation(canteen_id=snacks_canteen.id, counter_id=snk_c1.id, name="Bakery Window", display_code="B-WIN"),
-        PickupLocation(canteen_id=juice_canteen.id, counter_id=juc_c1.id, name="Juice Window", display_code="J-WIN"),
     ])
 
     main_k1 = Kitchen(canteen_id=main_canteen.id, name="Main Hot Kitchen", code="MK1", max_active_orders=50)
     snk_k1 = Kitchen(canteen_id=snacks_canteen.id, name="Bakery & Grill", code="SK1", max_active_orders=35)
-    juc_k1 = Kitchen(canteen_id=juice_canteen.id, name="Beverage Prep Bar", code="JK1", max_active_orders=30)
-    db.add_all([main_k1, snk_k1, juc_k1])
+    db.add_all([main_k1, snk_k1])
     db.flush()
 
     db.add_all([
         KitchenStation(kitchen_id=main_k1.id, name="Biryani & Rice Station", station_type="hot_line"),
         KitchenStation(kitchen_id=main_k1.id, name="South Indian Tiffin Griddle", station_type="tiffin"),
         KitchenStation(kitchen_id=snk_k1.id, name="Oven & Sandwich Grill", station_type="bakery"),
-        KitchenStation(kitchen_id=juc_k1.id, name="Blender Station", station_type="beverage"),
     ])
 
     t1 = DiningTable(canteen_id=main_canteen.id, counter_id=main_c1.id, table_number="T-01", zone_label="Window Wing", capacity=4)
@@ -233,11 +212,10 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         LocationQRCode(code="CB-MAIN-T01", target_type="table", canteen_id=main_canteen.id, counter_id=main_c1.id, table_id=t1.id, label="Main Canteen Table T-01"),
         LocationQRCode(code="CB-MAIN-C2", target_type="counter", canteen_id=main_canteen.id, counter_id=main_c2.id, label="Main Canteen Counter 2 QR"),
         LocationQRCode(code="CB-SNACKS", target_type="canteen", canteen_id=snacks_canteen.id, counter_id=snk_c1.id, label="Snacks & Bakery QR"),
-        LocationQRCode(code="CB-JUICE", target_type="canteen", canteen_id=juice_canteen.id, counter_id=juc_c1.id, label="Juice Bar QR"),
     ])
 
     # Pickup Slots for today & tomorrow
-    for c in (main_canteen, snacks_canteen, juice_canteen):
+    for c in (main_canteen, snacks_canteen):
         for day_offset in (0, 1):
             slot_day = date.today() + timedelta(days=day_offset)
             for hr in range(8, 21):
@@ -262,8 +240,7 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
     addon_raita = FoodAddon(canteen_id=main_canteen.id, name="Extra Raita", addon_type="side", price=Decimal("20.00"), is_veg=True)
     addon_egg = FoodAddon(canteen_id=main_canteen.id, name="Boiled Egg", addon_type="topping", price=Decimal("15.00"), is_veg=False)
     addon_cheese = FoodAddon(canteen_id=main_canteen.id, name="Extra Cheese", addon_type="topping", price=Decimal("25.00"), is_veg=True)
-    addon_icecream = FoodAddon(canteen_id=juice_canteen.id, name="Vanilla Scoop", addon_type="topping", price=Decimal("30.00"), is_veg=True)
-    db.add_all([addon_raita, addon_egg, addon_cheese, addon_icecream])
+    db.add_all([addon_raita, addon_egg, addon_cheese])
     db.flush()
 
     # Categories & Items
@@ -271,8 +248,7 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
     cat_tiffin = FoodCategory(canteen_id=main_canteen.id, name="South Indian Tiffins", slug="tiffins", display_order=2)
     cat_bev = FoodCategory(canteen_id=main_canteen.id, name="Beverages", slug="beverages", display_order=3)
     cat_snk = FoodCategory(canteen_id=snacks_canteen.id, name="Puffs & Sandwiches", slug="puffs-sandwiches", display_order=1)
-    cat_juc = FoodCategory(canteen_id=juice_canteen.id, name="Fresh Juices & Shakes", slug="juices-shakes", display_order=1)
-    db.add_all([cat_biryani, cat_tiffin, cat_bev, cat_snk, cat_juc])
+    db.add_all([cat_biryani, cat_tiffin, cat_bev, cat_snk])
     db.flush()
 
     biryani = FoodItem(
@@ -388,29 +364,7 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         rating_count=94,
         popularity_score=88,
     )
-    mango_shake = FoodItem(
-        canteen_id=juice_canteen.id,
-        category_id=cat_juc.id,
-        kitchen_id=juc_k1.id,
-        counter_id=juc_c1.id,
-        name="Alphonso Mango Thick Shake",
-        slug="mango-thick-shake",
-        description="Rich Alphonso mango pulp blended with chilled milk and crushed ice.",
-        base_price=Decimal("65.00"),
-        is_veg=True,
-        is_featured=True,
-        is_popular=True,
-        prep_time_minutes=4,
-        portion_size="350ml",
-        calories=260,
-        spice_levels=[],
-        sugar_levels=["No Added Sugar", "Regular", "Sweet"],
-        ingredients_text="Alphonso Mango, Milk, Ice",
-        average_rating=Decimal("4.75"),
-        rating_count=112,
-        popularity_score=91,
-    )
-    db.add_all([biryani, fried_rice, masala_dosa, cold_coffee, veg_puff, mango_shake])
+    db.add_all([biryani, fried_rice, masala_dosa, cold_coffee, veg_puff])
     db.flush()
 
     # Variants, Images, Addons, Allergens
@@ -425,7 +379,6 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         FoodItemAddon(food_item_id=biryani.id, addon_id=addon_egg.id, max_quantity=3),
         FoodItemAddon(food_item_id=fried_rice.id, addon_id=addon_raita.id, max_quantity=2),
         FoodItemAddon(food_item_id=masala_dosa.id, addon_id=addon_cheese.id, max_quantity=2),
-        FoodItemAddon(food_item_id=mango_shake.id, addon_id=addon_icecream.id, max_quantity=2),
         FoodItemAllergen(food_item_id=biryani.id, allergen_id=dairy.id),
         FoodItemAllergen(food_item_id=masala_dosa.id, allergen_id=dairy.id),
         FoodItemAllergen(food_item_id=cold_coffee.id, allergen_id=dairy.id),
@@ -435,7 +388,6 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         FoodImage(food_item_id=masala_dosa.id, image_url="https://images.unsplash.com/photo-1668236543090-82eba5ee5976?w=640", alt_text="Masala Dosa", is_primary=True),
         FoodImage(food_item_id=cold_coffee.id, image_url="https://images.unsplash.com/photo-1461023058943-07fcbe16d735?w=640", alt_text="Cold Coffee", is_primary=True),
         FoodImage(food_item_id=veg_puff.id, image_url="https://images.unsplash.com/photo-1509440159596-0249088772ff?w=640", alt_text="Paneer Puff", is_primary=True),
-        FoodImage(food_item_id=mango_shake.id, image_url="https://images.unsplash.com/photo-1546173159-315724a31696?w=640", alt_text="Mango Thick Shake", is_primary=True),
     ])
 
     # Menu Schedules
@@ -565,19 +517,16 @@ def seed_initial_college_data(db: Session, create_demo_users: bool = True) -> di
         "college_id": str(college.id),
         "main_canteen_id": str(main_canteen.id),
         "snacks_canteen_id": str(snacks_canteen.id),
-        "juice_canteen_id": str(juice_canteen.id),
     }
 
 
 def seed_live_production_advanced_data(db: Session) -> dict:
     """
     Idempotently enrich the live production database with real-world reference data
-    for Vendor Procurement, Student Meal Plans, College Events, Active Campaigns,
-    and Verified Nutrition profiles.
+    for Vendor Procurement, Student Meal Plans, College Events, and Verified Nutrition profiles.
     """
     from app.models.event import CollegeEvent
     from app.models.meal_plan import MealPlan
-    from app.models.promotion import Coupon
 
     ensure_roles_and_permissions(db)
     main_canteen = db.scalar(select(Canteen).where(Canteen.slug == "main-canteen"))
@@ -625,7 +574,7 @@ def seed_live_production_advanced_data(db: Session) -> dict:
                 description="7 wholesome campus meals valid across Main Canteen for 7 days.",
                 plan_type="weekly",
                 price=Decimal("490.00"),
-                tax_rate_percent=Decimal("5.00"),
+                tax_rate_percent=Decimal("0.00"),
                 validity_days=7,
                 total_meals=7,
                 start_date=today - timedelta(days=1),
@@ -642,7 +591,7 @@ def seed_live_production_advanced_data(db: Session) -> dict:
                 description="30 nutritious meals with instant QR redemption at the pickup counter.",
                 plan_type="monthly",
                 price=Decimal("1950.00"),
-                tax_rate_percent=Decimal("5.00"),
+                tax_rate_percent=Decimal("0.00"),
                 validity_days=30,
                 total_meals=30,
                 start_date=today - timedelta(days=1),
@@ -669,26 +618,6 @@ def seed_live_production_advanced_data(db: Session) -> dict:
                 eligible_food_item_ids=[str(i.id) for i in items[:4]],
                 min_order_quantity=10,
                 max_order_quantity=300,
-                is_active=True,
-            )
-        )
-
-    # 5. Seed active Promotional Campaign Coupon (CAMPUS15) if not present
-    if not db.scalar(select(Coupon).where(Coupon.code == "CAMPUS15")):
-        db.add(
-            Coupon(
-                code="CAMPUS15",
-                title="15% Off Campus Digital Orders",
-                description="Save 15% (up to Rs.60) on orders above Rs.120.",
-                canteen_id=main_canteen.id,
-                discount_type="percentage",
-                discount_value=Decimal("15.00"),
-                min_order_amount=Decimal("120.00"),
-                max_discount_amount=Decimal("60.00"),
-                usage_limit_total=500,
-                usage_limit_per_user=3,
-                starts_at=now - timedelta(days=1),
-                expires_at=now + timedelta(days=60),
                 is_active=True,
             )
         )

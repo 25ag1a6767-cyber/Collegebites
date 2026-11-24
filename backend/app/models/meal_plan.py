@@ -33,7 +33,7 @@ class MealPlan(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )  # daily | weekly | monthly | custom
     price: Mapped[Decimal] = mapped_column(Money, nullable=False)
     tax_rate_percent: Mapped[Decimal] = mapped_column(
-        Numeric(5, 2), default=Decimal("5.00"), nullable=False
+        Numeric(5, 2), default=Decimal("0.00"), nullable=False
     )
     validity_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     total_meals: Mapped[int] = mapped_column(Integer, default=30, nullable=False)

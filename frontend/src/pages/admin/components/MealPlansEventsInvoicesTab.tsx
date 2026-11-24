@@ -251,7 +251,7 @@ export const MealPlansEventsInvoicesTab: React.FC<MealPlansEventsInvoicesTabProp
                       <div className="text-[11px] text-slate-500">
                         {p.code} • {p.plan_type.toUpperCase()} • {p.total_meals} Meals • {p.validity_days} Days
                       </div>
-                      <div className="font-extrabold text-[#76010d] mt-1">₹{p.total_price} (incl. tax)</div>
+                      <div className="font-extrabold text-[#76010d] mt-1">₹{p.price}</div>
                     </div>
                     <Button
                       size="sm"
@@ -522,8 +522,8 @@ export const MealPlansEventsInvoicesTab: React.FC<MealPlansEventsInvoicesTabProp
                   <th className="p-2">Type</th>
                   <th className="p-2">Reference #</th>
                   <th className="p-2">Customer</th>
-                  <th className="p-2">Subtotal / Discount</th>
-                  <th className="p-2">Tax (CGST+SGST)</th>
+                  <th className="p-2">Subtotal</th>
+                  <th className="p-2">Tax Status / Historical Tax</th>
                   <th className="p-2">Total Paid</th>
                   <th className="p-2">PDF</th>
                 </tr>
@@ -545,7 +545,9 @@ export const MealPlansEventsInvoicesTab: React.FC<MealPlansEventsInvoicesTabProp
                       <td className="p-2">
                         ₹{inv.subtotal_amount} {Number(inv.discount_amount) > 0 ? `(-₹${inv.discount_amount})` : ""}
                       </td>
-                      <td className="p-2">₹{inv.tax_amount}</td>
+                      <td className="p-2">
+                        {Number(inv.tax_amount) > 0 ? `₹${inv.tax_amount}` : "Included in listed price"}
+                      </td>
                       <td className="p-2 font-extrabold text-slate-900">₹{inv.total_amount}</td>
                       <td className="p-2">
                         <Button

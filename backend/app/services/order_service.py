@@ -442,11 +442,16 @@ def checkout_order(
                     )
                 )
 
-    eff_coupon_code = (
-        payload.coupon_code.strip().upper()
-        if (payload.coupon_code and payload.coupon_code.strip())
-        else (cart.coupon_code.strip().upper() if (cart and cart.coupon_code and cart.coupon_code.strip()) else None)
-    )
+    if payload.coupon_code and payload.coupon_code.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Discounts and promotional coupon codes are disabled. All items are billed at exact listed prices.",
+        )
+    if payload.redeem_loyalty_points and payload.redeem_loyalty_points > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Loyalty point discounts are disabled. All items are billed at exact listed prices.",
+        )
 
     if not line_specs:
         raise HTTPException(status_code=400, detail="Cart is empty; add items before checkout")
@@ -509,7 +514,6 @@ def checkout_order(
         # Recalculate ALL prices strictly on backend using batched lookups
         subtotal = Decimal("0.00")
         max_item_prep = canteen.default_prep_time_minutes
-        line_tax_specs: list[tuple[Decimal, Decimal]] = []
         prepared_items: list[tuple[FoodItem, Optional[FoodVariant], int, Decimal, Decimal, Decimal, Optional[str], list[dict]]] = []
 
         spec_food_map = {f.id: f for f in spec_foods}
@@ -611,8 +615,6 @@ def checkout_order(
 
             line_sub = _quantize((unit_price + addon_per_unit) * spec.quantity)
             subtotal += line_sub
-            eff_tax_rate = food.tax_rate_percent if food.tax_rate_percent is not None else canteen.tax_rate_percent
-            line_tax_specs.append((line_sub, eff_tax_rate))
             prepared_items.append((food, variant, spec.quantity, unit_price, addon_per_unit, line_sub, spec.special_instructions, cust_dicts))
 
         if needed_ingredients:
@@ -622,46 +624,14 @@ def checkout_order(
             except ImportError:
                 pass
 
+        # Active pricing policy: exact listed prices only.
+        # Discount = 0, Additional checkout tax = 0, Extra item charges = 0, Final Payable = Subtotal.
+        subtotal = _quantize(subtotal)
         discount = Decimal("0.00")
-        applied_coupon: Optional[Coupon] = None
-        coupon_discount = Decimal("0.00")
-        if eff_coupon_code:
-            c_res = evaluate_coupon_discount(
-                db,
-                coupon_code=eff_coupon_code,
-                canteen_id=canteen.id,
-                line_items=[
-                    {"food_item_id": f.id, "category_id": f.category_id, "line_subtotal": l_sub}
-                    for f, _v, _q, _up, _au, l_sub, _in, _cu in prepared_items
-                ],
-                subtotal=subtotal,
-                user_id=user_id,
-                raise_on_invalid=True,
-            )
-            applied_coupon = db.scalar(select(Coupon).where(Coupon.id == c_res["coupon"].id).with_for_update())
-            coupon_discount = c_res["discount_amount"]
-            discount = _quantize(discount + coupon_discount)
-
-        redeemed_pts = 0
-        loyalty_acct: Optional[LoyaltyAccount] = None
-        if payload.redeem_loyalty_points > 0:
-            if not user_id:
-                raise HTTPException(status_code=400, detail="Sign in to redeem loyalty points")
-            loyalty_acct = db.scalar(select(LoyaltyAccount).where(LoyaltyAccount.user_id == user_id).with_for_update())
-            if not loyalty_acct or loyalty_acct.points_balance < payload.redeem_loyalty_points:
-                raise HTTPException(status_code=400, detail="Insufficient loyalty points balance")
-            max_pts_allowed = int(max(Decimal("0.00"), subtotal - discount))
-            redeemed_pts = min(payload.redeem_loyalty_points, max_pts_allowed)
-            discount = _quantize(discount + Decimal(redeemed_pts))
-
-        discount_ratio = (discount / subtotal) if (subtotal > Decimal("0.00") and discount > Decimal("0.00")) else Decimal("0.00")
-        tax_calc = Decimal("0.00")
-        for l_sub, l_rate in line_tax_specs:
-            l_taxable = max(Decimal("0.00"), l_sub * (Decimal("1.00") - discount_ratio))
-            tax_calc += (l_taxable * l_rate) / Decimal("100")
-        tax_amount = _quantize(tax_calc)
-        taxable = max(Decimal("0.00"), subtotal - discount)
-        total_amount = _quantize(taxable + tax_amount)
+        tax_amount = Decimal("0.00")
+        total_amount = subtotal
+        if cart and cart.coupon_code:
+            cart.coupon_code = None
 
         if pickup_slot:
             redis_slot_key = f"cb:slot:{pickup_slot.id}:reserved"
@@ -695,11 +665,11 @@ def checkout_order(
             status="PAYMENT_PENDING",
             payment_status="PENDING",
             payment_method=payload.payment_method,
-            subtotal_amount=_quantize(subtotal),
-            discount_amount=_quantize(discount),
+            subtotal_amount=subtotal,
+            discount_amount=discount,
             tax_amount=tax_amount,
             total_amount=total_amount,
-            coupon_code=applied_coupon.code if applied_coupon else None,
+            coupon_code=None,
             estimated_prep_minutes=est_prep,
             estimated_pickup_at=now + timedelta(minutes=est_prep),
             notes=payload.notes,
@@ -708,10 +678,8 @@ def checkout_order(
         db.flush()
 
         for food, variant, qty, unit_p, addon_u, line_sub, instr, custs in prepared_items:
-            ratio = (line_sub / subtotal) if subtotal > Decimal("0.00") else Decimal("0.00")
-            item_tax = _quantize(tax_amount * ratio)
-            item_disc = _quantize(discount * ratio)
-            line_total = _quantize(max(Decimal("0.00"), line_sub - item_disc) + item_tax)
+            item_tax = Decimal("0.00")
+            line_total = line_sub
             oi = OrderItem(
                 order_id=order.id,
                 food_item_id=food.id,
@@ -738,31 +706,6 @@ def checkout_order(
         if pickup_slot:
             slot_exp = (now + timedelta(minutes=15)) if payload.payment_method in ("razorpay", "stripe") else None
             db.add(SlotReservation(pickup_slot_id=pickup_slot.id, order_id=order.id, status="reserved", expires_at=slot_exp))
-
-        if applied_coupon and coupon_discount > Decimal("0.00"):
-            applied_coupon.times_used += 1
-            db.add(
-                CouponRedemption(
-                    coupon_id=applied_coupon.id,
-                    order_id=order.id,
-                    user_id=user_id,
-                    discount_applied=coupon_discount,
-                )
-            )
-            if cart and cart.coupon_code:
-                cart.coupon_code = None
-
-        if loyalty_acct and redeemed_pts > 0:
-            loyalty_acct.points_balance -= redeemed_pts
-            db.add(
-                LoyaltyTransaction(
-                    loyalty_account_id=loyalty_acct.id,
-                    order_id=order.id,
-                    points_delta=-redeemed_pts,
-                    transaction_type="redeem",
-                    description=f"Redeemed {redeemed_pts} pts on order {order.order_number}",
-                )
-            )
 
         # Create payment request (online/digital only)
         if payload.payment_method == "razorpay":

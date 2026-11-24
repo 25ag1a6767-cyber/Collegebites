@@ -52,9 +52,9 @@ describe("CollegeBites Web Utilities", () => {
         payment_status: "PENDING",
         payment_method: "razorpay",
         subtotal_amount: "80.00",
-        tax_amount: "4.00",
+        tax_amount: "0.00",
         discount_amount: "0.00",
-        total_amount: "84.00",
+        total_amount: "80.00",
         estimated_prep_minutes: 10,
         delayed_minutes: 0,
         is_guest: false,
@@ -68,7 +68,7 @@ describe("CollegeBites Web Utilities", () => {
       onError: () => {},
     });
 
-    expect(options.amount).toBe(8400);
+    expect(options.amount).toBe(8000);
     expect(options.currency).toBe("INR");
     expect(options.order_id).toBe("order_test_123");
     expect(options.config.display.sequence).toEqual(["block.upi"]);
@@ -124,9 +124,9 @@ describe("CollegeBites Web Utilities", () => {
           payment_status: "PENDING",
           payment_method: "razorpay",
           subtotal_amount: "50.00",
-          tax_amount: "2.50",
+          tax_amount: "0.00",
           discount_amount: "0.00",
-          total_amount: "52.50",
+          total_amount: "50.00",
           estimated_prep_minutes: 10,
           delayed_minutes: 0,
           is_guest: true,

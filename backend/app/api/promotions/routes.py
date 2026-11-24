@@ -108,7 +108,13 @@ def create_promotion(
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
 ):
+    if payload.coupon_code and payload.coupon_code.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Discounts and promotional coupon codes are disabled.",
+        )
     data = payload.model_dump()
+    data["coupon_code"] = None
     if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
         data["canteen_id"] = scoped_canteen_for_principal(principal, payload.canteen_id)
     promo = Promotion(**data)
@@ -229,24 +235,11 @@ def list_coupons(
     include_inactive: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
-    now = datetime.now(timezone.utc)
-    stmt = select(Coupon).order_by(Coupon.created_at.desc())
+    # Discounts & promotional coupons are disabled globally; never expose active coupons.
     if not include_inactive:
-        stmt = stmt.where(Coupon.is_active.is_(True))
+        return []
+    stmt = select(Coupon).where(Coupon.is_active.is_(False)).order_by(Coupon.created_at.desc())
     rows = list(db.scalars(stmt).all())
-    if not include_inactive:
-        filtered = []
-        for r in rows:
-            st = (r.starts_at if r.starts_at.tzinfo else r.starts_at.replace(tzinfo=timezone.utc)) if r.starts_at else None
-            ex = (r.expires_at if r.expires_at.tzinfo else r.expires_at.replace(tzinfo=timezone.utc)) if r.expires_at else None
-            if st and now < st:
-                continue
-            if ex and now >= ex:
-                continue
-            if r.usage_limit_total is not None and r.times_used >= r.usage_limit_total:
-                continue
-            filtered.append(r)
-        rows = filtered
     if canteen_id:
         rows = [r for r in rows if r.canteen_id is None or r.canteen_id == canteen_id]
     cat_map = {c.id: c.name for c in db.scalars(select(FoodCategory)).all()}
@@ -260,31 +253,10 @@ def create_coupon(
     principal: AuthenticatedPrincipal = Depends(require_roles(*PROMO_ADMIN_ROLES)),
     db: Session = Depends(get_db),
 ):
-    code = payload.code.strip().upper()
-    if db.scalar(select(Coupon).where(Coupon.code == code)):
-        raise HTTPException(status_code=409, detail="Coupon code already exists")
-    if payload.discount_type == "percentage" and payload.discount_value > Decimal("100.00"):
-        raise HTTPException(status_code=400, detail="Percentage discount cannot exceed 100%")
-    eff_cid = payload.canteen_id
-    if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
-        eff_cid = scoped_canteen_for_principal(principal, payload.canteen_id)
-
-    data = payload.model_dump()
-    data["code"] = code
-    data["canteen_id"] = eff_cid
-    coupon = Coupon(**data)
-    db.add(coupon)
-    record_audit_log(
-        db,
-        action="coupon.created",
-        entity_type="coupon",
-        entity_id=code,
-        actor_user_id=principal.user.id,
-        details={"discount_type": coupon.discount_type, "discount_value": str(coupon.discount_value)},
+    raise HTTPException(
+        status_code=400,
+        detail="Discounts and promotional coupon campaigns are disabled. Items are billed at exact listed prices.",
     )
-    db.commit()
-    db.refresh(coupon)
-    return _serialize_coupon(coupon)
 
 
 @router.patch("/coupons/{coupon_id}")
@@ -300,13 +272,16 @@ def update_coupon(
     if coupon.canteen_id:
         enforce_canteen_scope(principal, coupon.canteen_id)
     updates = payload.model_dump(exclude_unset=True)
-    for k, v in updates.items():
-        setattr(coupon, k, v)
-    if coupon.discount_type == "percentage" and coupon.discount_value > Decimal("100.00"):
-        raise HTTPException(status_code=400, detail="Percentage discount cannot exceed 100%")
+    # Only allow deactivating legacy records; reject activating or modifying discounts.
+    if updates.get("is_active") is not False or any(k != "is_active" for k in updates):
+        raise HTTPException(
+            status_code=400,
+            detail="Discounts and promotional coupon campaigns are disabled and cannot be activated or edited.",
+        )
+    coupon.is_active = False
     record_audit_log(
         db,
-        action="coupon.updated",
+        action="coupon.deactivated",
         entity_type="coupon",
         entity_id=coupon.code,
         actor_user_id=principal.user.id,
@@ -322,25 +297,10 @@ def validate_coupon_endpoint(
     principal: Optional[AuthenticatedPrincipal] = Depends(get_optional_principal),
     db: Session = Depends(get_db),
 ):
-    line_items = payload.items or [
-        {"food_item_id": None, "category_id": None, "line_subtotal": payload.subtotal_amount}
-    ]
-    res = evaluate_coupon_discount(
-        db,
-        coupon_code=payload.coupon_code,
-        canteen_id=payload.canteen_id,
-        line_items=line_items,
-        subtotal=payload.subtotal_amount,
-        user_id=principal.user.id if principal else None,
-        raise_on_invalid=True,
+    raise HTTPException(
+        status_code=400,
+        detail="Discounts and promotional coupon codes are disabled. All items are billed at exact listed prices.",
     )
-    return {
-        "valid": res["valid"],
-        "code": res["code"],
-        "discount_amount": str(res["discount_amount"]),
-        "payable_before_tax": str(max(Decimal("0.00"), payload.subtotal_amount - res["discount_amount"])),
-        "message": res["message"],
-    }
 
 
 @router.get("/campaigns/report")

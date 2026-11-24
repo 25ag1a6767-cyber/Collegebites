@@ -237,7 +237,8 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
           <div className="text-xs text-slate-500">Net Sales Revenue</div>
           <div className="text-2xl font-black text-[#76010d]">₹{report.sales.net_sales}</div>
           <div className="text-xs text-slate-500 mt-1">
-            AOV: ₹{report.sales.average_order_value} • Tax: ₹{report.sales.tax_collected}
+            AOV: ₹{report.sales.average_order_value}
+            {Number(report.sales.tax_collected) > 0 ? ` • Historical Tax: ₹${report.sales.tax_collected}` : " • Tax-Inclusive Pricing"}
           </div>
         </Card>
         <Card className="p-4">

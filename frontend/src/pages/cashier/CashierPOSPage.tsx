@@ -107,8 +107,7 @@ export const CashierPOSPage: React.FC = () => {
   };
 
   const subtotal = posLines.reduce((s, l) => s + l.unitPrice * l.quantity, 0);
-  const taxRate = Number(activeCanteen?.tax_rate_percent || 5) / 100;
-  const estTotal = subtotal * (1 + taxRate);
+  const estTotal = subtotal;
 
   const submitWalkinOrder = async () => {
     if (!activeCanteenId || posLines.length === 0) return;
@@ -343,9 +342,14 @@ export const CashierPOSPage: React.FC = () => {
               ))}
             </div>
 
-            <div className="flex justify-between text-base font-extrabold text-slate-900 pt-1">
-              <span>Est. Total (incl. tax)</span>
-              <span>₹{estTotal.toFixed(2)}</span>
+            <div className="space-y-1 pt-1">
+              <div className="flex justify-between text-base font-extrabold text-slate-900">
+                <span>Total Payable</span>
+                <span>₹{estTotal.toFixed(2)}</span>
+              </div>
+              <div className="text-[11px] text-slate-500">
+                Listed prices inclusive of applicable statutory taxes.
+              </div>
             </div>
 
             <Button

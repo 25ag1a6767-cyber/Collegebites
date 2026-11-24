@@ -32,9 +32,9 @@ def _serialize_meal_plan(
     cat_ids = [str(cid) for cid in (plan.eligible_category_ids or [])]
     item_ids = [str(fid) for fid in (plan.eligible_food_item_ids or [])]
     price = _quantize(plan.price)
-    tax_rate = _quantize(plan.tax_rate_percent or Decimal("5.00"))
-    tax_amt = _quantize((price * tax_rate) / Decimal("100"))
-    total_price = _quantize(price + tax_amt)
+    tax_rate = Decimal("0.00")
+    tax_amt = Decimal("0.00")
+    total_price = price
     return {
         "id": str(plan.id),
         "canteen_id": str(plan.canteen_id) if plan.canteen_id else None,
@@ -103,7 +103,7 @@ def create_meal_plan(db: Session, data: dict, actor_user_id: UUID) -> dict:
         description=(data.get("description") or "").strip() or None,
         plan_type=(data.get("plan_type") or "monthly").strip().lower(),
         price=_quantize(Decimal(str(data["price"]))),
-        tax_rate_percent=_quantize(Decimal(str(data.get("tax_rate_percent") or "5.00"))),
+        tax_rate_percent=Decimal("0.00"),
         validity_days=int(data["validity_days"]),
         total_meals=int(data["total_meals"]),
         eligible_category_ids=[str(x) for x in (data.get("eligible_category_ids") or [])],
@@ -134,8 +134,10 @@ def update_meal_plan(db: Session, plan_id: UUID, data: dict, actor_user_id: UUID
     for k, v in data.items():
         if v is None:
             continue
-        if k in ("price", "tax_rate_percent"):
+        if k == "price":
             setattr(plan, k, _quantize(Decimal(str(v))))
+        elif k == "tax_rate_percent":
+            setattr(plan, k, Decimal("0.00"))
         elif k in ("eligible_category_ids", "eligible_food_item_ids"):
             setattr(plan, k, [str(x) for x in v])
         else:
@@ -258,9 +260,8 @@ def subscribe_to_meal_plan(
         raise HTTPException(status_code=400, detail="Only online verified payments (Razorpay or Stripe) are supported for meal plans")
 
     subtotal = _quantize(plan.price)
-    tax_rate = _quantize(plan.tax_rate_percent or Decimal("5.00"))
-    tax_amount = _quantize((subtotal * tax_rate) / Decimal("100"))
-    total_amount = _quantize(subtotal + tax_amount)
+    tax_amount = Decimal("0.00")
+    total_amount = subtotal
 
     now = datetime.now(timezone.utc)
     sub_number = f"MPS-{now.strftime('%Y%m%d')}-{uuid4().hex[:6].upper()}"

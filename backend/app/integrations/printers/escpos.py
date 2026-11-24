@@ -121,11 +121,15 @@ def build_escpos_receipt_bytes(snapshot: dict[str, Any], paper_width: str = "80m
 
     buf += sep
     buf += _lr("SUBTOTAL:", f"Rs.{Decimal(str(snapshot['subtotal_amount'])):.2f}", cols)
-    buf += _lr("DISCOUNT:", f"Rs.{Decimal(str(snapshot['discount_amount'])):.2f}", cols)
-    buf += _lr("TAX:", f"Rs.{Decimal(str(snapshot['tax_amount'])):.2f}", cols)
+    if Decimal(str(snapshot.get("discount_amount", "0.00"))) > Decimal("0.00"):
+        buf += _lr("DISCOUNT:", f"-Rs.{Decimal(str(snapshot['discount_amount'])):.2f}", cols)
+    if Decimal(str(snapshot.get("tax_amount", "0.00"))) > Decimal("0.00"):
+        buf += _lr("TAX:", f"Rs.{Decimal(str(snapshot['tax_amount'])):.2f}", cols)
     buf += ESC + b"E\x01"
     buf += _lr("TOTAL PAID:", f"Rs.{Decimal(str(snapshot['total_paid'])):.2f}", cols)
     buf += ESC + b"E\x00"
+    if Decimal(str(snapshot.get("tax_amount", "0.00"))) == Decimal("0.00"):
+        buf += _line("Prices incl. applicable statutory taxes", cols)
     buf += _line(f"PAY REF: {snapshot.get('payment_reference') or 'N/A'}", cols)
     buf += _line(f"PAY METHOD: {snapshot.get('payment_method', '').upper()} ({snapshot.get('payment_status')})", cols)
     buf += sep

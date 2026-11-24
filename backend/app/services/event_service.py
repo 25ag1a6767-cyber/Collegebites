@@ -287,10 +287,10 @@ def create_bulk_order(
         qty = int(spec["quantity"])
         total_qty += qty
         unit_p = _quantize(food.base_price)
-        t_rate = _quantize(food.tax_rate_percent if food.tax_rate_percent is not None else canteen.tax_rate_percent)
+        t_rate = Decimal("0.00")
         line_sub = _quantize(unit_p * Decimal(qty))
-        line_tax = _quantize((line_sub * t_rate) / Decimal("100"))
-        line_tot = _quantize(line_sub + line_tax)
+        line_tax = Decimal("0.00")
+        line_tot = line_sub
         subtotal += line_sub
         tax_total += line_tax
         prepared_items.append({

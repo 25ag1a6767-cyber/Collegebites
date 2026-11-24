@@ -145,12 +145,6 @@ export const HomePage: React.FC = () => {
     queryFn: async () => (await api.get(`/promotions${activeCanteen ? `?canteen_id=${activeCanteen.id}` : ""}`)).data,
   });
 
-  const { data: activeCoupons = [] } = useQuery<any[]>({
-    queryKey: ["active-coupons", activeCanteen?.id],
-    queryFn: async () =>
-      (await api.get(`/promotions/coupons${activeCanteen ? `?canteen_id=${activeCanteen.id}` : ""}`)).data,
-  });
-
   const { data: announcements = [] } = useQuery<any[]>({
     queryKey: ["announcements", activeCanteen?.id],
     queryFn: async () => (await api.get(`/notifications/announcements`)).data,
@@ -315,7 +309,7 @@ export const HomePage: React.FC = () => {
             Select your campus canteen, customize dishes, pay securely via UPI/Card, and receive your live pickup token & printable receipt instantly.
           </p>
 
-          {(promotions.length > 0 || activeCoupons.length > 0) && (
+          {promotions.length > 0 && (
             <div className="mt-5 flex flex-wrap gap-2">
               {promotions.slice(0, 2).map((p) => (
                 <div
@@ -323,41 +317,9 @@ export const HomePage: React.FC = () => {
                   className="inline-flex items-center gap-2 rounded-xl bg-white/10 border border-white/15 px-3 py-2 text-xs"
                 >
                   <Tag className="h-3.5 w-3.5 text-[#fdedce]" />
-                  <span className="font-bold text-[#fdedce]">{p.badge_text || "OFFER"}</span>
+                  <span className="font-bold text-[#fdedce]">{p.badge_text || "INFO"}</span>
                   <span>{p.title}</span>
                 </div>
-              ))}
-              {activeCoupons.slice(0, 3).map((cp: any) => (
-                <button
-                  key={cp.id}
-                  type="button"
-                  onClick={async () => {
-                    if (!activeCanteen) return;
-                    if (!cart || cart.items.length === 0) {
-                      navigator.clipboard?.writeText(cp.code).catch(() => {});
-                      pushToast(`Coupon code ${cp.code} copied! Add items to cart to apply.`, "info");
-                      return;
-                    }
-                    try {
-                      await api.post("/carts/coupon", {
-                        canteen_id: activeCanteen.id,
-                        coupon_code: cp.code,
-                      });
-                      qc.invalidateQueries({ queryKey: ["cart", activeCanteen.id] });
-                      pushToast(`Coupon ${cp.code} applied to your cart!`, "success");
-                    } catch (err) {
-                      pushToast(getApiError(err, `Code: ${cp.code}`), "info");
-                    }
-                  }}
-                  className="inline-flex items-center gap-2 rounded-xl bg-amber-400/20 border border-amber-300/40 px-3 py-2 text-xs hover:bg-amber-400/30 transition"
-                  title="Click to apply coupon to cart"
-                >
-                  <Tag className="h-3.5 w-3.5 text-amber-200" />
-                  <span className="font-mono font-extrabold text-amber-200">{cp.code}</span>
-                  <span>
-                    {cp.title} ({cp.discount_type === "percentage" ? `${cp.discount_value}% Off` : `₹${cp.discount_value} Off`})
-                  </span>
-                </button>
               ))}
             </div>
           )}

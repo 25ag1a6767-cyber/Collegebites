@@ -383,7 +383,7 @@ def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> D
     canteen_name = "All Campus Canteens"
     if canteen_id is not None:
         canteen = db.get(Canteen, canteen_id)
-        if not canteen:
+        if not canteen or not canteen.is_active:
             raise HTTPException(status_code=404, detail="Canteen not found")
         canteen_name = canteen.name
 
@@ -408,6 +408,7 @@ def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> D
         .join(Counter, Counter.id == PickupToken.counter_id)
         .join(Canteen, Canteen.id == Order.canteen_id)
         .where(
+            Canteen.is_active.is_(True),
             PickupToken.service_date == today,
             Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
         )
@@ -434,6 +435,7 @@ def get_digital_token_board(db: Session, canteen_id: Optional[UUID] = None) -> D
         .join(Counter, Counter.id == PickupToken.counter_id)
         .join(Canteen, Canteen.id == Order.canteen_id)
         .where(
+            Canteen.is_active.is_(True),
             PickupToken.service_date == today,
             Order.status == "COMPLETED",
         )
@@ -509,7 +511,7 @@ def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) 
     canteen_name = "All Campus Canteens"
     if canteen_id is not None:
         canteen = db.get(Canteen, canteen_id)
-        if not canteen:
+        if not canteen or not canteen.is_active:
             raise HTTPException(status_code=404, detail="Canteen not found")
         canteen_name = canteen.name
 
@@ -554,6 +556,7 @@ def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) 
         .join(Canteen, Canteen.id == Order.canteen_id)
         .outerjoin(OrderQRCode, OrderQRCode.order_id == Order.id)
         .where(
+            Canteen.is_active.is_(True),
             PickupToken.service_date == today,
             Order.payment_status == "CONFIRMED",
             Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
@@ -568,6 +571,7 @@ def get_operational_token_board(db: Session, canteen_id: Optional[UUID] = None) 
         .join(Canteen, Canteen.id == Order.canteen_id)
         .outerjoin(OrderQRCode, OrderQRCode.order_id == Order.id)
         .where(
+            Canteen.is_active.is_(True),
             PickupToken.service_date == today,
             Order.payment_status == "CONFIRMED",
             Order.status == "COMPLETED",
