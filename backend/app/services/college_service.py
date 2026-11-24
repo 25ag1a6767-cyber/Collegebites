@@ -13,6 +13,7 @@ from app.core.cache import (
     cache_manager,
     invalidate_canteens,
     invalidate_college_settings,
+    invalidate_menu,
 )
 from app.core.time_utils import now_college, today_college
 from app.models.college import (
@@ -404,6 +405,7 @@ def create_canteen(
     db.commit()
     db.refresh(canteen)
     invalidate_canteens(canteen.id)
+    invalidate_menu(canteen.id)
     return serialize_canteen(db, canteen)
 
 
@@ -448,6 +450,7 @@ def update_canteen(
     db.commit()
     db.refresh(canteen)
     invalidate_canteens(canteen.id)
+    invalidate_menu(canteen.id)
     return serialize_canteen(db, canteen)
 
 
