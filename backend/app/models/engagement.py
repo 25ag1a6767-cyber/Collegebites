@@ -38,6 +38,7 @@ class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_notifications_user_read_created", "user_id", "is_read", "created_at"),
         Index("ix_notifications_role_created", "role_target", "created_at"),
+        Index("ix_notifications_priority_cat", "priority", "category", "created_at"),
     )
 
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -45,15 +46,42 @@ class Notification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("canteens.id", ondelete="SET NULL"))
     order_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"))
     dedup_key: Mapped[Optional[str]] = mapped_column(String(160), index=True)
+    event_id: Mapped[Optional[str]] = mapped_column(String(160), index=True)
     channel: Mapped[str] = mapped_column(String(32), nullable=False, default="in_app")
+    category: Mapped[str] = mapped_column(String(40), nullable=False, default="order")
+    priority: Mapped[str] = mapped_column(String(24), nullable=False, default="normal")  # low | normal | high | critical
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    delivery_status: Mapped[str] = mapped_column(String(32), nullable=False, default="sent")  # queued | sent | failed
+    delivery_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")  # pending | sent | delivered | failed
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(Text)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSON, default=dict)
+
+
+class NotificationDelivery(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        Index("ix_notif_delivery_status_created", "status", "created_at"),
+        Index("ix_notif_delivery_notif_channel", "notification_id", "channel"),
+    )
+
+    notification_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("notifications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    channel: Mapped[str] = mapped_column(String(32), nullable=False)  # in_app | email | sms | whatsapp | expo_push | web_push
+    recipient_masked: Mapped[Optional[str]] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")  # pending | sent | delivered | failed
+    provider_name: Mapped[Optional[str]] = mapped_column(String(64))
+    provider_message_id: Mapped[Optional[str]] = mapped_column(String(160))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_error: Mapped[Optional[str]] = mapped_column(Text)
+    sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 class Announcement(Base, UUIDPrimaryKeyMixin, TimestampMixin):

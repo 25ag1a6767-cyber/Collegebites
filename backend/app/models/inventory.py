@@ -21,6 +21,7 @@ class Supplier(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     business_details: Mapped[Optional[str]] = mapped_column(Text)
     supplied_products: Mapped[Optional[list]] = mapped_column(JSON, default=list)
     payment_terms: Mapped[Optional[str]] = mapped_column(String(80))
+    lead_time_days: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
 
@@ -55,18 +56,32 @@ class InventoryItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class StockBatch(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "stock_batches"
-    __table_args__ = (Index("ix_stock_batches_expiry", "inventory_item_id", "expiry_date"),)
+    __table_args__ = (
+        Index("ix_stock_batches_expiry", "inventory_item_id", "expiry_date"),
+        Index("ix_stock_batches_quality", "inventory_item_id", "quality_status"),
+    )
 
     inventory_item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("inventory_items.id", ondelete="CASCADE"), nullable=False, index=True
     )
     supplier_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("suppliers.id", ondelete="SET NULL"))
-    batch_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    purchase_order_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("purchase_orders.id", ondelete="SET NULL"), index=True)
+    goods_receipt_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("goods_receipts.id", ondelete="SET NULL"), index=True)
+    batch_number: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     initial_quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False)
     remaining_quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False)
+    allocated_quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    consumed_quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    rejected_quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
+    wasted_quantity: Mapped[Decimal] = mapped_column(QuantityNumeric, nullable=False, default=Decimal("0.000"))
     unit_cost: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    manufacturing_date: Mapped[Optional[date]] = mapped_column(Date)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expiry_date: Mapped[Optional[date]] = mapped_column(Date)
+    storage_location: Mapped[Optional[str]] = mapped_column(String(120))
+    quality_status: Mapped[str] = mapped_column(String(32), nullable=False, default="approved")  # pending | approved | rejected | blocked | recalled
+    block_reason: Mapped[Optional[str]] = mapped_column(String(255))
+    supporting_documents: Mapped[Optional[list]] = mapped_column(JSON, default=list)
 
 
 class StockMovement(Base, UUIDPrimaryKeyMixin, TimestampMixin):

@@ -1,12 +1,15 @@
 from fastapi import APIRouter
 
 from app.api.admin.routes import router as admin_router
+from app.api.ai_assistant.routes import router as ai_assistant_router
 from app.api.auth.routes import router as auth_router
 from app.api.backups.routes import router as backups_router
 from app.api.canteens.routes import router as canteens_router
 from app.api.carts.routes import router as carts_router
 from app.api.customers.routes import router as customers_router
 from app.api.events.routes import router as events_router
+from app.api.food_safety.routes import router as food_safety_router
+from app.api.forecasting.routes import router as forecasting_router
 from app.api.inventory.routes import router as inventory_router
 from app.api.invoices.routes import router as invoices_router
 from app.api.kiosk.routes import router as kiosk_router
@@ -19,15 +22,18 @@ from app.api.payments.routes import router as payments_router
 from app.api.pickup.routes import router as pickup_router
 from app.api.pos.routes import router as pos_router
 from app.api.printing.routes import router as printing_router
+from app.api.production.routes import router as production_router
 from app.api.promotions.routes import router as promotions_router
 from app.api.qr.routes import router as qr_router
 from app.api.queue.routes import router as queue_router
 from app.api.realtime.routes import router as realtime_router
+from app.api.reordering.routes import router as reordering_router
 from app.api.reports.routes import router as reports_router
 from app.api.security.routes import router as security_router
 from app.api.staff.routes import router as staff_router
 from app.api.support.routes import router as support_router
 from app.api.tokens.routes import router as tokens_router
+from app.api.traceability.routes import router as traceability_router
 from app.api.ws.routes import router as ws_router
 
 api_router = APIRouter()
@@ -60,3 +66,9 @@ api_router.include_router(events_router)
 api_router.include_router(invoices_router)
 api_router.include_router(realtime_router)
 api_router.include_router(ws_router)
+api_router.include_router(food_safety_router)
+api_router.include_router(traceability_router)
+api_router.include_router(production_router)
+api_router.include_router(reordering_router)
+api_router.include_router(forecasting_router)
+api_router.include_router(ai_assistant_router)

@@ -21,6 +21,7 @@ import { SecurityMonitorPanel } from "./components/SecurityMonitorPanel";
 import { WebsiteQrTab } from "./components/WebsiteQrTab";
 import { OperationsControlCenterPanel } from "./components/OperationsControlCenterPanel";
 import { MealPlansEventsInvoicesTab } from "./components/MealPlansEventsInvoicesTab";
+import { ForecastingAssistantTab } from "./components/ForecastingAssistantTab";
 
 export const AdminConsolePage: React.FC = () => {
   const { pushToast } = useToast();
@@ -32,6 +33,7 @@ export const AdminConsolePage: React.FC = () => {
   const [tab, setTab] = useState<
     | "control_center"
     | "analytics"
+    | "ai_forecast_assistant"
     | "orders"
     | "meal_events_invoices"
     | "locations"
@@ -190,6 +192,7 @@ export const AdminConsolePage: React.FC = () => {
         {[
           { k: "control_center", l: "Control Center" },
           { k: "analytics", l: "Analytics & Reports" },
+          { k: "ai_forecast_assistant", l: "AI Forecasting & Assistant" },
           { k: "orders", l: "Orders & Users" },
           { k: "meal_events_invoices", l: "Meal Plans, Events & Invoices" },
           { k: "locations", l: "Locations, Counters & Hours" },
@@ -244,6 +247,10 @@ export const AdminConsolePage: React.FC = () => {
           reportQueryCanteen={reportQueryCanteen}
           downloadBlob={downloadBlob}
         />
+      )}
+
+      {tab === "ai_forecast_assistant" && (
+        <ForecastingAssistantTab activeCanteenId={activeCanteenId} canTrainForecast />
       )}
 
       {tab === "orders" && <OrdersUsersTab activeCanteenId={activeCanteenId} />}

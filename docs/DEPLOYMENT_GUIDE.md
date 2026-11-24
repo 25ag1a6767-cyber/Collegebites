@@ -41,7 +41,8 @@ Live online checkout requires configured gateway credentials (`503 Service Unava
    cd backend
    alembic upgrade head
    ```
-   Migration head `3b2c4d5e7f8a` creates `inventory_audit_logs` and `price_change_requests`, widens `food_images.image_url` to `TEXT`, deletes legacy coupon records, disables legacy cash/pay-at-pickup database flags, and seeds `qr:website_manage` + `menu:manage_inventory` permissions.
+   Migration head `e5f6a7b8c9d0` (`e5f6a7b8c9d0_enterprise_modules_and_sequences.py`, chaining off `d4e5f6a7b8c9`) adds all 24 enterprise tables (Food Safety, Traceability & Recalls, Production Management, Automated Reordering, Queue Estimate History, ML Forecasting, AI Assistant, Notification Deliveries), extends `notifications`, `suppliers`, `stock_batches`, and `recipes`, and creates lock-free PostgreSQL sequences `order_number_seq` and `invoice_number_seq`.
+   > **Safety Rule:** Always create a verified PostgreSQL snapshot (`pg_dump --format=custom`) and test `alembic upgrade head` on a staging branch before migrating production. Never deploy or run destructive commands on production without explicit approval.
 2. **Production Initial Admin Bootstrap** (only when creating a clean production database; `seed_demo` blocks execution in `ENVIRONMENT=production`):
    ```bash
    python -m app.cli.create_admin --email admin@yourcollege.edu --name "College Super Admin"

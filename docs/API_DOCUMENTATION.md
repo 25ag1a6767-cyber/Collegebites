@@ -89,3 +89,47 @@ All rooms support `"ping"` keepalive messages (server replies `{"event": "pong"}
 - `WS /api/v1/ws/kitchen/{canteen_id}?token=...` — Live kitchen queue updates (authenticated canteen staff).
 - `WS /api/v1/ws/board/{canteen_id}` — Public digital pickup token board updates.
 - `WS /api/v1/ws/notifications/{user_id}?token=...` — Per-user live alerts.
+
+---
+
+## 10. Enterprise Modules Added in Platform Upgrade (`e5f6a7b8c9d0`)
+
+### Notification & Communication Center (`/api/v1/notifications`)
+- `GET /api/v1/notifications/my?q=&priority=&category=&event_type=&delivery_status=&is_read=` — Filterable inbox with priority (`low|normal|high|critical`) & category (`order|payment|inventory|procurement|food_safety|queue|system`).
+- `GET /api/v1/notifications/unread-count` — Live unread count.
+- `GET /api/v1/notifications/history` — Full notification history & delivery summaries.
+- `GET /api/v1/notifications/deliveries` — Masked-PII per-channel delivery audit log (Manager/Admin).
+- `POST /api/v1/notifications/{notification_id}/retry` — Retry failed/pending delivery (Manager/Admin).
+- `POST /api/v1/notifications/system-maintenance` — Audited campus maintenance broadcast (Admin only).
+
+### Food Safety & Hygiene Compliance (`/api/v1/food-safety`)
+- `GET /api/v1/food-safety/dashboard?canteen_id=&days=30` — Strictly actual compliance counts (`null` pass rate when 0 inspections exist).
+- `GET /POST /api/v1/food-safety/templates` — Configurable hygiene checklists (10-item standard template seeded on demand).
+- `GET /POST /api/v1/food-safety/inspections`, `GET /api/v1/food-safety/inspections/{id}/pdf` — Daily hygiene inspections & PDF export.
+- `GET /POST /api/v1/food-safety/equipment`, `GET /POST /api/v1/food-safety/temperatures` — Equipment safe temperature thresholds (`min < max`) & violation alerts.
+- `GET /api/v1/food-safety/expiry-monitoring`, `POST /api/v1/food-safety/batches/{batch_id}/dispose` — Expired & approaching-expiry batch monitor + wastage disposal.
+- `GET /api/v1/food-safety/cleaning`, `POST /api/v1/food-safety/cleaning/schedules`, `PATCH /api/v1/food-safety/cleaning/tasks/{task_id}`, `POST /api/v1/food-safety/cleaning/notify-overdue`.
+- `GET /POST /api/v1/food-safety/incidents`, `PATCH /api/v1/food-safety/incidents/{incident_id}`.
+
+### Food Traceability, FIFO/FEFO Batches & Recalls (`/api/v1/traceability`)
+- `GET /POST /api/v1/traceability/batches`, `PATCH /api/v1/traceability/batches/{batch_id}/quality` — Traceable batch registry (`pending|approved|rejected|blocked|recalled`).
+- `GET /api/v1/traceability/batches/{batch_id}/chain`, `GET /api/v1/traceability/orders/{order_id}/chain` — End-to-end chain (`complete|partial` + `missing_links`).
+- `GET /POST /api/v1/traceability/recalls`, `POST /api/v1/traceability/recalls/{id}/approve`, `PATCH /api/v1/traceability/recalls/{id}`, `GET /api/v1/traceability/recalls/{id}/report.pdf`.
+
+### Kitchen & Food Production Management (`/api/v1/production` & `/api/v1/kitchen`)
+- `GET /api/v1/production/recipes`, `PUT /api/v1/production/recipes/{food_item_id}`, `POST /api/v1/production/recipes/{food_item_id}/verify`, `GET /api/v1/production/recipes/{food_item_id}/requirements?quantity=N`.
+- `GET /api/v1/production/planning` — Separates confirmed active orders, event bulk orders, planned batches, and AI forecast (no double-counting).
+- `GET /POST /api/v1/production/plans`, `GET /POST /api/v1/production/batches` (idempotent), `POST /api/v1/production/batches/{id}/transition` (8-state lifecycle + atomic FIFO/FEFO allocation), `POST /api/v1/production/batches/{id}/quality-check`, `PATCH /api/v1/production/batches/{id}/quantities`, `GET /api/v1/production/report`.
+- `GET /api/v1/kitchen/canteens/{canteen_id}/grouped-items` — Real-time item-grouped KDS view.
+
+### Automated Reordering System (`/api/v1/reordering`)
+- `GET /api/v1/reordering/rules`, `PUT /api/v1/reordering/rules/{inventory_item_id}`.
+- `GET /api/v1/reordering/recommendations`, `POST /api/v1/reordering/recommendations/generate`.
+- `POST /api/v1/reordering/recommendations/{id}/create-draft-po` — Creates **Draft** PO only (never auto-approved, duplicate-blocked).
+- `POST /api/v1/reordering/recommendations/{id}/dismiss`.
+
+### Smart Queue Prediction, BI Financial Analytics, AI Forecasting & AI Assistant
+- `GET /api/v1/queue/canteens/{canteen_id}/accuracy?days=30` — Real `QueueEstimateHistory` MAE, median error, and within-5-min accuracy.
+- `GET /api/v1/reports/dashboard?category_id=&food_item_id=&compare_previous=true` — Includes `financial_analytics` (strictly separating Verified Net Revenue, Verified Ingredient Cost, Wastage Loss, and Estimated Gross Margin) + period-over-period delta.
+- `POST /api/v1/forecasting/train`, `GET /api/v1/forecasting/canteens/{canteen_id}`, `GET /api/v1/forecasting/canteens/{canteen_id}/models` — Chronological ML demand forecasting with MAE/RMSE/MAPE & uncertainty intervals.
+- `POST /api/v1/ai-assistant/ask`, `GET /api/v1/ai-assistant/conversations`, `GET /api/v1/ai-assistant/conversations/{id}`, `GET /api/v1/ai-assistant/audit-logs` — Controlled role-aware read-only operations assistant.

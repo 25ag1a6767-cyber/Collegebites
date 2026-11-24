@@ -44,6 +44,15 @@ const KioskPage = lazy(() => import("./pages/kiosk/KioskPage").then((m) => ({ de
 const StaffPortalPage = lazy(() =>
   import("./pages/staff/StaffPortalPage").then((m) => ({ default: m.StaffPortalPage }))
 );
+const NotificationCenterPage = lazy(() =>
+  import("./pages/notifications/NotificationCenterPage").then((m) => ({ default: m.NotificationCenterPage }))
+);
+const FoodSafetyPage = lazy(() =>
+  import("./pages/food-safety/FoodSafetyPage").then((m) => ({ default: m.FoodSafetyPage }))
+);
+const AIAssistantPage = lazy(() =>
+  import("./pages/assistant/AIAssistantPage").then((m) => ({ default: m.AIAssistantPage }))
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -201,6 +210,57 @@ export function App() {
                         ]}
                       >
                         <StaffPortalPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/notifications"
+                    element={
+                      <RequireRole
+                        allowed={[
+                          "customer",
+                          "kitchen_staff",
+                          "cashier",
+                          "pickup_staff",
+                          "inventory_manager",
+                          "food_safety_inspector",
+                          "canteen_manager",
+                          "college_admin",
+                        ]}
+                      >
+                        <NotificationCenterPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/food-safety"
+                    element={
+                      <RequireRole
+                        allowed={[
+                          "food_safety_inspector",
+                          "kitchen_staff",
+                          "inventory_manager",
+                          "canteen_manager",
+                          "college_admin",
+                        ]}
+                      >
+                        <FoodSafetyPage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route
+                    path="/assistant"
+                    element={
+                      <RequireRole
+                        allowed={[
+                          "food_safety_inspector",
+                          "kitchen_staff",
+                          "inventory_manager",
+                          "canteen_manager",
+                          "college_admin",
+                        ]}
+                      >
+                        <AIAssistantPage />
                       </RequireRole>
                     }
                   />

@@ -11,6 +11,7 @@ import { playOrderAlertChime, showBrowserNotification } from "../../utils/notifi
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
+import { ProductionManagementTab } from "./components/ProductionManagementTab";
 
 function formatClockSeconds(totalSecs: number): string {
   const safe = Math.max(0, Math.floor(totalSecs));
@@ -37,6 +38,7 @@ export const KitchenDisplayPage: React.FC = () => {
   const [stationId, setStationId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [delayedOnly, setDelayedOnly] = useState(false);
+  const [kdsView, setKdsView] = useState<"orders" | "production">("orders");
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [delayModalOrder, setDelayModalOrder] = useState<Order | null>(null);
   const [delayMins, setDelayMins] = useState(10);
@@ -358,6 +360,18 @@ export const KitchenDisplayPage: React.FC = () => {
         </div>
       </div>
 
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant={kdsView === "orders" ? "secondary" : "outline"} onClick={() => setKdsView("orders")}>
+          Live Order Board ({orders.length})
+        </Button>
+        <Button size="sm" variant={kdsView === "production" ? "secondary" : "outline"} onClick={() => setKdsView("production")}>
+          Production Planning, Batches &amp; Item-Grouped KDS
+        </Button>
+      </div>
+
+      {kdsView === "production" ? (
+        <ProductionManagementTab activeCanteenId={activeCanteenId} />
+      ) : (
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {columns.map((col) => {
           const colOrders = filteredOrders.filter((o) => o.status === col.key);
@@ -553,6 +567,7 @@ export const KitchenDisplayPage: React.FC = () => {
           );
         })}
       </div>
+      )}
 
       {/* Report Delay Modal */}
       <Modal

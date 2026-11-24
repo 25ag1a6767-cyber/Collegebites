@@ -60,7 +60,7 @@ def send_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
             logger.error("SMTP_HOST is not configured in production; cannot deliver email to %s", to_email)
             return False, "smtp_not_configured"
         logger.info("Email provider not configured; logged email to %s: %s", to_email, subject)
-        return True, "logged"
+        return True, "pending"
 
     msg = EmailMessage()
     msg["Subject"] = subject

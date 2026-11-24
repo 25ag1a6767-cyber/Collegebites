@@ -137,13 +137,17 @@ def _consume_batches(
     )
     if exclude_expired:
         today = today_college()
-        stmt = stmt.where(or_(StockBatch.expiry_date.is_(None), StockBatch.expiry_date >= today))
+        stmt = stmt.where(
+            or_(StockBatch.expiry_date.is_(None), StockBatch.expiry_date >= today),
+            StockBatch.quality_status.not_in(["rejected", "blocked", "recalled"]),
+        )
     remaining = qty
     for batch in db.scalars(stmt).all():
         if remaining <= Decimal("0.000"):
             break
         take = min(batch.remaining_quantity, remaining)
         batch.remaining_quantity -= take
+        batch.consumed_quantity = (batch.consumed_quantity or Decimal("0.000")) + take
         remaining -= take
         if take > 0:
             consumed.append((batch.id, take, batch.expiry_date, batch.unit_cost))
@@ -248,6 +252,7 @@ def _trigger_low_stock_alert_if_needed(
             reorder_level=str(inv.reorder_level),
             unit=inv.unit,
             blocked_foods=blocked_names,
+            is_critical=(inv.current_quantity <= Decimal("0.000")),
         )
     except ImportError:
         pass
@@ -474,6 +479,37 @@ def deduct_inventory_for_order(db: Session, order: Order, actor_user_id: Optiona
                     notes=f"Deducted for order {order.order_number}",
                 )
             )
+            if consumed:
+                try:
+                    from app.models.enterprise import TraceabilityRecord
+
+                    for b_id, b_taken, _b_exp, _b_cost in consumed:
+                        if not b_id:
+                            continue
+                        b_obj = db.get(StockBatch, b_id)
+                        missing = []
+                        if not (b_obj and b_obj.supplier_id):
+                            missing.append("supplier_id")
+                        if not (b_obj and b_obj.purchase_order_id):
+                            missing.append("purchase_order_id")
+                        if not (b_obj and b_obj.goods_receipt_id):
+                            missing.append("goods_receipt_id")
+                        missing.append("production_batch_id")
+                        db.add(
+                            TraceabilityRecord(
+                                canteen_id=order.canteen_id,
+                                supplier_id=b_obj.supplier_id if b_obj else None,
+                                purchase_order_id=b_obj.purchase_order_id if b_obj else None,
+                                goods_receipt_id=b_obj.goods_receipt_id if b_obj else None,
+                                stock_batch_id=b_id,
+                                order_id=order.id,
+                                trace_completeness="partial",
+                                missing_links=missing,
+                                notes=f"Direct order deduction {b_taken} {inv.unit} for order {order.order_number}",
+                            )
+                        )
+                except Exception:
+                    pass
             if inv.current_quantity <= inv.reorder_level:
                 low_stock_targets.append((inv, ing_names.get(inv.ingredient_id, "Ingredient")))
 
@@ -1305,6 +1341,20 @@ def create_purchase_order(db: Session, data: dict, actor_user_id: UUID) -> dict:
         actor_user_id=actor_user_id,
         details={"status": init_status, "total_cost": str(total)},
     )
+    try:
+        from app.services.notification_service import notify_procurement_event
+
+        notify_procurement_event(
+            db,
+            canteen_id=po.canteen_id,
+            event_type="purchase_order_created",
+            po_number=po_number,
+            title=f"Purchase Order Created • {po_number}",
+            message=f"PO {po_number} for {sup.name} ({init_status}, ₹{total}) has been created.",
+            priority="high" if init_status == "pending_approval" else "normal",
+        )
+    except Exception:
+        pass
     db.commit()
     db.refresh(po)
     return _serialize_purchase_order(db, po)
@@ -1352,6 +1402,21 @@ def transition_purchase_order_status(
         actor_user_id=actor_user_id,
         details={"status": po.status, "notes": notes},
     )
+    if target in ("approved", "ordered"):
+        try:
+            from app.services.notification_service import notify_procurement_event
+
+            notify_procurement_event(
+                db,
+                canteen_id=po.canteen_id,
+                event_type=f"purchase_order_{target}",
+                po_number=po.po_number,
+                title=f"Purchase Order {target.title()} • {po.po_number}",
+                message=f"PO {po.po_number} moved to {target.upper()} status.",
+                priority="normal",
+            )
+        except Exception:
+            pass
     db.commit()
     db.refresh(po)
     return _serialize_purchase_order(db, po)
@@ -1491,18 +1556,59 @@ def receive_purchase_order(
                 db.flush()
             inv.current_quantity += receive_qty
             inv.unit_cost = poi.unit_cost
+            mfg_date = entry.get("manufacturing_date") if received_items is not None and entry else None
+            storage_loc = (entry.get("storage_location") if received_items is not None and entry else None) or "Main Store"
             batch = StockBatch(
                 inventory_item_id=inv.id,
                 supplier_id=po.supplier_id,
+                purchase_order_id=po.id,
+                goods_receipt_id=grn.id,
                 batch_number=f"{po.po_number}-{str(poi.ingredient_id)[:4]}-{uuid4().hex[:3].upper()}",
                 initial_quantity=receive_qty,
                 remaining_quantity=receive_qty,
                 unit_cost=poi.unit_cost,
                 received_at=now,
+                manufacturing_date=mfg_date,
                 expiry_date=expiry,
+                storage_location=storage_loc,
+                quality_status="approved",
             )
             db.add(batch)
             db.flush()
+            try:
+                from app.models.enterprise import TraceabilityRecord
+
+                db.add(
+                    TraceabilityRecord(
+                        canteen_id=po.canteen_id,
+                        supplier_id=po.supplier_id,
+                        purchase_order_id=po.id,
+                        goods_receipt_id=grn.id,
+                        stock_batch_id=batch.id,
+                        trace_completeness="partial",
+                        missing_links=["production_batch_id", "order_id"],
+                        notes=f"GRN {grn.grn_number} received {receive_qty} {inv.unit} (batch {batch.batch_number}) from PO {po.po_number}",
+                    )
+                )
+            except Exception:
+                pass
+            if expiry:
+                today_val = today_college()
+                if expiry <= today_val + timedelta(days=7):
+                    try:
+                        from app.services.notification_service import notify_inventory_expiry_alert
+
+                        notify_inventory_expiry_alert(
+                            db,
+                            canteen_id=po.canteen_id,
+                            batch_id=batch.id,
+                            batch_number=batch.batch_number,
+                            ingredient_name=eff_item_name,
+                            expiry_date_str=expiry.isoformat(),
+                            is_expired=(expiry < today_val),
+                        )
+                    except Exception:
+                        pass
             db.add(
                 StockMovement(
                     inventory_item_id=inv.id,
@@ -1534,6 +1640,20 @@ def receive_purchase_order(
         actor_user_id=actor_user_id,
         details={"status": po.status, "grn_number": grn.grn_number},
     )
+    try:
+        from app.services.notification_service import notify_procurement_event
+
+        notify_procurement_event(
+            db,
+            canteen_id=po.canteen_id,
+            event_type="goods_received",
+            po_number=f"{po.po_number}:{grn.grn_number}",
+            title=f"Goods Received • {grn.grn_number}",
+            message=f"Verified goods receipt {grn.grn_number} recorded against PO {po.po_number} (status: {po.status}).",
+            priority="normal",
+        )
+    except Exception:
+        pass
     db.commit()
     return {
         "id": str(po.id),

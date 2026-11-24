@@ -43,7 +43,7 @@ def test_phase30_student_meal_plans_subscription_and_redemption(client: TestClie
     assert mp_res.status_code == 201, mp_res.text
     plan = mp_res.json()
     plan_id = plan["id"]
-    assert Decimal(plan["total_price"]) == Decimal("189.00")
+    assert Decimal(plan["total_price"]) == Decimal("180.00")
 
     # 2. Student subscribes to the meal plan -> starts in pending_payment (NOT active before payment verification)
     sub_res = client.post(

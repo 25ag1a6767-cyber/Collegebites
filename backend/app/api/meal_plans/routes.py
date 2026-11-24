@@ -34,7 +34,7 @@ class MealPlanCreateIn(BaseModel):
     description: Optional[str] = None
     plan_type: str = Field(default="monthly", pattern="^(daily|weekly|monthly|custom)$")
     price: Decimal = Field(gt=0)
-    tax_rate_percent: Decimal = Field(default=Decimal("5.00"), ge=0, le=100)
+    tax_rate_percent: Decimal = Field(default=Decimal("0.00"), ge=0, le=100)
     validity_days: int = Field(ge=1, le=365)
     total_meals: int = Field(ge=1, le=1000)
     eligible_category_ids: Optional[list[UUID]] = None

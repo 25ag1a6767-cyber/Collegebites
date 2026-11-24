@@ -24,6 +24,7 @@ ROLE_CASHIER = "cashier"
 ROLE_KITCHEN_STAFF = "kitchen_staff"
 ROLE_INVENTORY_MANAGER = "inventory_manager"
 ROLE_PICKUP_STAFF = "pickup_staff"
+ROLE_FOOD_SAFETY_INSPECTOR = "food_safety_inspector"
 ROLE_CUSTOMER = "customer"
 
 ALL_ROLES = [
@@ -34,6 +35,7 @@ ALL_ROLES = [
     ROLE_KITCHEN_STAFF,
     ROLE_INVENTORY_MANAGER,
     ROLE_PICKUP_STAFF,
+    ROLE_FOOD_SAFETY_INSPECTOR,
     ROLE_CUSTOMER,
 ]
 
@@ -80,6 +82,17 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "event:approve",
         "invoice:view_all",
         "control_center:view",
+        "food_safety:manage",
+        "food_safety:view",
+        "traceability:manage",
+        "traceability:view",
+        "production:manage",
+        "production:view",
+        "reorder:manage",
+        "reorder:approve",
+        "forecast:view",
+        "forecast:train",
+        "ai_assistant:use",
     ],
     ROLE_CANTEEN_MANAGER: [
         "canteen:manage_assigned",
@@ -110,6 +123,18 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "support:view",
         "qr:manage",
         "security:view",
+        "notification:manage",
+        "food_safety:manage",
+        "food_safety:view",
+        "traceability:manage",
+        "traceability:view",
+        "production:manage",
+        "production:view",
+        "reorder:manage",
+        "reorder:approve",
+        "forecast:view",
+        "forecast:train",
+        "ai_assistant:use",
     ],
     ROLE_CASHIER: [
         "pos:use",
@@ -131,6 +156,12 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "kitchen:report_unavailable",
         "wastage:record",
         "staff:attendance_self",
+        "production:manage",
+        "production:view",
+        "food_safety:view",
+        "food_safety:manage",
+        "traceability:view",
+        "ai_assistant:use",
     ],
     ROLE_INVENTORY_MANAGER: [
         "inventory:manage",
@@ -140,6 +171,12 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "wastage:record",
         "menu:manage_inventory",
         "staff:attendance_self",
+        "traceability:manage",
+        "traceability:view",
+        "reorder:manage",
+        "forecast:view",
+        "food_safety:view",
+        "ai_assistant:use",
     ],
     ROLE_PICKUP_STAFF: [
         "pickup:verify",
@@ -147,6 +184,15 @@ ROLE_PERMISSIONS_MAP: dict[str, list[str]] = {
         "meal_plan:redeem",
         "order:view_canteen",
         "staff:attendance_self",
+    ],
+    ROLE_FOOD_SAFETY_INSPECTOR: [
+        "food_safety:manage",
+        "food_safety:view",
+        "traceability:manage",
+        "traceability:view",
+        "production:view",
+        "staff:attendance_self",
+        "ai_assistant:use",
     ],
     ROLE_CUSTOMER: [
         "order:create",
@@ -443,6 +489,8 @@ def require_permissions(*required_permissions: str):
 def enforce_canteen_scope(principal: AuthenticatedPrincipal, canteen_id: Optional[UUID]) -> None:
     if principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
         return
+    if principal.has_role(ROLE_FOOD_SAFETY_INSPECTOR) and principal.assigned_canteen_id is None:
+        return
     if not principal.assigned_canteen_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -458,6 +506,8 @@ def enforce_canteen_scope(principal: AuthenticatedPrincipal, canteen_id: Optiona
 def scoped_canteen_for_principal(principal: AuthenticatedPrincipal, requested_canteen_id: Optional[UUID]) -> Optional[UUID]:
     """Resolve effective canteen filter, locking non-college-admin staff to their assigned canteen."""
     if principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
+        return requested_canteen_id
+    if principal.has_role(ROLE_FOOD_SAFETY_INSPECTOR) and principal.assigned_canteen_id is None:
         return requested_canteen_id
     enforce_canteen_scope(principal, requested_canteen_id)
     return principal.assigned_canteen_id

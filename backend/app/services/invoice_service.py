@@ -1,4 +1,5 @@
 import io
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
@@ -23,24 +24,38 @@ def _quantize(val: Decimal) -> Decimal:
     return Decimal(str(val)).quantize(Decimal("0.01"))
 
 
+_INVOICE_SEQ_LOCK = threading.Lock()
+_INVOICE_SEQ_FALLBACK: dict[str, int] = {}
+
+
 def _generate_invoice_number(db: Session) -> str:
-    if db.bind and db.bind.dialect.name == "postgresql":
-        db.execute(text("SELECT pg_advisory_xact_lock(918273701)"))
+    """Lock-free monotonic invoice number generator (PG sequence; thread-safe monotonic counter on SQLite)."""
     today_str = today_college().strftime("%Y%m%d")
     prefix = f"INV-{today_str}-"
-    max_num = db.scalar(select(func.max(Invoice.invoice_number)).where(Invoice.invoice_number.like(f"{prefix}%")))
-    if max_num:
+    if db.bind and db.bind.dialect.name == "postgresql":
         try:
-            seq = int(max_num.rsplit("-", 1)[-1]) + 1
-        except ValueError:
-            seq = 1
-    else:
-        seq = 1
-    while True:
-        cand = f"{prefix}{seq:06d}"
-        if not db.scalar(select(Invoice.id).where(Invoice.invoice_number == cand)):
-            return cand
-        seq += 1
+            seq_val = int(db.execute(text("SELECT nextval('invoice_number_seq')")).scalar_one())
+            return f"{prefix}{seq_val:06d}"
+        except Exception:
+            db.execute(text("CREATE SEQUENCE IF NOT EXISTS invoice_number_seq START WITH 1 INCREMENT BY 1"))
+            seq_val = int(db.execute(text("SELECT nextval('invoice_number_seq')")).scalar_one())
+            return f"{prefix}{seq_val:06d}"
+
+    with _INVOICE_SEQ_LOCK:
+        max_num = db.scalar(select(func.max(Invoice.invoice_number)).where(Invoice.invoice_number.like(f"{prefix}%")))
+        db_seq = 0
+        if max_num:
+            try:
+                db_seq = int(max_num.rsplit("-", 1)[-1])
+            except ValueError:
+                db_seq = 0
+        seq = max(db_seq, _INVOICE_SEQ_FALLBACK.get(today_str, 0)) + 1
+        while True:
+            cand = f"{prefix}{seq:06d}"
+            if not db.scalar(select(Invoice.id).where(Invoice.invoice_number == cand)):
+                _INVOICE_SEQ_FALLBACK[today_str] = seq
+                return cand
+            seq += 1
 
 
 STATUTORY_TAX_INCLUSIVE_NOTICE = (

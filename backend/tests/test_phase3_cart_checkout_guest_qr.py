@@ -58,7 +58,7 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
     )
     assert r1.status_code == 200, r1.text
 
-    # Add 2 Cold Coffee (50 * 2 = 100) -> Subtotal = 260, 5% tax = 13.00 -> Total = 273.00
+    # Add 2 Cold Coffee (50 * 2 = 100) -> Subtotal = 260, Discount = 0, Additional Tax = 0 -> Total = 260.00
     r2 = client.post(
         "/api/v1/carts/items",
         headers=guest_headers,
@@ -72,8 +72,8 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
     assert r2.status_code == 200
     assert Decimal(r2.json()["subtotal_amount"]) == Decimal("260.00")
     assert Decimal(r2.json()["discount_amount"]) == Decimal("0.00")
-    assert Decimal(r2.json()["tax_amount"]) == Decimal("13.00")
-    assert Decimal(r2.json()["total_amount"]) == Decimal("273.00")
+    assert Decimal(r2.json()["tax_amount"]) == Decimal("0.00")
+    assert Decimal(r2.json()["total_amount"]) == Decimal("260.00")
 
     # Invalid/non-existent coupon code is rejected on backend
     rc = client.post("/api/v1/carts/coupon", headers=guest_headers, json={"canteen_id": cid, "coupon_code": "CAMPUS10"})
@@ -122,7 +122,7 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
     assert order["payment_status"] == "PENDING"
     assert order["pickup_token_code"] is None  # NO token before verified payment!
     assert order["qr_token_raw"] is None
-    assert Decimal(order["total_amount"]) == Decimal("273.00")
+    assert Decimal(order["total_amount"]) == Decimal("260.00")
     assert order["coupon_code"] is None
     assert order["razorpay_order_id"] is not None
     guest_token = order["guest_access_token"]

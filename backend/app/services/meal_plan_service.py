@@ -488,7 +488,10 @@ def _validate_subscription_and_item_eligibility(
     now = datetime.now(timezone.utc)
     if sub.payment_status != "CONFIRMED":
         raise HTTPException(status_code=400, detail="Meal plan subscription payment is not verified/confirmed")
-    if sub.expires_at and sub.expires_at <= now:
+    exp_dt = sub.expires_at
+    if exp_dt is not None and exp_dt.tzinfo is None:
+        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+    if exp_dt and exp_dt <= now:
         sub.status = "expired"
         db.commit()
         raise HTTPException(status_code=400, detail="Meal plan subscription has expired")

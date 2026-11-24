@@ -463,14 +463,19 @@ export const OrderTrackingPage: React.FC = () => {
                     </div>
                   </div>
                   <div>
-                    <div className="text-[10px] font-bold uppercase text-slate-500">Dynamic Wait ETA</div>
+                    <div className="text-[10px] font-bold uppercase text-slate-500">Wait Time (Estimated)</div>
                     <div className="flex items-center gap-1.5">
                       <span className="text-lg font-black text-emerald-700">
                         {order.status === "READY"
                           ? "0 min"
-                          : `~${order.dynamic_wait_minutes ?? order.estimated_prep_minutes + order.delayed_minutes} min`}
+                          : order.dynamic_wait_minutes != null || order.estimated_prep_minutes > 0
+                          ? `~${order.dynamic_wait_minutes ?? order.estimated_prep_minutes + order.delayed_minutes} min`
+                          : "Waiting time currently unavailable."}
                       </span>
                       {order.is_priority && <Badge tone="red">PRIORITY</Badge>}
+                    </div>
+                    <div className="text-[10px] text-slate-400">
+                      Last updated: {orderLastSyncedAt ? new Date(orderLastSyncedAt).toLocaleTimeString() : new Date(nowMs).toLocaleTimeString()}
                     </div>
                   </div>
                 </div>
