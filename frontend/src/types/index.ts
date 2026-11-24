@@ -25,7 +25,6 @@ export interface CollegeSettings {
   kiosk_enabled: boolean;
   guest_otp_required: boolean;
   razorpay_enabled: boolean;
-  stripe_enabled?: boolean;
   cash_at_counter_enabled: boolean;
   pay_at_pickup_enabled: boolean;
   college_timezone?: string;
@@ -239,11 +238,6 @@ export interface Order {
   guest_access_token?: string | null;
   razorpay_order_id?: string | null;
   razorpay_key_id?: string | null;
-  stripe_payment_intent_id?: string | null;
-  stripe_client_secret?: string | null;
-  stripe_session_id?: string | null;
-  stripe_checkout_url?: string | null;
-  stripe_publishable_key?: string | null;
   cancellation_policy_text?: string | null;
   created_at: string;
   confirmed_at?: string | null;

@@ -20,7 +20,6 @@ from sqlalchemy import create_engine, select, text
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.integrations.razorpay_client import razorpay_gateway
-from app.integrations.stripe_client import stripe_gateway
 from app.models.base import Base
 from app.models.college import Canteen, Counter, Kitchen
 from app.models.menu import FoodCategory, FoodItem
@@ -39,10 +38,6 @@ def _rzp_sig(order_id: str, payment_id: str) -> str:
 
 def _rzp_webhook_sig(raw_body: bytes) -> str:
     return razorpay_gateway.compute_test_webhook_signature(raw_body=raw_body)
-
-
-def _stripe_sig(payment_intent_id: str) -> str:
-    return stripe_gateway.compute_test_payment_signature(stripe_payment_intent_id=payment_intent_id)
 
 
 def _get_counters(client: TestClient) -> tuple[dict, dict]:
@@ -153,7 +148,7 @@ def test_03_multiple_quantities_exact_pricing(client: TestClient):
         headers=student["headers"],
         json={
             "canteen_id": main["id"],
-            "payment_method": "stripe",
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": coffee["id"], "quantity": 2}],
             "accepted_policy": True,
@@ -377,8 +372,8 @@ def test_06_discounts_coupons_loyalty_and_extra_tax_disabled_everywhere(client: 
     assert Decimal(sub.json()["total_amount"]) == Decimal(p0["price"])
 
 
-def test_07_successful_payment_exact_amount_razorpay_and_stripe(client: TestClient):
-    """Scenario 7: Both Razorpay & Stripe verified payments charge exact subtotal and generate token + QR + receipt."""
+def test_07_successful_payment_exact_amount_razorpay_only(client: TestClient):
+    """Scenario 7: Razorpay verified payment charges exact subtotal and generates token + QR + receipt."""
     student = login_as(client, "student@collegebites.edu", "Student@12345")
     main, _ = _get_counters(client)
     items = client.get(f"/api/v1/menus/canteens/{main['id']}/items").json()
@@ -430,35 +425,6 @@ def test_07_successful_payment_exact_amount_razorpay_and_stripe(client: TestClie
     assert Decimal(snap["tax_amount"]) == Decimal("0.00")
     assert Decimal(snap["total_paid"]) == expected
     assert "statutory taxes" in (snap.get("tax_inclusive_notice") or "").lower()
-
-    # Stripe flow
-    co_s = client.post(
-        "/api/v1/orders/checkout",
-        headers=student["headers"],
-        json={
-            "canteen_id": main["id"],
-            "payment_method": "stripe",
-            "use_cart": False,
-            "direct_items": [{"food_item_id": dosa["id"], "quantity": 1}],
-            "accepted_policy": True,
-        },
-    )
-    assert co_s.status_code == 201
-    ord_s = co_s.json()
-    assert Decimal(ord_s["total_amount"]) == Decimal(dosa["base_price"])
-    ver_s = client.post(
-        "/api/v1/payments/stripe/verify",
-        headers=student["headers"],
-        json={
-            "order_id": ord_s["id"],
-            "stripe_payment_intent_id": ord_s["stripe_payment_intent_id"],
-            "stripe_signature": _stripe_sig(ord_s["stripe_payment_intent_id"]),
-        },
-    )
-    assert ver_s.status_code == 200, ver_s.text
-    assert ver_s.json()["payment_status"] == "CONFIRMED"
-    assert Decimal(ver_s.json()["total_amount"]) == Decimal(dosa["base_price"])
-    assert ver_s.json()["pickup_token_code"]
 
 
 def test_08_failed_payment_handling(client: TestClient):
@@ -570,19 +536,21 @@ def test_10_order_history_matches_exact_totals(client: TestClient):
         headers=student["headers"],
         json={
             "canteen_id": main["id"],
-            "payment_method": "stripe",
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": biryani["id"], "quantity": 1}],
             "accepted_policy": True,
         },
     ).json()
+    pay_id_10 = f"pay_p34_10_{uuid4().hex[:8]}"
     client.post(
-        "/api/v1/payments/stripe/verify",
+        "/api/v1/payments/razorpay/verify",
         headers=student["headers"],
         json={
             "order_id": co["id"],
-            "stripe_payment_intent_id": co["stripe_payment_intent_id"],
-            "stripe_signature": _stripe_sig(co["stripe_payment_intent_id"]),
+            "razorpay_order_id": co["razorpay_order_id"],
+            "razorpay_payment_id": pay_id_10,
+            "razorpay_signature": _rzp_sig(co["razorpay_order_id"], pay_id_10),
         },
     )
 
@@ -610,19 +578,21 @@ def test_11_invoice_generation_statutory_compliance_and_historical_preservation(
         headers=student["headers"],
         json={
             "canteen_id": main["id"],
-            "payment_method": "stripe",
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": coffee["id"], "quantity": 2}],
             "accepted_policy": True,
         },
     ).json()
+    pay_id_11 = f"pay_p34_11_{uuid4().hex[:8]}"
     client.post(
-        "/api/v1/payments/stripe/verify",
+        "/api/v1/payments/razorpay/verify",
         headers=student["headers"],
         json={
             "order_id": co["id"],
-            "stripe_payment_intent_id": co["stripe_payment_intent_id"],
-            "stripe_signature": _stripe_sig(co["stripe_payment_intent_id"]),
+            "razorpay_order_id": co["razorpay_order_id"],
+            "razorpay_payment_id": pay_id_11,
+            "razorpay_signature": _rzp_sig(co["razorpay_order_id"], pay_id_11),
         },
     )
 
@@ -791,7 +761,7 @@ def test_18_to_22_independent_menus_orders_kds_queues_and_tokens(client: TestCli
         headers=student["headers"],
         json={
             "canteen_id": main["id"],
-            "payment_method": "stripe",
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": m_item["id"], "quantity": 1}],
             "accepted_policy": True,
@@ -802,7 +772,7 @@ def test_18_to_22_independent_menus_orders_kds_queues_and_tokens(client: TestCli
         headers=student["headers"],
         json={
             "canteen_id": snacks["id"],
-            "payment_method": "stripe",
+            "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": s_item["id"], "quantity": 2}],
             "accepted_policy": True,
@@ -811,22 +781,26 @@ def test_18_to_22_independent_menus_orders_kds_queues_and_tokens(client: TestCli
     assert Decimal(co_m["total_amount"]) == Decimal(m_item["base_price"])
     assert Decimal(co_s["total_amount"]) == Decimal(s_item["base_price"]) * 2
 
+    pay_m = f"pay_m_{uuid4().hex[:8]}"
+    pay_s = f"pay_s_{uuid4().hex[:8]}"
     conf_m = client.post(
-        "/api/v1/payments/stripe/verify",
+        "/api/v1/payments/razorpay/verify",
         headers=student["headers"],
         json={
             "order_id": co_m["id"],
-            "stripe_payment_intent_id": co_m["stripe_payment_intent_id"],
-            "stripe_signature": _stripe_sig(co_m["stripe_payment_intent_id"]),
+            "razorpay_order_id": co_m["razorpay_order_id"],
+            "razorpay_payment_id": pay_m,
+            "razorpay_signature": _rzp_sig(co_m["razorpay_order_id"], pay_m),
         },
     ).json()
     conf_s = client.post(
-        "/api/v1/payments/stripe/verify",
+        "/api/v1/payments/razorpay/verify",
         headers=student["headers"],
         json={
             "order_id": co_s["id"],
-            "stripe_payment_intent_id": co_s["stripe_payment_intent_id"],
-            "stripe_signature": _stripe_sig(co_s["stripe_payment_intent_id"]),
+            "razorpay_order_id": co_s["razorpay_order_id"],
+            "razorpay_payment_id": pay_s,
+            "razorpay_signature": _rzp_sig(co_s["razorpay_order_id"], pay_s),
         },
     ).json()
 
@@ -986,8 +960,8 @@ def test_25_third_counter_blocked_and_migration_safely_cleans_legacy_db(client: 
             conn.execute(
                 text(
                     "INSERT INTO college_settings (id, college_name, college_short_code, default_tax_rate_percent, currency_code, currency_symbol, "
-                    "cancellation_policy_text, kiosk_enabled, guest_otp_required, razorpay_enabled, stripe_enabled, cash_at_counter_enabled, pay_at_pickup_enabled, college_timezone, created_at, updated_at) "
-                    "VALUES (:id, 'ACE', 'ACE', 5.00, 'INR', 'Rs', 'Policy', 0, 1, 1, 1, 0, 0, 'Asia/Kolkata', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    "cancellation_policy_text, kiosk_enabled, guest_otp_required, razorpay_enabled, cash_at_counter_enabled, pay_at_pickup_enabled, college_timezone, created_at, updated_at) "
+                    "VALUES (:id, 'ACE', 'ACE', 5.00, 'INR', 'Rs', 'Policy', 0, 1, 1, 0, 0, 'Asia/Kolkata', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 ),
                 {"id": uuid4().hex},
             )

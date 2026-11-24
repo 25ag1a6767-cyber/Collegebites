@@ -119,7 +119,7 @@ def test_security_sqli_headers_and_concurrent_handover_and_tokens(client: TestCl
     assert statuses.count(409) == 3
 
 
-def test_section_34_full_end_to_end_acceptance_scenario(client: TestClient):
+def test_section_34_full_end_to_end_acceptance_scenario(client: TestClient, otp_capture):
     """Verifies all 27 steps of Section 34 Final Acceptance Criteria end-to-end."""
     kitchen = login_as(client, "kitchen@collegebites.edu", "Staff@12345")
     pickup = login_as(client, "pickup@collegebites.edu", "Staff@12345")
@@ -159,9 +159,10 @@ def test_section_34_full_end_to_end_acceptance_scenario(client: TestClient):
 
     # 6-7. Guest verifies OTP & proceeds to checkout (backend validates prices, availability, capacity)
     otp = client.post("/api/v1/auth/otp/request", json={"target": "+919876500001", "purpose": "guest_checkout"}).json()
+    assert "dev_otp" not in otp
     ver = client.post(
         "/api/v1/auth/otp/verify",
-        json={"target": "+919876500001", "purpose": "guest_checkout", "code": otp["dev_otp"]},
+        json={"target": "+919876500001", "purpose": "guest_checkout", "code": otp_capture.latest_code("+919876500001")},
     ).json()
 
     checkout = client.post(

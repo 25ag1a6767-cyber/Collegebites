@@ -23,7 +23,6 @@ class CollegeSettingsOut(ORMModel):
     kiosk_enabled: bool
     guest_otp_required: bool
     razorpay_enabled: bool
-    stripe_enabled: bool = True
     cash_at_counter_enabled: bool
     pay_at_pickup_enabled: bool
     college_timezone: str = "Asia/Kolkata"
@@ -41,7 +40,6 @@ class CollegeSettingsUpdate(BaseModel):
     kiosk_enabled: Optional[bool] = None
     guest_otp_required: Optional[bool] = None
     razorpay_enabled: Optional[bool] = None
-    stripe_enabled: Optional[bool] = None
     cash_at_counter_enabled: Optional[bool] = None
     pay_at_pickup_enabled: Optional[bool] = None
     college_timezone: Optional[str] = Field(default=None, max_length=64)

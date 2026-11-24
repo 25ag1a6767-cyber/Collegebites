@@ -14,7 +14,6 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.integrations.razorpay_client import razorpay_gateway
-from app.integrations.stripe_client import stripe_gateway
 from app.models.college import Canteen
 from app.models.order import Order
 from app.models.payment import (
@@ -239,10 +238,6 @@ def run_auto_reconciliation(
                     fee = (Decimal(int(gw_pay.get("fee") or 0)) / Decimal("100")).quantize(Decimal("0.01"))
                     tax = (Decimal(int(gw_pay.get("tax") or 0)) / Decimal("100")).quantize(Decimal("0.01"))
                     settlement_id = gw_pay.get("acquirer_data", {}).get("rrn") or gw_pay.get("settlement_id")
-            elif payment.provider == "stripe" and stripe_gateway.use_live_api and payment.provider_payment_id:
-                gw_pi = stripe_gateway.fetch_payment_intent_safe(payment.provider_payment_id)
-                if gw_pi and gw_pi.get("amount_received") is not None:
-                    settled_amount = (Decimal(int(gw_pi["amount_received"])) / Decimal("100")).quantize(Decimal("0.01"))
 
         if disc_txs or (settled_amount - order.total_amount).quantize(Decimal("0.01")) != Decimal("0.00"):
             discrepancy += 1
@@ -313,7 +308,7 @@ def run_auto_reconciliation(
             select(PaymentWebhookEvent)
             .where(
                 PaymentWebhookEvent.signature_verified.is_(True),
-                PaymentWebhookEvent.event_type.in_(("payment.captured", "order.paid", "payment_intent.succeeded", "checkout.session.completed")),
+                PaymentWebhookEvent.event_type.in_(("payment.captured", "order.paid")),
             )
             .order_by(PaymentWebhookEvent.created_at.desc())
             .limit(200)

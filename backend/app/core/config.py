@@ -76,19 +76,21 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    OTP_EXPIRY_SECONDS: int = 300
     OTP_EXPIRY_MINUTES: int = 5
+    OTP_RESEND_COOLDOWN_SECONDS: int = 60
     OTP_MAX_ATTEMPTS: int = 5
-    OTP_TEST_ECHO: bool = True
+    OTP_PROVIDER: str = ""
+    OTP_EMAIL_FROM: str = ""
+    OTP_SMS_ENABLED: bool = False
+    OTP_RATE_LIMIT_PER_DEST_15M: int = 5
+    OTP_RATE_LIMIT_PER_IP_15M: int = 15
+    OTP_RATE_LIMIT_PER_USER_15M: int = 6
 
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""
     RAZORPAY_TEST_MODE: bool = True
-
-    STRIPE_PUBLISHABLE_KEY: str = ""
-    STRIPE_SECRET_KEY: str = ""
-    STRIPE_WEBHOOK_SECRET: str = ""
-    STRIPE_TEST_MODE: bool = True
 
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
@@ -97,6 +99,14 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_SECURE: bool = False
     SMTP_FROM_EMAIL: str = "noreply@collegebites.edu"
+    RESEND_API_KEY: str = ""
+    SENDGRID_API_KEY: str = ""
+
+    @property
+    def effective_otp_expiry_seconds(self) -> int:
+        if self.OTP_EXPIRY_SECONDS and self.OTP_EXPIRY_SECONDS > 0:
+            return int(self.OTP_EXPIRY_SECONDS)
+        return max(60, int(self.OTP_EXPIRY_MINUTES) * 60)
 
     @property
     def effective_smtp_user(self) -> str:
@@ -104,6 +114,8 @@ class Settings(BaseSettings):
 
     @property
     def effective_smtp_from(self) -> str:
+        if self.OTP_EMAIL_FROM and self.OTP_EMAIL_FROM.strip():
+            return self.OTP_EMAIL_FROM.strip()
         if self.SMTP_FROM_EMAIL and self.SMTP_FROM_EMAIL != "noreply@collegebites.edu":
             return self.SMTP_FROM_EMAIL.strip()
         if "@" in self.effective_smtp_user:

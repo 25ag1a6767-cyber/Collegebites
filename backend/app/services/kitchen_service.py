@@ -138,7 +138,12 @@ def accept_order(db: Session, order_id: UUID, staff_user_id: UUID) -> OrderOut:
     )
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if order.payment_status != "CONFIRMED":
+        raise HTTPException(status_code=409, detail="Order cannot be accepted before payment verification")
     transition_order_status(db, order, "ACCEPTED", actor_user_id=staff_user_id, reason="Accepted by kitchen")
+    from app.services.receipt_service import ensure_kot_print_job_for_accepted_order
+
+    ensure_kot_print_job_for_accepted_order(db, order, actor_user_id=staff_user_id)
     notify_customer_order_event(
         db,
         order,

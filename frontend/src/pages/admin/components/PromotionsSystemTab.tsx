@@ -269,15 +269,7 @@ export const SystemTab: React.FC<{
                   />
                   Razorpay Enabled
                 </label>
-                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(college.stripe_enabled ?? true)}
-                    onChange={() => void toggleSetting("stripe_enabled", !(college.stripe_enabled ?? true), "Stripe")}
-                  />
-                  Stripe Enabled
-                </label>
-                <Badge tone="green">Online Only (No Cash)</Badge>
+                <Badge tone="green">Razorpay Only (No Cash)</Badge>
                 <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
                   <input
                     type="checkbox"
@@ -372,7 +364,6 @@ export const SystemTab: React.FC<{
           <h2 className="font-bold text-slate-900">Recent Payments & Reconciliation (No Refunds)</h2>
           <div className="flex flex-wrap gap-1.5 text-xs">
             <Badge tone="green">Razorpay Active (UPI / Cards / Netbanking)</Badge>
-            <Badge tone="blue">Stripe Active (Cards / Apple Pay / Google Pay)</Badge>
           </div>
         </div>
         <div className="space-y-2 text-xs">

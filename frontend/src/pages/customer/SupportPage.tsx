@@ -5,6 +5,7 @@ import { LifeBuoy, MessageSquare, Send } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import { BrandLogo } from "../../components/branding/BrandLogo";
+import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
 
 export const SupportPage: React.FC = () => {
@@ -18,10 +19,7 @@ export const SupportPage: React.FC = () => {
   const [description, setDescription] = useState("");
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
-  const [guestOtp, setGuestOtp] = useState("");
   const [guestOtpToken, setGuestOtpToken] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
   const [guestTickets, setGuestTickets] = useState<any[]>([]);
   const [guestMessages, setGuestMessages] = useState<any[]>([]);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
@@ -186,79 +184,28 @@ export const SupportPage: React.FC = () => {
           </h2>
           {!user && (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2 text-xs">
-              <div className="font-bold text-slate-700">Guest Ticket Lookup (via Mobile OTP)</div>
-              <div className="flex flex-wrap gap-2">
-                <Input
-                  value={guestPhone}
-                  onChange={(e) => setGuestPhone(e.target.value)}
-                  placeholder="Guest Mobile Number"
-                  className="w-40"
-                />
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={busy || !guestPhone.trim()}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      const r = await api.post("/auth/otp/request", { target: guestPhone.trim(), purpose: "guest_checkout" });
-                      setOtpSent(true);
-                      setDevOtpHint(r.data.dev_otp || null);
-                      pushToast("OTP sent", "success");
-                    } catch (err) {
-                      pushToast(getApiError(err), "error");
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                >
-                  {otpSent ? "Resend" : "Send OTP"}
-                </Button>
-                {otpSent && (
-                  <>
-                    <Input
-                      value={guestOtp}
-                      onChange={(e) => setGuestOtp(e.target.value)}
-                      placeholder="OTP"
-                      maxLength={6}
-                      className="w-24"
-                    />
-                    <Button
-                      size="sm"
-                      disabled={busy || guestOtp.trim().length < 6}
-                      onClick={async () => {
-                        setBusy(true);
-                        try {
-                          const ver = await api.post("/auth/otp/verify", {
-                            target: guestPhone.trim(),
-                            purpose: "guest_checkout",
-                            code: guestOtp.trim(),
-                          });
-                          const tok = ver.data.verification_token;
-                          setGuestOtpToken(tok);
-                          const rows = await api.post("/support/tickets/guest/lookup", {
-                            guest_phone: guestPhone.trim(),
-                            otp_verification_token: tok,
-                          });
-                          setGuestTickets(rows.data);
-                          pushToast(`Loaded ${rows.data.length} ticket(s)`, "success");
-                        } catch (err) {
-                          pushToast(getApiError(err), "error");
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      Verify & Load
-                    </Button>
-                  </>
-                )}
-              </div>
-              {devOtpHint && (
-                <div>
-                  Dev OTP: <strong className="font-mono">{devOtpHint}</strong>
-                </div>
-              )}
+              <div className="font-bold text-slate-700">Guest Ticket Lookup (via Live OTP)</div>
+              <OtpVerificationBox
+                target={guestPhone}
+                onTargetChange={setGuestPhone}
+                targetPlaceholder="Guest Mobile or Email"
+                purpose="guest_checkout"
+                verifyButtonLabel="Verify & Load Tickets"
+                compact
+                onVerified={async (tok) => {
+                  setGuestOtpToken(tok);
+                  try {
+                    const rows = await api.post("/support/tickets/guest/lookup", {
+                      guest_phone: guestPhone.trim(),
+                      otp_verification_token: tok,
+                    });
+                    setGuestTickets(rows.data);
+                    pushToast(`Loaded ${rows.data.length} ticket(s)`, "success");
+                  } catch (err) {
+                    pushToast(getApiError(err), "error");
+                  }
+                }}
+              />
             </div>
           )}
 

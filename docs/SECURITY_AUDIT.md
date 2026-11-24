@@ -11,9 +11,8 @@
 
 ## 2. Payment, Financial & No-Refund Security
 - **Server-Side Pricing Authority:** Cart/order totals are computed strictly from database `FoodItem.base_price`, `FoodVariant.price_delta`, and `FoodAddon.price` with zero client price trust, zero discounts, and zero extra checkout taxes.
-- **Cryptographic Webhook & Callback Verification:**
-  - Razorpay: HMAC-SHA256 verification of `razorpay_order_id|razorpay_payment_id` and `X-Razorpay-Signature` webhook verification.
-  - Stripe: Official SDK `PaymentIntent`/`CheckoutSession` verification and `Stripe-Signature` HMAC verification.
+- **Cryptographic Webhook & Callback Verification (Razorpay Only):**
+  - Razorpay: Server-side HMAC-SHA256 verification of `razorpay_order_id|razorpay_payment_id`, gateway payment status/amount/currency validation when live credentials are active, and `X-Razorpay-Signature` webhook verification (`payment.captured`, `order.paid`, `payment.failed`).
   - Amount & currency mismatch detection creates `PaymentReconciliation` discrepancy records and high-severity `SecurityAlert` rows.
   - Duplicate payment references and late captures on terminal orders are blocked (`409`), logged as `late_capture_conflict`, and trigger critical `duplicate_payment_investigation` alerts.
 - **No Refunds Policy:** Zero refund APIs exist; confirmed payments are preserved in immutable payment/ledger tables.

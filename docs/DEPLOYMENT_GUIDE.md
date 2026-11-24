@@ -6,60 +6,65 @@ CollegeBites runs as one shared system across:
 - **Customer Mobile App (`mobile/`)**: Expo Router + React Native + TypeScript (Android, iOS, and Web export).
 - **Backend API & WebSockets (`backend/`)**: FastAPI + SQLAlchemy 2 + Alembic + PostgreSQL + Redis + Celery (deployed via Vercel Python Serverless Runtime in `vercel.json`).
 
-## 2. Environment Variables Required in Production
+## 2. Production Hosting Checklist (Razorpay Only + Live OTP)
 
 ### Required Core Secrets
 - `ENVIRONMENT=production`
-- `DATABASE_URL` / `DATABASE_URL_UNPOOLED` (PostgreSQL SSL connection string, e.g., Neon Postgres)
-- `SECRET_KEY` (64+ random character JWT signing key)
+- `DATABASE_URL` / `DATABASE_URL_UNPOOLED` (PostgreSQL SSL connection string, e.g., Neon Postgres `-pooler` host)
+- `SECRET_KEY` (64+ random character JWT & OTP HMAC signing key)
 - `QR_SIGNING_SECRET` (64+ random character HMAC-SHA256 key for pickup QRs & guest access tokens)
 - `PUBLIC_BASE_URL=https://collegebites-alpha.vercel.app`
 - `PUBLIC_FRONTEND_URL=https://collegebites-alpha.vercel.app`
-- `CORS_ORIGINS=["https://collegebites-alpha.vercel.app"]`
-- `CRON_SECRET` (random 16+ char secret so Vercel Schedules in `vercel.json` `schedules.collegebites-hourly-maintenance` can securely invoke `POST /api/v1/admin/maintenance/run`)
+- `CORS_ORIGINS=https://collegebites-alpha.vercel.app`
+- `CRON_SECRET` (random 16+ char secret for scheduled maintenance `POST /api/v1/admin/maintenance/run`)
 
-### Payment Gateways (Strict Online-Only Policy)
-Live online checkout requires configured gateway credentials (`503 Service Unavailable` returned cleanly if unconfigured in production):
-- **Razorpay**: `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RAZORPAY_TEST_MODE=false` (or test keys `rzp_test_*` when testing in Razorpay Sandbox — note real REST API calls still run whenever credentials are set).
-- **Stripe**: `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` (served to Web Elements & Mobile PaymentSheet via `/api/v1/payments/stripe/config`), `STRIPE_WEBHOOK_SECRET`, `STRIPE_TEST_MODE=false`.
-- **Redis**: Set `REDIS_URL` (or Vercel `KV_URL`/`UPSTASH_REDIS_URL`) for multi-instance cache/Celery coordination; non-authoritative slot/queue cache writes degrade cleanly to PostgreSQL `FOR UPDATE` if Redis is unavailable, and development falls back to `memory://` FakeRedis when local Redis is offline.
-- Webhook URLs to register in merchant dashboards:
-  - `POST https://<domain>/api/v1/payments/razorpay/webhook`
-  - `POST https://<domain>/api/v1/payments/stripe/webhook`
+### Razorpay Payment Gateway (Sole Online Gateway)
+Razorpay is the **only** supported online payment gateway (`503 Service Unavailable` returned cleanly if unconfigured in production):
+- **Server-Side Environment Variables (Backend / Vercel Serverless ONLY — NEVER expose secrets to frontend):**
+  - `RAZORPAY_KEY_ID` (`rzp_live_...` in production, or `rzp_test_...` in staging)
+  - `RAZORPAY_KEY_SECRET` (**strictly server-side secret**)
+  - `RAZORPAY_WEBHOOK_SECRET` (**strictly server-side webhook HMAC secret**)
+  - `RAZORPAY_TEST_MODE=false` in live production (`true` in sandbox)
+- **Optional Public Frontend Variable:**
+  - `VITE_RAZORPAY_KEY_ID` (public Key ID only; backend also returns `razorpay_key_id` on Razorpay order payloads and `GET /api/v1/payments/razorpay/config`)
+- **Razorpay Dashboard Webhook Registration:**
+  - Endpoint: `POST https://collegebites-alpha.vercel.app/api/v1/payments/razorpay/webhook`
+  - Subscribed Events: `payment.captured`, `order.paid`, `payment.failed`
+  - Secret: Must match `RAZORPAY_WEBHOOK_SECRET`
 
-### OTP & Notifications (SMTP Email + SMS)
-- **Email OTP (SMTP)**: Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME` (or `SMTP_USER`), `SMTP_PASSWORD`, `SMTP_SECURE` (`true` for port `465` SSL / `false` for STARTTLS), `SMTP_FROM`.
-- **SMS / WhatsApp OTP**: Set `SMS_PROVIDER=twilio` (with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`) or `SMS_PROVIDER=webhook` (`SMS_WEBHOOK_URL`). If no SMS provider is configured in production, SMS OTP requests return HTTP `503` instead of silently faking delivery.
+### Live OTP Authentication & Transactional Delivery
+CollegeBites enforces **real OTP delivery only** (zero hardcoded/static OTPs, zero `dev_otp` browser responses, zero plaintext OTP logging):
+- `OTP_EXPIRY_SECONDS=300` (5-minute validity)
+- `OTP_RESEND_COOLDOWN_SECONDS=60` (60-second resend cooldown)
+- `OTP_MAX_ATTEMPTS=5` (invalidates code after 5 failed attempts)
+- `OTP_PROVIDER=smtp` (or `resend` / `sendgrid`; auto-detected when left blank)
+- `OTP_EMAIL_FROM=noreply@yourdomain.edu` (verified sender address)
+- `OTP_SMS_ENABLED=false` (keep `false` until SMS provider + Indian DLT template/entity registration are configured)
+- **Transactional Email Credentials (configure one):**
+  - **SMTP**: `SMTP_HOST`, `SMTP_PORT` (`587` STARTTLS or `465` SSL), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_SECURE`
+  - **Resend API**: `RESEND_API_KEY` + `OTP_EMAIL_FROM`
+  - **SendGrid API**: `SENDGRID_API_KEY` + `OTP_EMAIL_FROM`
+- **SMS OTP Credentials (only when `OTP_SMS_ENABLED=true`):**
+  - `SMS_PROVIDER=twilio` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`, or `SMS_PROVIDER=webhook` with `SMS_WEBHOOK_URL`
 
-### Mobile Build Configuration (`mobile/`)
-- Set `EXPO_PUBLIC_API_URL=https://collegebites-alpha.vercel.app/api/v1` (or `mobile/app.json` `expo.extra.apiUrl`) before building EAS / native binaries (`npx eas build --platform all`). Note that `@stripe/stripe-react-native` native PaymentSheet requires a custom Expo development client or EAS build (Android APK/AAB or iOS IPA) rather than stock Expo Go.
+### Redis & Mobile Build Configuration
+- **Redis**: Set `REDIS_URL` (or Vercel `KV_URL`/`UPSTASH_REDIS_URL`) for multi-instance cache/Celery coordination.
+- **Mobile (`mobile/`)**: Set `EXPO_PUBLIC_API_URL=https://collegebites-alpha.vercel.app/api/v1` before running `npx eas build --platform all`.
 
-## 3. Deployment Steps (Vercel + Neon Postgres)
+## 3. Safe Deployment Steps (Vercel + Neon Postgres)
 
-1. **Pre-Deploy Database Migration**:
+1. **Pre-Deploy Database Backup & Migration**:
    ```bash
+   pg_dump --format=custom --no-owner "$DATABASE_URL_UNPOOLED" -f backup_pre_rzp_otp.dump
    cd backend
    alembic upgrade head
    ```
-   Migration head `e5f6a7b8c9d0` (`e5f6a7b8c9d0_enterprise_modules_and_sequences.py`, chaining off `d4e5f6a7b8c9`) adds all 24 enterprise tables (Food Safety, Traceability & Recalls, Production Management, Automated Reordering, Queue Estimate History, ML Forecasting, AI Assistant, Notification Deliveries), extends `notifications`, `suppliers`, `stock_batches`, and `recipes`, and creates lock-free PostgreSQL sequences `order_number_seq` and `invoice_number_seq`.
-   > **Safety Rule:** Always create a verified PostgreSQL snapshot (`pg_dump --format=custom`) and test `alembic upgrade head` on a staging branch before migrating production. Never deploy or run destructive commands on production without explicit approval.
-2. **Production Initial Admin Bootstrap** (only when creating a clean production database; `seed_demo` blocks execution in `ENVIRONMENT=production`):
-   ```bash
-   python -m app.cli.create_admin --email admin@yourcollege.edu --name "College Super Admin"
-   ```
-3. **Frontend & Backend Verification**:
-   - Build and check zero dev-account leaks: `cd frontend && npx tsc --noEmit && npm test -- --run && npm run build`
-   - Run full backend pytest suite against PostgreSQL (`TEST_DATABASE_URL`).
-4. **Deploy to Vercel Production**:
-   ```bash
-   vercel deploy --prod --yes
-   ```
-5. **Post-Deploy Verification**:
+   Migration head `f6a7b8c9d0e1` (`f6a7b8c9d0e1_razorpay_only_and_live_otp.py`, chaining off `e5f6a7b8c9d0`) drops deprecated `college_settings.stripe_enabled` (preserving 100% of historical payment/transaction/reconciliation rows), adds `receipt_print_jobs.job_type` (`customer_receipt` vs `kot`), and adds live OTP security columns (`user_id`, `channel`, `provider`, `ip_address`, `resend_available_at`, `consumed_at`, `invalidated_at`).
+2. **Frontend & Backend Verification**:
+   - `cd frontend && npm run typecheck && npm run test && npm run build`
+   - `cd mobile && npm run typecheck`
+   - `cd backend && pytest`
+3. **Deploy & Post-Deploy Smoke Checks**:
    - Verify `GET /health` returns `200 OK`
-   - Verify `GET /api/v1/canteens` returns seeded canteens with `allow_cash_at_counter=false` and `allow_pay_at_pickup=false`
-   - Verify `GET /api/v1/qr/website/download?target_type=website&format=svg` (as `college_admin`) embeds the configured HTTPS URL (never `localhost`)
-   - Confirm coupon endpoints return `404`/`405`.
-
-## 4. Backup & Rollback Procedure
-- Create a Neon branch snapshot or `pg_dump --format=custom --no-owner "$DATABASE_URL_UNPOOLED"` prior to running Alembic migrations.
-- Roll back deployments via `vercel rollback <deployment-url>` and schema if necessary via `alembic downgrade -1`.
+   - Verify `GET /api/v1/payments/razorpay/config` returns `configured: true` without exposing secrets
+   - Verify `GET /api/v1/auth/otp/capabilities` reports `email_otp_enabled: true` once SMTP/Resend/SendGrid is configured.

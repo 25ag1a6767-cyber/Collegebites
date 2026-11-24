@@ -12,14 +12,12 @@ const FORBIDDEN_OFFLINE_PATTERNS = [
   /\/kiosk\/orders/i,
   /\/pickup\/handover/i,
   /razorpay/i,
-  /stripe/i,
   /reconcil/i,
 ];
 
 const SENSITIVE_CACHE_FIELDS = new Set([
-  "stripe_client_secret",
   "razorpay_key_id",
-  "stripe_publishable_key",
+  "razorpay_signature",
   "guest_access_token",
   "password",
   "password_hash",

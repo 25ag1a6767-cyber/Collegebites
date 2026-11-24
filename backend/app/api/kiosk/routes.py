@@ -43,7 +43,7 @@ class KioskDeviceUpdateIn(BaseModel):
 class KioskOrderIn(BaseModel):
     device_code: str = Field(min_length=3, max_length=64)
     canteen_id: UUID
-    payment_method: str = Field(default="razorpay", pattern="^(razorpay|stripe)$")
+    payment_method: str = Field(default="razorpay", pattern="^razorpay$")
     guest_name: str = Field(default="Kiosk Guest", max_length=160)
     guest_phone: Optional[str] = Field(default="0000000000", max_length=32)
     language: str = "en"

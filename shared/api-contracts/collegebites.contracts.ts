@@ -17,7 +17,7 @@ export type OrderStatus =
   | "PAYMENT_FAILED";
 
 export type PaymentStatus = "PENDING" | "CONFIRMED" | "FAILED";
-export type PaymentMethod = "razorpay" | "stripe" | "cash" | "pay_at_pickup" | "card_pos" | "upi_pos";
+export type PaymentMethod = "razorpay" | "card_pos" | "upi_pos";
 
 export interface CollegeSettingsDto {
   id: string;
@@ -34,7 +34,6 @@ export interface CollegeSettingsDto {
   kiosk_enabled: boolean;
   guest_otp_required: boolean;
   razorpay_enabled: boolean;
-  stripe_enabled: boolean;
   cash_at_counter_enabled: boolean;
   pay_at_pickup_enabled: boolean;
   college_timezone: string;
@@ -130,7 +129,7 @@ export const COLLEGEBITES_API_PATHS = {
   checkout: "/orders/checkout",
   myOrders: "/orders/my",
   razorpayVerify: "/payments/razorpay/verify",
-  stripeVerify: "/payments/stripe/verify",
+  razorpaySync: "/payments/razorpay/sync",
   notificationsMy: "/notifications/my",
   profile: "/customers/profile",
 } as const;

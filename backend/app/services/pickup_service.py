@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.cache import NS_BOARD, cache_manager
@@ -15,6 +16,7 @@ from app.models.order import Order, OrderItem, SlotReservation
 from app.models.payment import (
     OrderHandoverRecord,
     OrderQRCode,
+    Payment,
     PickupToken,
     QRVerificationEvent,
 )
@@ -274,6 +276,12 @@ def confirm_handover(db: Session, payload: HandoverConfirmRequest, staff_user_id
     if order.payment_status != "CONFIRMED":
         raise HTTPException(status_code=409, detail="Payment not confirmed for this order")
 
+    verified_pay = db.scalar(
+        select(Payment).where(Payment.order_id == order.id, Payment.status == "CONFIRMED")
+    )
+    if not verified_pay:
+        raise HTTPException(status_code=409, detail="No verified payment record found for this order")
+
     existing_ho = db.scalar(select(OrderHandoverRecord).where(OrderHandoverRecord.order_id == order.id))
     if existing_ho or order.status == "COMPLETED":
         token_for_log = db.scalar(select(PickupToken).where(PickupToken.order_id == order.id))
@@ -332,7 +340,11 @@ def confirm_handover(db: Session, payload: HandoverConfirmRequest, staff_user_id
         actor_user_id=staff_user_id,
         details={"pickup_token": token_row.token_code, "method": payload.verification_method},
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Order has already been collected") from exc
     db.refresh(handover)
 
     try:

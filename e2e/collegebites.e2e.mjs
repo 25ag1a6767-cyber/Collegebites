@@ -86,10 +86,14 @@ async function main() {
     await pwaPage.getByRole("button", { name: /Open Menu & Order Now/i }).click();
     await pwaCtx.close();
 
-    // 1. Customer / Guest QR Ordering Flow (Razorpay)
+    // 1. Table QR Scan + Customer Razorpay-Only Ordering Flow
     const custCtx = await browser.newContext();
     const page = await custCtx.newPage();
     attachErrorListeners(page);
+
+    await page.goto(`${FRONTEND_URL}/login`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: /Student \(Customer\)/i }).click();
+    await page.waitForURL(`${FRONTEND_URL}/`, { timeout: 10000 }).catch(() => {});
 
     await page.goto(`${FRONTEND_URL}/scan/CB-MAIN-T01`, { waitUntil: "networkidle" });
     await page.getByRole("heading", { name: "Main Canteen" }).waitFor({ timeout: 10000 });
@@ -103,35 +107,37 @@ async function main() {
     await page.getByRole("button", { name: /Add to Cart/i }).click();
 
     await page.getByRole("button", { name: /Proceed to Checkout/i }).click();
-    await page.getByText("Guest Ordering Details").waitFor();
-
-    await page.getByPlaceholder("Visitor / Student Name").fill("Browser E2E Guest");
-    await page.getByPlaceholder("+919876543210").fill("+919800001122");
-    await page.getByRole("button", { name: "Send OTP" }).click();
-
-    const otpHint = await page.getByText(/Dev OTP:/).textContent({ timeout: 10000 });
-    const otpCode = otpHint.match(/(\d{6})/)[1];
-    await page.getByPlaceholder("123456").fill(otpCode);
-    await page.getByRole("button", { name: "Verify" }).click();
-    await page.getByText("Mobile verified for guest checkout").waitFor();
-
-    await page.getByText("Stripe Checkout").waitFor();
-    await page.getByText("Razorpay Online").waitFor();
+    await page.getByText(/Razorpay/i).first().waitFor({ timeout: 10000 });
     await page.route("https://checkout.razorpay.com/**", (route) =>
       route.fulfill({ status: 200, contentType: "application/javascript", body: "/* e2e checkout stub */" })
     );
     await page.locator('input[type="checkbox"]').check();
-    await page.getByRole("button", { name: /Pay ₹/i }).click();
 
-    const rzpModal = page.locator("[data-order-id]").first();
-    await rzpModal.waitFor({ timeout: 10000 });
-    const rzpOrderBadge = await rzpModal.getByText(/RZP: order_/).textContent({ timeout: 10000 });
-    const rzpOrderId = rzpOrderBadge.replace("RZP:", "").trim();
+    const checkoutRespPromise = page.waitForResponse(
+      (res) => res.url().includes("/api/v1/orders/checkout") && res.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: /Pay ₹/i }).click();
+    const checkoutResp = await checkoutRespPromise;
+    assert.equal(checkoutResp.status(), 201, "Razorpay checkout order creation should return 201");
+    const createdOrder = await checkoutResp.json();
+    const rzpOrderId = createdOrder.razorpay_order_id;
+    assert.ok(rzpOrderId && rzpOrderId.startsWith("order_"), "Expected Razorpay order ID");
     const rzpPayId = `pay_e2e_${Date.now()}`;
     const rzpBody = JSON.stringify({
       event_id: `evt_e2e_rzp_${Date.now()}`,
       event: "payment.captured",
-      payload: { payment: { entity: { id: rzpPayId, order_id: rzpOrderId, method: "upi" } } },
+      payload: {
+        payment: {
+          entity: {
+            id: rzpPayId,
+            order_id: rzpOrderId,
+            amount: Math.round(Number(createdOrder.total_amount) * 100),
+            currency: "INR",
+            status: "captured",
+            method: "upi",
+          },
+        },
+      },
     });
     const rzpSig = crypto
       .createHmac("sha256", process.env.RAZORPAY_WEBHOOK_SECRET || "rzp_webhook_secret_collegebites_local")
@@ -142,9 +148,7 @@ async function main() {
       headers: { "Content-Type": "application/json", "X-Razorpay-Signature": rzpSig },
     });
     assert.equal(rzpWhRes.status(), 200, "Razorpay webhook should confirm payment");
-    await page.getByRole("button", { name: /View Order Status/i }).click();
-
-    await page.waitForURL(/\/orders\/CB-/, { timeout: 15000 });
+    await page.goto(`${FRONTEND_URL}/orders/${createdOrder.order_number}`, { waitUntil: "networkidle" });
     await page.getByText("Official Digital Token Slip & Payment Receipt").waitFor({ timeout: 10000 });
     await page.getByText("ACE ENGINEERING COLLEGE").first().waitFor();
     await page.getByText("Jumbo Pack").first().waitFor();
@@ -152,47 +156,13 @@ async function main() {
     const tokenText = await page.locator(".text-4xl.font-black").first().textContent();
     const pickupToken = tokenText.trim();
     assert.ok(pickupToken.startsWith("A"), `Expected pickup token starting with A, got: ${pickupToken}`);
-    console.log("E2E_GUEST_TOKEN:", pickupToken);
+    console.log("E2E_RAZORPAY_TOKEN:", pickupToken);
 
-    // 1b. Signed-in Student Stripe Checkout Flow
-    const stripeCtx = await browser.newContext();
-    const stripePage = await stripeCtx.newPage();
-    attachErrorListeners(stripePage);
-    await stripePage.goto(`${FRONTEND_URL}/login`, { waitUntil: "networkidle" });
-    await stripePage.getByRole("button", { name: /Student \(Customer\)/i }).click();
-    await stripePage.waitForURL(`${FRONTEND_URL}/`, { timeout: 10000 }).catch(() => {});
-    await stripePage.goto(`${FRONTEND_URL}/?canteen=main-canteen`, { waitUntil: "networkidle" });
-    await stripePage.getByPlaceholder("Search dishes, ingredients...").fill("Cold Coffee");
-    await stripePage.waitForTimeout(500);
-    await stripePage.getByRole("button", { name: /Customize & Add/i }).first().click();
-    await stripePage.getByRole("button", { name: /Add to Cart/i }).click();
-    await stripePage.getByRole("button", { name: /Proceed to Checkout/i }).click();
-    await stripePage.getByRole("button", { name: /Stripe Checkout/i }).click();
-    await stripePage.locator('input[type="checkbox"]').check();
-    await stripePage.getByRole("button", { name: /Pay ₹/i }).click();
-    const stripeModal = stripePage.locator("[data-order-id]").first();
-    await stripeModal.waitFor({ timeout: 10000 });
-    const stripePiBadge = await stripeModal.getByText(/Stripe: pi_/).textContent({ timeout: 10000 });
-    const stripePi = stripePiBadge.replace("Stripe:", "").trim();
-    const ts = Math.floor(Date.now() / 1000);
-    const stripeBody = JSON.stringify({
-      id: `evt_e2e_stripe_${Date.now()}`,
-      type: "payment_intent.succeeded",
-      data: { object: { id: stripePi, status: "succeeded" } },
-    });
-    const stripeSig = crypto
-      .createHmac("sha256", process.env.STRIPE_WEBHOOK_SECRET || "whsec_collegebites_local")
-      .update(`${ts}.${stripeBody}`)
-      .digest("hex");
-    const stripeWhRes = await stripeCtx.request.post(`${API_URL}/api/v1/payments/stripe/webhook`, {
-      data: stripeBody,
-      headers: { "Content-Type": "application/json", "Stripe-Signature": `t=${ts},v1=${stripeSig}` },
-    });
-    assert.equal(stripeWhRes.status(), 200, "Stripe webhook should confirm payment");
-    await stripePage.getByRole("button", { name: /View Order Status/i }).click();
-    await stripePage.waitForURL(/\/orders\/CB-/, { timeout: 15000 });
-    await stripePage.getByText("Official Digital Token Slip & Payment Receipt").waitFor({ timeout: 10000 });
-    console.log("E2E_STRIPE_ORDER_URL:", stripePage.url());
+    // 1b. Second Student Browser Context (Storefront Verification)
+    const studentCtx = await browser.newContext();
+    const studentPage = await studentCtx.newPage();
+    attachErrorListeners(studentPage);
+    await studentPage.goto(`${FRONTEND_URL}/?canteen=main-canteen`, { waitUntil: "networkidle" });
 
     // 2. Digital Token Board check
     const boardPage = await custCtx.newPage();
@@ -293,9 +263,9 @@ async function main() {
         await adminPage.getByPlaceholder("Price (₹)").fill("85.00");
         await adminPage.getByRole("button", { name: "Add Item" }).click();
         await adminPage.getByText(dishTitle).first().waitFor({ timeout: 10000 });
-        await stripePage.goto(`${FRONTEND_URL}/?canteen=main-canteen`, { waitUntil: "networkidle" });
-        await stripePage.getByPlaceholder("Search dishes, ingredients...").fill(dishTitle);
-        await stripePage.getByText(dishTitle).first().waitFor({ timeout: 10000 });
+        await studentPage.goto(`${FRONTEND_URL}/?canteen=main-canteen`, { waitUntil: "networkidle" });
+        await studentPage.getByPlaceholder("Search dishes, ingredients...").fill(dishTitle);
+        await studentPage.getByText(dishTitle).first().waitFor({ timeout: 10000 });
         await adminPage.getByRole("button", { name: `Delete ${dishTitle}` }).click();
         await adminPage.getByRole("button", { name: "Delete Dish" }).click();
         await adminPage.getByText(dishTitle).waitFor({ state: "detached", timeout: 10000 }).catch(() => {});

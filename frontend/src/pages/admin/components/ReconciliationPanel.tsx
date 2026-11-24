@@ -90,7 +90,7 @@ export const ReconciliationPanel: React.FC<{
               Financial Reconciliation &amp; Settlement Ledger
             </h2>
             <p className="text-xs text-slate-500">
-              Gateway cross-checking across Orders, Razorpay, Stripe &amp; POS • Strictly Online-Only &amp; No Refunds Policy
+              Gateway cross-checking across Orders, Razorpay &amp; Counter POS • Strictly Online-Only &amp; No Refunds Policy
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -177,7 +177,6 @@ export const ReconciliationPanel: React.FC<{
             <Select value={gatewayFilter} onChange={(e) => setGatewayFilter(e.target.value)} className="w-36">
               <option value="">All Gateways</option>
               <option value="razorpay">Razorpay</option>
-              <option value="stripe">Stripe</option>
               <option value="counter_pos">Counter POS</option>
             </Select>
             <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="w-40">

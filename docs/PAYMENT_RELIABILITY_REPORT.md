@@ -1,9 +1,9 @@
 # CollegeBites — Payment Reliability & Ledger Integrity Report
 
 ## 1. Supported Payment Flows
-- **Online Customer Checkout:** Razorpay (`razorpay`) and Stripe (`stripe`) only.
+- **Online Customer Checkout:** Razorpay (`razorpay`) ONLY. Historical ledger/payment audit rows are preserved immutably in PostgreSQL.
 - **Walk-in Cashier Digital POS:** `upi_pos` and `card_pos` only.
-- **Disabled Methods:** `cash` and `pay_at_pickup` are strictly rejected (`HTTP 400`) across checkout, counter collection, POS, and admin settings.
+- **Disabled Methods:** `cash`, `pay_at_pickup`, and non-Razorpay online gateways are strictly rejected (`HTTP 400`/`422`) across checkout, counter collection, POS, and admin settings.
 - **Pricing Model:** Exact listed prices (`discount_amount = 0.00`, `tax_amount = 0.00`, statutory tax-inclusive notice on all receipts and invoices).
 
 ## 2. Atomic Finalization & Idempotency Guarantees
@@ -25,4 +25,4 @@
 ## 3. Verification Status
 - Pricing & exact-total checkout verification: **PASSED** (`test_phase34_pricing_and_two_counters.py` — 17/17 tests passed).
 - Payment signature verification, duplicate/late callback alerts, queue estimate snapshotting, and lock-free order sequence uniqueness: **VERIFIED** in Phase 35 test suite.
-- Live Razorpay/Stripe settlement testing against real bank rails: **NOT TESTED** in local sandbox (HMAC test/sandbox verification used to avoid real financial charges).
+- Live Razorpay settlement testing against real bank rails: **NOT TESTED** in local sandbox (HMAC + mocked gateway status verification used to avoid real financial charges).

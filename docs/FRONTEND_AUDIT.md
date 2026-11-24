@@ -3,7 +3,7 @@
 ## 1. Architecture & Code-Splitting Health
 - **Web Frontend (`frontend/`):** React 18 + TypeScript + Vite 5 + Tailwind CSS + TanStack React Query + Zustand + Recharts + Lucide icons.
 - **Mobile App (`mobile/`):** Expo Router + React Native + TypeScript (`tsc --noEmit` verified 0 errors).
-- **Route-Level Code Splitting (`frontend/src/App.tsx`):** Every heavy staff, admin, inventory, kitchen, food-safety, notification, and AI assistant workspace is lazy-loaded via `React.lazy(...)` + `<Suspense>`, keeping customer storefront landing loads fast and avoiding eager download of Recharts, Stripe, or QR scanner bundles.
+- **Route-Level Code Splitting (`frontend/src/App.tsx`):** Every heavy staff, admin, inventory, kitchen, food-safety, notification, and AI assistant workspace is lazy-loaded via `React.lazy(...)` + `<Suspense>`, keeping customer storefront landing loads fast and avoiding eager download of Recharts or QR scanner bundles.
 
 ## 2. Newly Integrated Enterprise UI Workspaces
 1. **Notification & Communication Center (`/notifications` — `NotificationCenterPage.tsx`, 2.88 kB gzip):**

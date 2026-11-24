@@ -6,9 +6,8 @@ import { api, getApiError } from "../../api/client";
 import type { Canteen, FoodItem, Order, ReceiptSnapshot } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { ReceiptSlip } from "../../components/receipt/ReceiptSlip";
-import { StripePaymentModal } from "../../components/payments/StripePaymentModal";
 import { Button, Card, useToast } from "../../components/ui/Primitives";
-import { openRazorpayModal } from "../../utils/razorpay";
+import { getPublicRazorpayKeyId, openRazorpayModal } from "../../utils/razorpay";
 
 const LABELS: Record<string, { title: string; pay: string; empty: string }> = {
   en: { title: "Self-Service Ordering Kiosk", pay: "Pay & Print Token", empty: "Tap dishes to begin" },
@@ -19,10 +18,8 @@ const LABELS: Record<string, { title: string; pay: string; empty: string }> = {
 export const KioskPage: React.FC = () => {
   const { pushToast } = useToast();
   const [lang, setLang] = useState<"en" | "hi" | "te">("en");
-  const [payMethod, setPayMethod] = useState<"razorpay" | "stripe">("razorpay");
   const [cartLines, setCartLines] = useState<{ item: FoodItem; quantity: number }[]>([]);
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
-  const [stripeModalOpen, setStripeModalOpen] = useState(false);
   const [receipt, setReceipt] = useState<ReceiptSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [idleSeconds, setIdleSeconds] = useState(90);
@@ -104,7 +101,7 @@ export const KioskPage: React.FC = () => {
       const res = await api.post<Order>("/kiosk/orders", {
         device_code: enabledDevice.device_code,
         canteen_id: canteenId,
-        payment_method: payMethod,
+        payment_method: "razorpay",
         language: lang,
         items: cartLines.map((l) => ({ food_item_id: l.item.id, quantity: l.quantity })),
       });
@@ -122,11 +119,7 @@ export const KioskPage: React.FC = () => {
     if (!pendingOrder) return;
     setBusy(true);
     try {
-      if (pendingOrder.payment_method === "stripe") {
-        setStripeModalOpen(true);
-        return;
-      }
-      if (pendingOrder.razorpay_order_id && pendingOrder.razorpay_key_id) {
+      if (pendingOrder.razorpay_order_id && getPublicRazorpayKeyId(pendingOrder)) {
         const opened = await openRazorpayModal({
           order: pendingOrder,
           description: `Kiosk Order ${pendingOrder.order_number}`,
@@ -140,7 +133,7 @@ export const KioskPage: React.FC = () => {
         });
         if (opened) return;
       }
-      throw new Error("Live payment gateway keys are not configured for kiosk checkout.");
+      throw new Error("Live Razorpay keys are not configured for kiosk checkout.");
     } catch (err) {
       pushToast(getApiError(err, "Payment gateway unavailable"), "error");
     } finally {
@@ -258,19 +251,8 @@ export const KioskPage: React.FC = () => {
                     <span>₹{(Number(l.item.base_price) * l.quantity).toFixed(2)}</span>
                   </div>
                 ))}
-                <div className="flex flex-wrap gap-1.5 pt-2">
-                  {(["razorpay", "stripe"] as const).map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setPayMethod(m)}
-                      className={`rounded-lg px-2.5 py-1 text-xs font-bold uppercase border ${
-                        payMethod === m ? "border-[#76010d] bg-[#fdf8f0] text-[#76010d]" : "border-slate-200 text-slate-600"
-                      }`}
-                    >
-                      {m}
-                    </button>
-                  ))}
+                <div className="rounded-lg border border-[#76010d]/30 bg-[#fdf8f0] px-3 py-1.5 text-xs font-bold text-[#76010d]">
+                  Razorpay Online Payment (UPI / Cards)
                 </div>
                 <Button size="lg" className="w-full" disabled={busy} onClick={placeKioskOrder}>
                   {busy ? "Creating Order..." : LABELS[lang].pay}
@@ -280,27 +262,6 @@ export const KioskPage: React.FC = () => {
           </Card>
         </div>
       )}
-
-      <StripePaymentModal
-        order={stripeModalOpen ? pendingOrder : null}
-        onClose={() => setStripeModalOpen(false)}
-        onSuccess={async (verified) => {
-          setStripeModalOpen(false);
-          await fetchReceiptForOrder(verified);
-          setPendingOrder(null);
-          pushToast(`Token ${verified.pickup_token_code || ""} ready! Printing slip.`, "success");
-        }}
-        onProcessing={() => {
-          setStripeModalOpen(false);
-          pushToast("Payment is processing at Stripe. Please wait a moment.", "info");
-        }}
-        onFailed={() => {
-          setStripeModalOpen(false);
-          setPendingOrder(null);
-          pushToast("Stripe payment cancelled or failed.", "info");
-        }}
-        onNavigateStatus={() => setStripeModalOpen(false)}
-      />
     </div>
   );
 };

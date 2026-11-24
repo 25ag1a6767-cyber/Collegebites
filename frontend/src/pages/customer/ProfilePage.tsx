@@ -8,6 +8,7 @@ import { useAppStore } from "../../store/useAppStore";
 import type { FoodItem } from "../../types";
 import { enableBrowserPushNotifications } from "../../utils/notifications";
 import { openRazorpayCustomCheckout } from "../../utils/razorpay";
+import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 
@@ -148,9 +149,8 @@ export const ProfilePage: React.FC = () => {
   const [collegeId, setCollegeId] = useState("");
   const [department, setDepartment] = useState("");
   const [referralInput, setReferralInput] = useState("");
-  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
-  const [phoneOtpCode, setPhoneOtpCode] = useState("");
-  const [devOtpHint, setDevOtpHint] = useState<string | null>(null);
+  const [showEmailVerify, setShowEmailVerify] = useState(false);
+  const [showPhoneVerify, setShowPhoneVerify] = useState(false);
   const [curPw, setCurPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [busy, setBusy] = useState(false);
@@ -245,6 +245,37 @@ export const ProfilePage: React.FC = () => {
               <label className="mb-1 block text-xs font-bold text-slate-600">Full Name</label>
               <Input value={fullName} onChange={(e) => setFullName(e.target.value)} />
             </div>
+            {user.email && (
+              <div>
+                <div className="mb-1 flex items-center justify-between text-xs font-bold text-slate-600">
+                  <span>Email Address ({user.email})</span>
+                  {user.is_verified ? (
+                    <Badge tone="green">Verified</Badge>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowEmailVerify((v) => !v)}
+                      className="text-xs font-bold text-[#76010d] hover:underline"
+                    >
+                      {showEmailVerify ? "Hide Email OTP" : "Verify Email via OTP"}
+                    </button>
+                  )}
+                </div>
+                {showEmailVerify && !user.is_verified && (
+                  <OtpVerificationBox
+                    target={user.email}
+                    purpose="email_verify"
+                    verifyButtonLabel="Confirm Email OTP"
+                    customVerifyRequest={async (code) => {
+                      await api.post("/auth/email/verify", { target: user.email, code });
+                      setShowEmailVerify(false);
+                      qc.invalidateQueries({ queryKey: ["customer-profile"] });
+                      pushToast("Email verified!", "success");
+                    }}
+                  />
+                )}
+              </div>
+            )}
             <div>
               <label className="mb-1 block text-xs font-bold text-slate-600">Mobile Number</label>
               <div className="flex gap-2">
@@ -254,54 +285,24 @@ export const ProfilePage: React.FC = () => {
                   size="sm"
                   variant="outline"
                   disabled={busy || !phone.trim()}
-                  onClick={async () => {
-                    setBusy(true);
-                    try {
-                      const r = await api.post("/auth/otp/request", { target: phone.trim(), purpose: "phone_verify" });
-                      setPhoneOtpSent(true);
-                      setDevOtpHint(r.data.dev_otp || null);
-                      pushToast("Verification OTP sent", "success");
-                    } catch (err) {
-                      pushToast(getApiError(err), "error");
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
+                  onClick={() => setShowPhoneVerify((v) => !v)}
                 >
-                  Verify OTP
+                  {showPhoneVerify ? "Close" : "Verify OTP"}
                 </Button>
               </div>
-              {phoneOtpSent && (
-                <div className="mt-2 flex gap-2 items-center">
-                  <Input
-                    value={phoneOtpCode}
-                    onChange={(e) => setPhoneOtpCode(e.target.value)}
-                    placeholder="6-digit OTP"
-                    maxLength={6}
-                    className="w-36"
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={busy || phoneOtpCode.trim().length < 6}
-                    onClick={async () => {
-                      setBusy(true);
-                      try {
-                        await api.post("/auth/phone/verify", { target: phone.trim(), code: phoneOtpCode.trim() });
-                        setPhoneOtpSent(false);
-                        setPhoneOtpCode("");
-                        qc.invalidateQueries({ queryKey: ["customer-profile"] });
-                        pushToast("Mobile number verified!", "success");
-                      } catch (err) {
-                        pushToast(getApiError(err), "error");
-                      } finally {
-                        setBusy(false);
-                      }
+              {showPhoneVerify && phone.trim() && (
+                <div className="mt-2">
+                  <OtpVerificationBox
+                    target={phone.trim()}
+                    purpose="phone_verify"
+                    verifyButtonLabel="Confirm Phone OTP"
+                    customVerifyRequest={async (code) => {
+                      await api.post("/auth/phone/verify", { target: phone.trim(), code });
+                      setShowPhoneVerify(false);
+                      qc.invalidateQueries({ queryKey: ["customer-profile"] });
+                      pushToast("Mobile number verified!", "success");
                     }}
-                  >
-                    Confirm
-                  </Button>
-                  {devOtpHint && <span className="text-xs font-mono text-slate-600">OTP: {devOtpHint}</span>}
+                  />
                 </div>
               )}
             </div>

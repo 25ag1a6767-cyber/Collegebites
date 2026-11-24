@@ -31,8 +31,8 @@ class Payment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
-    provider: Mapped[str] = mapped_column(String(48), nullable=False, default="razorpay")  # razorpay | cash | counter_pos
-    method: Mapped[Optional[str]] = mapped_column(String(48))  # upi | card | netbanking | wallet | cash | pay_at_pickup
+    provider: Mapped[str] = mapped_column(String(48), nullable=False, default="razorpay")  # razorpay | counter_pos
+    method: Mapped[Optional[str]] = mapped_column(String(48))  # upi | card | netbanking | wallet | upi_pos | card_pos
     provider_order_id: Mapped[Optional[str]] = mapped_column(String(120), unique=True, index=True)
     provider_payment_id: Mapped[Optional[str]] = mapped_column(String(120), unique=True, index=True)
     idempotency_key: Mapped[Optional[str]] = mapped_column(String(120), unique=True)
@@ -208,6 +208,7 @@ class ReceiptPrintJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     receipt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("receipts.id", ondelete="CASCADE"), nullable=False, index=True)
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_type: Mapped[str] = mapped_column(String(32), nullable=False, default="customer_receipt")  # customer_receipt | kot
     printer_target: Mapped[str] = mapped_column(String(64), nullable=False, default="browser")  # browser | 58mm | 80mm | a4_pdf | network_escpos | usb | bluetooth
     printer_name: Mapped[Optional[str]] = mapped_column(String(120))
     paper_width: Mapped[str] = mapped_column(String(16), nullable=False, default="80mm")

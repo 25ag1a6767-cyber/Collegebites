@@ -8,7 +8,6 @@ import { ordersApi } from "../../src/api/orders.api";
 import { paymentsApi } from "../../src/api/payments.api";
 import { profileApi } from "../../src/api/profile.api";
 import { tokensApi } from "../../src/api/tokens.api";
-import { StripePayButton } from "../../src/components/StripePayButton";
 import { BrandLogo } from "../../src/components/BrandLogo";
 import { useMobileRealtimeWs } from "../../src/hooks/useMobileRealtimeWs";
 import { useMobileStore } from "../../src/store/useMobileStore";
@@ -100,22 +99,6 @@ export default function OrderDetailScreen() {
     );
   }
 
-  const cancelStripePayment = async () => {
-    setPaying(true);
-    setErrMsg("");
-    try {
-      await paymentsApi.failStripe(
-        { order_id: order.id, reason: "Customer cancelled Stripe payment in mobile app" },
-        gToken
-      );
-      await refetch();
-    } catch (e: unknown) {
-      setErrMsg(getMobileApiError(e, "Could not update payment status"));
-    } finally {
-      setPaying(false);
-    }
-  };
-
   const cancelRazorpayPayment = async () => {
     setPaying(true);
     setErrMsg("");
@@ -132,11 +115,24 @@ export default function OrderDetailScreen() {
     }
   };
 
-  const retryPayment = async (method: "razorpay" | "stripe") => {
+  const syncPaymentStatus = async () => {
     setPaying(true);
     setErrMsg("");
     try {
-      await paymentsApi.retryPayment(order.id, method, gToken);
+      await paymentsApi.syncRazorpay(order.id, gToken);
+      await refetch();
+    } catch (e: unknown) {
+      setErrMsg(getMobileApiError(e, "Could not sync Razorpay payment status"));
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  const retryPayment = async () => {
+    setPaying(true);
+    setErrMsg("");
+    try {
+      await paymentsApi.retryPayment(order.id, "razorpay", gToken);
       await refetch();
     } catch (e: unknown) {
       setErrMsg(getMobileApiError(e, "Could not restart payment"));
@@ -257,24 +253,6 @@ export default function OrderDetailScreen() {
         </View>
       )}
 
-      {order.status === "PAYMENT_PENDING" &&
-        (order.stripe_payment_intent_id || order.stripe_session_id || order.payment_method === "stripe") && (
-          <View style={styles.payBox}>
-            <Text style={styles.secTitle}>Complete Stripe Payment (₹{order.total_amount})</Text>
-            {Boolean(errMsg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{errMsg}</Text>}
-            <StripePayButton
-              order={order}
-              guestToken={gToken}
-              disabled={paying}
-              onVerified={() => refetch()}
-              onError={(msg) => setErrMsg(msg)}
-            />
-            <Pressable disabled={paying} onPress={cancelStripePayment} style={styles.cancelBtn}>
-              <Text style={{ color: "#0f172a", fontWeight: "700" }}>Cancel Payment</Text>
-            </Pressable>
-          </View>
-        )}
-
       {order.status === "PAYMENT_PENDING" && order.razorpay_order_id && (
         <View style={styles.payBox}>
           <Text style={styles.secTitle}>Complete Razorpay Payment (₹{order.total_amount})</Text>
@@ -287,13 +265,16 @@ export default function OrderDetailScreen() {
               }}
               style={styles.payBtn}
             >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Razorpay UPI Checkout</Text>
+              <Text style={{ color: "#fff", fontWeight: "800" }}>Open Razorpay Checkout</Text>
             </Pressable>
           ) : (
             <Text style={{ color: "#64748b", fontSize: 12 }}>
               Live Razorpay checkout credentials are not configured on the server for this environment.
             </Text>
           )}
+          <Pressable disabled={paying} onPress={syncPaymentStatus} style={styles.cancelBtn}>
+            <Text style={{ color: "#0f172a", fontWeight: "700" }}>Check Payment Status</Text>
+          </Pressable>
           <Pressable disabled={paying} onPress={cancelRazorpayPayment} style={styles.cancelBtn}>
             <Text style={{ color: "#0f172a", fontWeight: "700" }}>Cancel Payment</Text>
           </Pressable>
@@ -302,19 +283,10 @@ export default function OrderDetailScreen() {
 
       {order.status === "PAYMENT_FAILED" && (
         <View style={styles.payBox}>
-          <Text style={styles.secTitle}>Retry Online Payment (₹{order.total_amount})</Text>
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            <Pressable disabled={paying} onPress={() => retryPayment("razorpay")} style={[styles.payBtn, { flex: 1 }]}>
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Retry Razorpay</Text>
-            </Pressable>
-            <Pressable
-              disabled={paying}
-              onPress={() => retryPayment("stripe")}
-              style={[styles.payBtn, { flex: 1, backgroundColor: "#4f46e5" }]}
-            >
-              <Text style={{ color: "#fff", fontWeight: "800" }}>Retry Stripe</Text>
-            </Pressable>
-          </View>
+          <Text style={styles.secTitle}>Retry Razorpay Payment (₹{order.total_amount})</Text>
+          <Pressable disabled={paying} onPress={retryPayment} style={styles.payBtn}>
+            <Text style={{ color: "#fff", fontWeight: "800" }}>Retry Razorpay Checkout</Text>
+          </Pressable>
         </View>
       )}
 
