@@ -530,6 +530,28 @@ def restore_backup(
                 ]
                 conn.execute(tbl.insert(), parsed_rows)
 
+            # Resync PostgreSQL order/invoice sequences after restore so new IDs never collide
+            if dest_engine.dialect.name == "postgresql":
+                for seq_name, tbl_name, col_name in (
+                    ("order_number_seq", "orders", "order_number"),
+                    ("invoice_number_seq", "invoices", "invoice_number"),
+                ):
+                    try:
+                        with conn.begin_nested():
+                            conn.execute(text(f"CREATE SEQUENCE IF NOT EXISTS {seq_name} START WITH 1 INCREMENT BY 1"))
+                            max_val = conn.execute(
+                                text(
+                                    f"SELECT COALESCE(MAX(CAST(SPLIT_PART({col_name}, '-', 3) AS BIGINT)), 0) "
+                                    f"FROM {tbl_name} WHERE {col_name} LIKE '%-%-%'"
+                                )
+                            ).scalar()
+                            conn.execute(
+                                text(f"SELECT setval('{seq_name}', :v, true)"),
+                                {"v": max(1, int(max_val or 0))},
+                            )
+                    except Exception:
+                        pass
+
         log.status = "completed"
         log.verification_passed = True
         log.restored_tables_json = restored_counts

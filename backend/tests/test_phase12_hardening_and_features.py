@@ -592,6 +592,9 @@ def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: 
             ],
         },
     ).json()
+    assert po["status"] == "pending_approval"
+    assert client.post(f"/api/v1/inventory/purchase-orders/{po['id']}/status", headers=mgr["headers"], json={"status": "approved"}).status_code == 200
+    assert client.post(f"/api/v1/inventory/purchase-orders/{po['id']}/status", headers=inv_mgr["headers"], json={"status": "ordered"}).status_code == 200
     p1 = client.post(
         f"/api/v1/inventory/purchase-orders/{po['id']}/receive",
         headers=inv_mgr["headers"],

@@ -13,10 +13,10 @@ from typing import Optional
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.time_utils import today_college
+from app.core.time_utils import now_college, today_college
 from app.models.college import Canteen
 from app.models.enterprise import (
     DemandForecast,
@@ -27,8 +27,8 @@ from app.models.enterprise import (
     ProductionQualityCheck,
     TraceabilityRecord,
 )
-from app.models.event import EventBulkOrder, EventBulkOrderItem
-from app.models.inventory import InventoryItem, WastageRecord
+from app.models.event import CollegeEvent, EventBulkOrder, EventBulkOrderItem
+from app.models.inventory import InventoryItem, StockBatch, StockMovement, WastageRecord
 from app.models.menu import FoodItem, Ingredient, Recipe, RecipeIngredient
 from app.models.order import Order, OrderItem
 from app.services.audit_service import record_audit_log
@@ -52,6 +52,12 @@ def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
     if dt is None:
         return None
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def _latest_quality_check(checks: list[ProductionQualityCheck]) -> Optional[ProductionQualityCheck]:
+    if not checks:
+        return None
+    return max(checks, key=lambda qc: _ensure_utc(qc.checked_at) or datetime.min.replace(tzinfo=timezone.utc))
 
 
 # =============================================================================
@@ -137,7 +143,7 @@ def list_recipes(db: Session, canteen_id: UUID) -> list[dict]:
                 "is_verified": bool(rec.is_verified),
                 "verified_at": rec.verified_at.isoformat() if rec.verified_at else None,
                 "yield_portions": rec.yield_portions,
-                "instructions": rec.instructions,
+                "instructions": rec.notes,
                 "ingredients": ing_rows,
             }
         )
@@ -152,6 +158,7 @@ def upsert_recipe(
     instructions: Optional[str],
     ingredients: list[dict],
     verify: bool,
+    can_verify: bool = True,
     actor_user_id: UUID,
 ) -> dict:
     food = db.get(FoodItem, food_item_id)
@@ -161,6 +168,11 @@ def upsert_recipe(
         raise HTTPException(status_code=400, detail="yield_portions must be >= 1")
     if not ingredients:
         raise HTTPException(status_code=400, detail="Recipe must define at least one real ingredient")
+    if verify and not can_verify:
+        raise HTTPException(
+            status_code=403,
+            detail="Only College Admin, Canteen Manager, or Food Safety Inspector can verify recipes",
+        )
 
     rec = db.scalar(select(Recipe).where(Recipe.food_item_id == food.id))
     now = datetime.now(timezone.utc)
@@ -168,20 +180,24 @@ def upsert_recipe(
         rec = Recipe(
             food_item_id=food.id,
             yield_portions=yield_portions,
-            instructions=instructions,
-            is_verified=verify,
-            verified_by_user_id=actor_user_id if verify else None,
-            verified_at=now if verify else None,
+            notes=instructions,
+            is_verified=bool(verify and can_verify),
+            verified_by_user_id=actor_user_id if (verify and can_verify) else None,
+            verified_at=now if (verify and can_verify) else None,
         )
         db.add(rec)
         db.flush()
     else:
         rec.yield_portions = yield_portions
-        rec.instructions = instructions
-        if verify:
+        rec.notes = instructions
+        if verify and can_verify:
             rec.is_verified = True
             rec.verified_by_user_id = actor_user_id
             rec.verified_at = now
+        else:
+            rec.is_verified = False
+            rec.verified_by_user_id = None
+            rec.verified_at = None
         existing_reqs = list(db.scalars(select(RecipeIngredient).where(RecipeIngredient.recipe_id == rec.id)).all())
         for er in existing_reqs:
             db.delete(er)
@@ -343,28 +359,43 @@ def get_production_planning_overview(db: Session, canteen_id: UUID, *, plan_date
     for fid, q_sum in db.execute(
         select(EventBulkOrderItem.food_item_id, func.coalesce(func.sum(EventBulkOrderItem.quantity), 0))
         .join(EventBulkOrder, EventBulkOrder.id == EventBulkOrderItem.bulk_order_id)
+        .join(CollegeEvent, CollegeEvent.id == EventBulkOrder.event_id)
         .where(
             EventBulkOrder.canteen_id == canteen_id,
             EventBulkOrder.status.in_(("approved", "preparing")),
             EventBulkOrder.payment_status == "CONFIRMED",
             EventBulkOrderItem.food_item_id.is_not(None),
+            or_(
+                CollegeEvent.event_date == target_date,
+                func.date(EventBulkOrder.scheduled_prep_at) == target_date,
+            ),
         )
         .group_by(EventBulkOrderItem.food_item_id)
     ).all():
         bulk_by_food[fid] = int(q_sum or 0)
 
-    # 3. Already planned / active production batches for target_date
+    # 3. Already planned / active production batches for target_date (plan_date -> planned_prep_at -> created_at in college TZ)
+    college_tz = now_college().tzinfo
     planned_by_food: dict[UUID, int] = {}
-    for fid, q_sum in db.execute(
-        select(ProductionBatch.food_item_id, func.coalesce(func.sum(ProductionBatch.planned_quantity), 0))
+    batch_rows = db.execute(
+        select(ProductionBatch, ProductionPlan.plan_date)
+        .outerjoin(ProductionPlan, ProductionPlan.id == ProductionBatch.production_plan_id)
         .where(
             ProductionBatch.canteen_id == canteen_id,
             ProductionBatch.status.not_in(["cancelled"]),
-            func.date(ProductionBatch.created_at) == target_date,
         )
-        .group_by(ProductionBatch.food_item_id)
-    ).all():
-        planned_by_food[fid] = int(q_sum or 0)
+    ).all()
+    for pb, linked_plan_date in batch_rows:
+        if linked_plan_date is not None:
+            eff_date = linked_plan_date
+        elif pb.planned_prep_at is not None:
+            eff_date = _ensure_utc(pb.planned_prep_at).astimezone(college_tz).date()
+        elif pb.created_at is not None:
+            eff_date = _ensure_utc(pb.created_at).astimezone(college_tz).date()
+        else:
+            continue
+        if eff_date == target_date:
+            planned_by_food[pb.food_item_id] = planned_by_food.get(pb.food_item_id, 0) + int(pb.planned_quantity or 0)
 
     # 4. Active ML Demand Forecast for target_date (strictly labeled ai_predicted)
     forecast_by_food: dict[UUID, float] = {}
@@ -544,6 +575,7 @@ def _serialize_batch(db: Session, b: ProductionBatch, food_name: Optional[str] =
                 "temperature_c": float(qc.temperature_c) if qc.temperature_c is not None else None,
                 "status": qc.status,
                 "notes": qc.notes,
+                "evidence_url": qc.evidence_url,
                 "corrective_action": qc.corrective_action,
                 "approved_by_user_id": str(qc.approved_by_user_id) if qc.approved_by_user_id else None,
                 "checked_at": qc.checked_at.isoformat() if qc.checked_at else None,
@@ -770,26 +802,62 @@ def transition_production_batch(
             batch.actual_quantity = batch.planned_quantity
         batch.remaining_quantity = max(0, batch.actual_quantity - batch.sold_quantity - batch.waste_quantity)
     elif target == "quality_checked":
-        passed_qc = any(
-            qc.status == "passed" or (qc.status == "corrective_action_required" and qc.approved_by_user_id is not None)
-            for qc in (batch.quality_checks or [])
+        latest_qc = _latest_quality_check(batch.quality_checks or [])
+        passed_qc = bool(
+            latest_qc
+            and (
+                latest_qc.status == "passed"
+                or (latest_qc.status == "corrective_action_required" and latest_qc.approved_by_user_id is not None)
+            )
         )
         if not passed_qc:
             raise HTTPException(
                 status_code=400,
-                detail="A passed quality check (or authorized corrective action approval) is required before marking quality_checked",
+                detail="The latest quality check must be passed (or have authorized corrective action approval) before marking quality_checked",
             )
     elif target == "completed":
-        passed_qc = any(
-            qc.status == "passed" or (qc.status == "corrective_action_required" and qc.approved_by_user_id is not None)
-            for qc in (batch.quality_checks or [])
+        latest_qc = _latest_quality_check(batch.quality_checks or [])
+        passed_qc = bool(
+            latest_qc
+            and (
+                latest_qc.status == "passed"
+                or (latest_qc.status == "corrective_action_required" and latest_qc.approved_by_user_id is not None)
+            )
         )
         if not passed_qc:
-            raise HTTPException(status_code=400, detail="Production batch cannot be completed without passing quality control")
+            raise HTTPException(status_code=400, detail="Production batch cannot be completed without passing latest quality control")
         batch.completed_at = now
         if actual_quantity is not None and actual_quantity >= 0:
             batch.actual_quantity = actual_quantity
         batch.remaining_quantity = max(0, batch.actual_quantity - batch.sold_quantity - batch.waste_quantity)
+    elif target == "cancelled" and batch.status in ("ingredients_allocated", "ready_for_preparation") and batch.ingredient_allocations:
+        # Return un-cooked allocated ingredient stock back to original stock batches & inventory
+        for al in batch.ingredient_allocations:
+            qty_ret = Decimal(str(al.quantity_used or "0"))
+            if qty_ret <= Decimal("0.000"):
+                continue
+            sb = db.scalar(select(StockBatch).where(StockBatch.id == al.stock_batch_id).with_for_update())
+            inv = db.scalar(select(InventoryItem).where(InventoryItem.id == al.inventory_item_id).with_for_update())
+            if sb:
+                sb.remaining_quantity += qty_ret
+                sb.allocated_quantity = max(Decimal("0.000"), (sb.allocated_quantity or Decimal("0.000")) - qty_ret)
+                sb.consumed_quantity = max(Decimal("0.000"), (sb.consumed_quantity or Decimal("0.000")) - qty_ret)
+            if inv:
+                inv.current_quantity += qty_ret
+                db.add(
+                    StockMovement(
+                        inventory_item_id=inv.id,
+                        batch_id=sb.id if sb else None,
+                        movement_type="production_cancel_return",
+                        quantity_delta=qty_ret,
+                        balance_after=inv.current_quantity,
+                        reference_type="production_batch_cancelled",
+                        reference_id=str(batch.id),
+                        created_by_user_id=actor_user_id,
+                        notes=f"Returned allocated ingredients from cancelled batch {batch.batch_code}",
+                    )
+                )
+        refresh_food_item_ingredient_sufficiency(db, batch.canteen_id)
 
     prev = batch.status
     batch.status = target
@@ -837,11 +905,18 @@ def record_quality_check(
     )
     if not batch:
         raise HTTPException(status_code=404, detail="Production batch not found")
+    if batch.status not in ("prepared", "quality_checked"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Quality checks can only be recorded for prepared or quality_checked batches (current: {batch.status})",
+        )
     st = status.strip().lower()
     if st not in ("passed", "failed", "corrective_action_required"):
         raise HTTPException(status_code=400, detail="status must be passed, failed, or corrective_action_required")
     if st == "passed" and not (appearance_ok and preparation_ok and hygiene_ok):
         raise HTTPException(status_code=400, detail="Cannot mark quality check as passed when an inspection check failed")
+    if (st == "corrective_action_required" or approve_corrective_action) and not (corrective_action and corrective_action.strip()):
+        raise HTTPException(status_code=400, detail="corrective_action description is required")
     if approve_corrective_action and not can_approve:
         raise HTTPException(status_code=403, detail="Only manager, admin, or food safety inspector may approve corrective actions")
 
@@ -921,7 +996,8 @@ def update_batch_quantities(
             raise HTTPException(status_code=400, detail="waste_quantity cannot be negative")
         batch.waste_quantity = waste_quantity
 
-    if (batch.sold_quantity + batch.waste_quantity) > max(batch.actual_quantity, batch.planned_quantity):
+    max_producible = batch.actual_quantity if batch.actual_quantity > 0 else batch.planned_quantity
+    if (batch.sold_quantity + batch.waste_quantity) > max_producible:
         raise HTTPException(status_code=400, detail="sold_quantity + waste_quantity cannot exceed produced quantity")
     batch.remaining_quantity = max(0, batch.actual_quantity - batch.sold_quantity - batch.waste_quantity)
 
@@ -967,6 +1043,50 @@ def update_batch_quantities(
     return _serialize_batch(db, batch)
 
 
+def report_production_delay(
+    db: Session,
+    batch_id: UUID,
+    *,
+    delay_minutes: int,
+    reason: str,
+    actor_user_id: UUID,
+) -> dict:
+    batch = db.scalar(
+        select(ProductionBatch)
+        .options(selectinload(ProductionBatch.ingredient_allocations), selectinload(ProductionBatch.quality_checks))
+        .where(ProductionBatch.id == batch_id)
+        .with_for_update()
+    )
+    if not batch:
+        raise HTTPException(status_code=404, detail="Production batch not found")
+    if batch.status in ("completed", "cancelled"):
+        raise HTTPException(status_code=409, detail=f"Cannot report delay on {batch.status} batch")
+    batch.notes = f"{(batch.notes or '').strip()} [DELAY +{delay_minutes}m: {reason.strip()}]".strip()
+    record_audit_log(
+        db,
+        action="production.batch_delayed",
+        entity_type="production_batch",
+        entity_id=batch.batch_code,
+        actor_user_id=actor_user_id,
+        details={"delay_minutes": delay_minutes, "reason": reason.strip()},
+    )
+    from app.services.notification_service import create_role_notifications
+
+    create_role_notifications(
+        db,
+        canteen_id=batch.canteen_id,
+        roles=["canteen_manager", "college_admin", "kitchen_staff"],
+        event_type="production_delay",
+        category="order",
+        title=f"Production Batch Delayed • {batch.batch_code} (+{delay_minutes}m)",
+        message=f"Batch {batch.batch_code} delayed by {delay_minutes} min: {reason.strip()[:160]}",
+        priority="high",
+        event_id_base=f"prod_delay:{batch.id}:{delay_minutes}:{reason.strip()[:32]}",
+    )
+    db.commit()
+    return _serialize_batch(db, batch)
+
+
 def get_production_report(db: Session, canteen_id: UUID, *, days: int = 30) -> dict:
     from datetime import timedelta
 
@@ -996,14 +1116,18 @@ def get_production_report(db: Session, canteen_id: UUID, *, days: int = 30) -> d
             "total_ingredient_cost": "0.00",
             "average_prep_duration_minutes": None,
             "by_item": [],
+            "ingredient_consumption": [],
         }
 
     food_ids = list({b.food_item_id for b in batches})
     food_map = {f.id: f.name for f in db.scalars(select(FoodItem).where(FoodItem.id.in_(food_ids))).all()}
+    ing_ids = list({a.ingredient_id for b in batches for a in (b.ingredient_allocations or [])})
+    ing_map = {i.id: i.name for i in db.scalars(select(Ingredient).where(Ingredient.id.in_(ing_ids))).all()} if ing_ids else {}
     tot_planned = tot_actual = tot_sold = tot_rem = tot_waste = completed = 0
     tot_cost = Decimal("0.00")
     durations: list[float] = []
     by_item: dict[UUID, dict] = {}
+    by_ingredient: dict[UUID, dict] = {}
 
     for b in batches:
         if b.status == "cancelled":
@@ -1015,10 +1139,23 @@ def get_production_report(db: Session, canteen_id: UUID, *, days: int = 30) -> d
         tot_sold += b.sold_quantity
         tot_rem += b.remaining_quantity
         tot_waste += b.waste_quantity
-        b_cost = sum(
-            (Decimal(str(a.quantity_used)) * Decimal(str(a.unit_cost)) for a in (b.ingredient_allocations or [])),
-            Decimal("0.00"),
-        )
+        b_cost = Decimal("0.00")
+        for a in (b.ingredient_allocations or []):
+            qty_u = Decimal(str(a.quantity_used or "0"))
+            line_c = qty_u * Decimal(str(a.unit_cost or "0"))
+            b_cost += line_c
+            irow = by_ingredient.setdefault(
+                a.ingredient_id,
+                {
+                    "ingredient_id": str(a.ingredient_id),
+                    "ingredient_name": ing_map.get(a.ingredient_id, "Ingredient"),
+                    "unit": a.unit,
+                    "quantity_consumed": Decimal("0.000"),
+                    "total_cost": Decimal("0.00"),
+                },
+            )
+            irow["quantity_consumed"] += qty_u
+            irow["total_cost"] += line_c
         tot_cost += b_cost
         if b.started_at and b.completed_at:
             durations.append(max(0.0, (_ensure_utc(b.completed_at) - _ensure_utc(b.started_at)).total_seconds() / 60.0))
@@ -1062,5 +1199,13 @@ def get_production_report(db: Session, canteen_id: UUID, *, days: int = 30) -> d
         "by_item": [
             {**v, "ingredient_cost": f"{v['ingredient_cost'].quantize(Decimal('0.01')):.2f}"}
             for v in sorted(by_item.values(), key=lambda x: -x["planned_quantity"])
+        ],
+        "ingredient_consumption": [
+            {
+                **v,
+                "quantity_consumed": str(v["quantity_consumed"].quantize(Decimal("0.001"))),
+                "total_cost": f"{v['total_cost'].quantize(Decimal('0.01')):.2f}",
+            }
+            for v in sorted(by_ingredient.values(), key=lambda x: -x["total_cost"])
         ],
     }

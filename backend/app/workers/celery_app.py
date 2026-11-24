@@ -21,6 +21,10 @@ celery_app.conf.update(
             "task": "app.workers.tasks.scan_inventory_alerts_task",
             "schedule": crontab(minute="*/15"),
         },
+        "notify-overdue-cleaning-hourly": {
+            "task": "app.workers.tasks.notify_overdue_cleaning_tasks_task",
+            "schedule": crontab(minute=30),
+        },
         "daily-backup-and-reconciliation": {
             "task": "app.workers.tasks.scheduled_backup_and_reconcile_task",
             "schedule": crontab(minute=15, hour=2),

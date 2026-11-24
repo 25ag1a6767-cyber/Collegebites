@@ -98,6 +98,11 @@ class BatchQuantitiesIn(BaseModel):
     waste_reason: Optional[str] = None
 
 
+class BatchDelayIn(BaseModel):
+    delay_minutes: int = Field(ge=1, le=240)
+    reason: str = Field(min_length=3, max_length=255)
+
+
 @router.get("/recipes")
 def list_recipes(
     canteen_id: UUID = Query(...),
@@ -119,6 +124,7 @@ def upsert_recipe(
     if not food:
         raise HTTPException(status_code=404, detail="Food item not found")
     enforce_canteen_scope(principal, food.canteen_id)
+    can_verify = principal.has_role(*PROD_APPROVE_ROLES)
     return production_service.upsert_recipe(
         db,
         food_item_id=food_item_id,
@@ -126,6 +132,7 @@ def upsert_recipe(
         instructions=payload.instructions,
         ingredients=[it.model_dump() for it in payload.ingredients],
         verify=payload.verify,
+        can_verify=can_verify,
         actor_user_id=principal.user.id,
     )
 
@@ -301,6 +308,26 @@ def update_quantities(
         sold_quantity=payload.sold_quantity,
         waste_quantity=payload.waste_quantity,
         waste_reason=payload.waste_reason,
+        actor_user_id=principal.user.id,
+    )
+
+
+@router.post("/batches/{batch_id}/report-delay")
+def report_batch_delay(
+    batch_id: UUID,
+    payload: BatchDelayIn,
+    principal: AuthenticatedPrincipal = Depends(require_roles(*PROD_MANAGE_ROLES)),
+    db: Session = Depends(get_db),
+):
+    b = db.get(ProductionBatch, batch_id)
+    if not b:
+        raise HTTPException(status_code=404, detail="Production batch not found")
+    enforce_canteen_scope(principal, b.canteen_id)
+    return production_service.report_production_delay(
+        db,
+        batch_id,
+        delay_minutes=payload.delay_minutes,
+        reason=payload.reason,
         actor_user_id=principal.user.id,
     )
 

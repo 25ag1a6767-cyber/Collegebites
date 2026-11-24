@@ -11,6 +11,10 @@ export const AIAssistantPage: React.FC = () => {
   const { user, selectedCanteenId } = useAppStore();
   const isCollegeWide = Boolean(user?.roles?.some((r) => r === "super_admin" || r === "college_admin"));
   const canTrain = Boolean(user?.roles?.some((r) => ["super_admin", "college_admin", "canteen_manager"].includes(r)));
+  const canViewForecast = Boolean(
+    user?.roles?.some((r) => ["super_admin", "college_admin", "canteen_manager", "inventory_manager", "kitchen_staff"].includes(r))
+  );
+  const canViewAudit = canTrain;
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
@@ -48,7 +52,12 @@ export const AIAssistantPage: React.FC = () => {
           ))}
         </Select>
       </div>
-      <ForecastingAssistantTab activeCanteenId={activeId} canTrainForecast={canTrain} />
+      <ForecastingAssistantTab
+        activeCanteenId={activeId}
+        canTrainForecast={canTrain}
+        canViewForecast={canViewForecast}
+        canViewAudit={canViewAudit}
+      />
     </div>
   );
 };

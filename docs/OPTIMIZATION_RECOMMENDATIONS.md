@@ -1,11 +1,11 @@
 # CollegeBites — Optimization Recommendations
 
 ## 1. Optimizations Already Implemented in This Release
-1. **Lock-Free Sequences (`order_number_seq`, `invoice_number_seq`):** Eliminated global PostgreSQL advisory locks during checkout and invoice creation.
+1. **Lock-Free Sequences (`order_number_seq`, `invoice_number_seq`) with Savepoint Safety:** Eliminated global PostgreSQL advisory locks during checkout and invoice creation, wrapped fallback auto-creation in `db.begin_nested()` savepoints, and added post-restore `setval(...)` resync.
 2. **Lazy ML Library Loading:** Removed eager top-level `scipy`/`sklearn` imports from FastAPI boot path, reducing cold-start time and Vercel Fluid Active CPU overhead while ensuring full portability across Windows/Linux hosts.
-3. **Post-Commit Notification & Queue History Dispatch:** Moved external notification delivery and `QueueEstimateHistory` insertion outside payment confirmation DB row-lock windows.
-4. **Route-Level Frontend Code Splitting:** Lazy-loaded `NotificationCenterPage` (2.88 kB gzip), `FoodSafetyPage` (4.85 kB gzip), `AIAssistantPage` (0.89 kB gzip), `ForecastingAssistantTab` (2.97 kB gzip), `InventoryPage`, `KitchenDisplayPage`, and `AdminConsolePage`.
-5. **Deduplicated Correlation IDs (`X-Request-ID`) & Slow Request Telemetry:** Added end-to-end request tracing with slow-request warnings (>500 ms) and timeout guards.
+3. **Post-Commit Notification & Queue History Dispatch:** Moved external notification delivery and `QueueEstimateHistory` insertion outside payment confirmation DB row-lock windows, and added hourly Celery beat overdue-cleaning alerts.
+4. **Route-Level Code Splitting, Memoization & Conditional Polling:** Lazy-loaded heavy portals (`NotificationCenterPage` 4.12 kB gzip, `FoodSafetyPage` 6.74 kB gzip, `AIAssistantPage` 0.92 kB gzip, `ForecastingAssistantTab` 4.64 kB gzip, `TokenBoardPage` 3.25 kB gzip), memoized Token Board cards with version-skip deduplication, and eliminated unconditional 1s mobile Token Board polling while WebSocket is live.
+5. **Unified Correlation IDs (`X-Request-ID`) & React `ErrorBoundary`:** Unified a single canonical `X-Request-ID` across middleware, headers, and `contextvars` log records (removing duplicate `X-Process-Time-Ms`), and added global frontend error-boundary isolation.
 
 ## 2. Prioritized Next-Stage Production Scaling Recommendations
 | Priority | Area | Recommendation | Expected Impact (Estimate) |

@@ -20,6 +20,7 @@ from app.core.permissions import (
 )
 from app.models.engagement import Announcement
 from app.services import notification_service
+from app.services.audit_service import record_audit_log
 
 router = APIRouter(prefix="/notifications", tags=["Notifications & Announcements"])
 
@@ -74,7 +75,7 @@ def get_my_notifications(
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
-    return notification_service.list_my_notifications(
+    rows = notification_service.list_my_notifications(
         db,
         principal.user.id,
         principal.roles,
@@ -88,6 +89,7 @@ def get_my_notifications(
         limit=limit,
         offset=offset,
     )
+    return [notification_service.serialize_notification_for_user(n, principal.user.id) for n in rows]
 
 
 @router.get("/unread-count")
@@ -137,12 +139,13 @@ def list_deliveries(
     status_filter: Optional[str] = Query(default=None),
     channel: Optional[str] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
 ):
     eff_cid = scoped_canteen_for_principal(principal, canteen_id)
     return notification_service.list_notification_deliveries(
-        db, canteen_id=eff_cid, status_filter=status_filter, channel=channel, limit=limit
+        db, canteen_id=eff_cid, status_filter=status_filter, channel=channel, limit=limit, offset=offset
     )
 
 
@@ -152,7 +155,14 @@ def retry_notification(
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
 ):
-    return notification_service.retry_failed_notification(db, notification_id, principal.user.id)
+    scoped_cid = (
+        principal.assigned_canteen_id
+        if not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)
+        else None
+    )
+    return notification_service.retry_failed_notification(
+        db, notification_id, principal.user.id, assigned_canteen_id=scoped_cid
+    )
 
 
 @router.post("/system-maintenance", status_code=status.HTTP_201_CREATED)
@@ -178,7 +188,13 @@ def mark_read(
     principal: AuthenticatedPrincipal = Depends(get_current_principal),
     db: Session = Depends(get_db),
 ):
-    return notification_service.mark_notification_read(db, notification_id, principal.user.id, principal.roles)
+    return notification_service.mark_notification_read(
+        db,
+        notification_id,
+        principal.user.id,
+        principal.roles,
+        assigned_canteen_id=principal.assigned_canteen_id,
+    )
 
 
 @router.post("/mark-all-read")
@@ -284,5 +300,13 @@ def deactivate_announcement(
         raise HTTPException(status_code=404, detail="Announcement not found")
     enforce_canteen_scope(principal, ann.canteen_id)
     ann.is_active = False
+    record_audit_log(
+        db,
+        action="notification.announcement_deactivated",
+        entity_type="announcement",
+        entity_id=str(announcement_id),
+        actor_user_id=principal.user.id,
+        details={"title": ann.title},
+    )
     db.commit()
     return {"status": "deactivated", "id": str(announcement_id)}

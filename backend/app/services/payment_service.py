@@ -271,7 +271,10 @@ def _finalize_confirmed_payment(
             notify_order_confirmed(db, loaded, token_code_val)
             record_queue_estimate_for_order(db, loaded)
             db.commit()
-        except Exception:
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning("Post-confirmation notification/queue hook failed for %s: %s", order_number_val, exc)
             db.rollback()
 
     emit_order_event_sync(

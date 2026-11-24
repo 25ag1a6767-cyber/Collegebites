@@ -158,6 +158,58 @@ def create_checklist_template(
     }
 
 
+def update_checklist_template(
+    db: Session,
+    template_id: UUID,
+    *,
+    name: Optional[str] = None,
+    category: Optional[str] = None,
+    items: Optional[list[dict]] = None,
+    is_active: Optional[bool] = None,
+    actor_user_id: UUID,
+) -> dict:
+    tpl = db.get(FoodSafetyChecklistTemplate, template_id)
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Checklist template not found")
+    if name is not None:
+        tpl.name = name.strip()
+    if category is not None:
+        tpl.category = category.strip()
+    if items is not None:
+        if not items:
+            raise HTTPException(status_code=400, detail="Checklist template must contain at least one item")
+        tpl.items_json = [
+            {
+                "code": str(it.get("code") or f"ITEM_{idx + 1}").upper()[:48],
+                "title": str(it.get("title") or "").strip()[:200],
+                "category": str(it.get("category") or "general").strip()[:64],
+            }
+            for idx, it in enumerate(items)
+            if str(it.get("title") or "").strip()
+        ]
+    if is_active is not None:
+        tpl.is_active = is_active
+    record_audit_log(
+        db,
+        action="food_safety.template_updated",
+        entity_type="food_safety_checklist_template",
+        entity_id=str(tpl.id),
+        actor_user_id=actor_user_id,
+        details={"name": tpl.name, "is_active": tpl.is_active},
+    )
+    db.commit()
+    db.refresh(tpl)
+    return {
+        "id": str(tpl.id),
+        "canteen_id": str(tpl.canteen_id) if tpl.canteen_id else None,
+        "name": tpl.name,
+        "category": tpl.category,
+        "items": list(tpl.items_json or []),
+        "is_active": tpl.is_active,
+        "created_at": tpl.created_at.isoformat() if tpl.created_at else None,
+    }
+
+
 def _serialize_inspection(insp: FoodSafetyInspection, inspector_name: Optional[str] = None) -> dict:
     evaluated = insp.passed_items + insp.failed_items
     pass_rate = round((insp.passed_items / evaluated) * 100.0, 1) if evaluated > 0 else None
@@ -207,6 +259,10 @@ def create_inspection(
     canteen = db.get(Canteen, canteen_id)
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")
+    if template_id is not None:
+        tpl = db.get(FoodSafetyChecklistTemplate, template_id)
+        if not tpl or (tpl.canteen_id is not None and tpl.canteen_id != canteen_id):
+            raise HTTPException(status_code=404, detail="Checklist template not found for this canteen")
     if not items:
         raise HTTPException(status_code=400, detail="Inspection requires at least one checklist item result")
 
@@ -341,20 +397,56 @@ def export_inspection_pdf(db: Session, inspection_id: UUID) -> bytes:
     y -= 14
     c.setFont("Helvetica", 8)
     for it in insp.items:
-        if y < 60:
+        if y < 70:
             c.showPage()
             y = h - 45
             c.setFont("Helvetica", 8)
         c.drawString(40, y, it.item_code[:14])
-        c.drawString(125, y, it.item_title[:48])
-        c.drawString(390, y, it.result.upper())
-        c.drawString(455, y, (it.notes or "-")[:22])
-        y -= 14
+        c.drawString(125, y, it.item_title[:44])
+        c.drawString(365, y, it.result.upper())
+        note_str = (it.notes or "-")
+        c.drawString(430, y, note_str[:30])
+        y -= 13
+        if len(note_str) > 30:
+            c.drawString(430, y, note_str[30:90])
+            y -= 11
+        if it.photo_url:
+            c.setFont("Helvetica-Oblique", 7)
+            c.drawString(125, y, f"Photo: {it.photo_url[:95]}")
+            c.setFont("Helvetica", 8)
+            y -= 11
 
     if insp.notes:
-        y -= 12
+        y -= 10
+        if y < 70:
+            c.showPage()
+            y = h - 45
         c.setFont("Helvetica-Bold", 9)
-        c.drawString(40, y, f"Inspector Notes: {insp.notes[:100]}")
+        c.drawString(40, y, "Inspector Notes:")
+        y -= 12
+        c.setFont("Helvetica", 8)
+        for chunk_idx in range(0, len(insp.notes), 95):
+            if y < 60:
+                c.showPage()
+                y = h - 45
+            c.drawString(40, y, insp.notes[chunk_idx : chunk_idx + 95])
+            y -= 12
+
+    if insp.photo_urls:
+        y -= 8
+        if y < 60:
+            c.showPage()
+            y = h - 45
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(40, y, f"Supporting Photos ({len(insp.photo_urls)}):")
+        y -= 12
+        c.setFont("Helvetica", 8)
+        for url in insp.photo_urls[:10]:
+            if y < 60:
+                c.showPage()
+                y = h - 45
+            c.drawString(45, y, f"- {str(url)[:95]}")
+            y -= 11
 
     c.showPage()
     c.save()
@@ -646,6 +738,9 @@ def dispose_expired_batch(db: Session, batch_id: UUID, *, reason: str, actor_use
 
     inv.current_quantity = max(Decimal("0.000"), inv.current_quantity - qty)
     loss = (qty * batch.unit_cost).quantize(Decimal("0.01"))
+    is_truly_expired = bool(batch.expiry_date and batch.expiry_date < today_college())
+    loss_type = "expired" if is_truly_expired else "damaged"
+    move_type = "expired" if is_truly_expired else "wastage"
     db.add(
         WastageRecord(
             canteen_id=inv.canteen_id,
@@ -653,7 +748,7 @@ def dispose_expired_batch(db: Session, batch_id: UUID, *, reason: str, actor_use
             batch_id=batch.id,
             source_type="ingredient",
             quantity=qty,
-            loss_type="expired",
+            loss_type=loss_type,
             reason=reason,
             waste_date=today_college(),
             estimated_loss=loss,
@@ -664,7 +759,7 @@ def dispose_expired_batch(db: Session, batch_id: UUID, *, reason: str, actor_use
         StockMovement(
             inventory_item_id=inv.id,
             batch_id=batch.id,
-            movement_type="expired",
+            movement_type=move_type,
             quantity_delta=-qty,
             balance_after=inv.current_quantity,
             reference_type="food_safety_disposal",
@@ -850,32 +945,61 @@ def update_cleaning_task(
     st = status.strip().lower()
     if st not in ("pending", "in_progress", "completed"):
         raise HTTPException(status_code=400, detail="Cleaning task status must be pending, in_progress, or completed")
+    prev_status = task.status
     task.status = st
     if evidence_url is not None:
         task.evidence_url = evidence_url
     if notes is not None:
         task.notes = notes
+    now = datetime.now(timezone.utc)
+    next_task_id: Optional[str] = None
+    sched = db.get(CleaningSchedule, task.schedule_id)
     if st == "completed":
-        task.completed_at = datetime.now(timezone.utc)
+        task.completed_at = now
         task.completed_by_user_id = actor_user_id
+        # Auto-schedule next recurring sanitation task when schedule is active
+        if prev_status != "completed" and sched and sched.is_active:
+            open_future = db.scalar(
+                select(CleaningTaskLog.id).where(
+                    CleaningTaskLog.schedule_id == sched.id,
+                    CleaningTaskLog.id != task.id,
+                    CleaningTaskLog.status != "completed",
+                )
+            )
+            if not open_future:
+                delta_days = 1 if sched.frequency == "daily" else (7 if sched.frequency == "weekly" else 30)
+                base_due = _ensure_utc(task.due_at) or now
+                next_due = max(now, base_due) + timedelta(days=delta_days)
+                next_task = CleaningTaskLog(
+                    schedule_id=sched.id,
+                    canteen_id=sched.canteen_id,
+                    assigned_staff_user_id=sched.assigned_staff_user_id,
+                    due_at=next_due,
+                    status="pending",
+                )
+                db.add(next_task)
+                db.flush()
+                next_task_id = str(next_task.id)
     record_audit_log(
         db,
         action="food_safety.cleaning_task_updated",
         entity_type="cleaning_task_log",
         entity_id=str(task.id),
         actor_user_id=actor_user_id,
-        details={"status": st},
+        details={"status": st, "next_recurring_task_id": next_task_id},
     )
     db.commit()
     db.refresh(task)
-    sched = db.get(CleaningSchedule, task.schedule_id)
     u_map = _user_name_map(db, {task.completed_by_user_id} if task.completed_by_user_id else set())
-    return _serialize_cleaning_task(
+    res_dict = _serialize_cleaning_task(
         task,
         area_name=sched.area_name if sched else None,
         frequency=sched.frequency if sched else None,
         completed_by_name=u_map.get(task.completed_by_user_id),
     )
+    if next_task_id:
+        res_dict["next_task_id"] = next_task_id
+    return res_dict
 
 
 def notify_overdue_cleaning_tasks(db: Session, canteen_id: UUID) -> dict:
@@ -962,7 +1086,8 @@ def create_incident(
     )
     db.commit()
     db.refresh(inc)
-    return _serialize_incident(inc)
+    u_map = _user_name_map(db, {u for u in (inc.reported_by_user_id, inc.assigned_to_user_id) if u})
+    return _serialize_incident(inc, user_names=u_map)
 
 
 def update_incident(
@@ -973,41 +1098,57 @@ def update_incident(
     corrective_action: Optional[str],
     resolution_notes: Optional[str],
     assigned_to_user_id: Optional[UUID],
+    evidence_urls: Optional[list[str]] = None,
     actor_user_id: UUID,
 ) -> dict:
     inc = db.scalar(select(FoodSafetyIncident).where(FoodSafetyIncident.id == incident_id).with_for_update())
     if not inc:
         raise HTTPException(status_code=404, detail="Food safety incident not found")
     now = datetime.now(timezone.utc)
-    if status is not None:
-        st = status.strip().lower()
-        if st not in VALID_INCIDENT_STATUSES:
-            raise HTTPException(status_code=400, detail=f"status must be one of {', '.join(VALID_INCIDENT_STATUSES)}")
-        inc.status = st
-        if st == "resolved":
-            inc.resolved_at = now
-        elif st == "closed":
-            inc.closed_at = now
     if corrective_action is not None:
         inc.corrective_action = corrective_action
     if resolution_notes is not None:
         inc.resolution_notes = resolution_notes
     if assigned_to_user_id is not None:
         inc.assigned_to_user_id = assigned_to_user_id
+    if evidence_urls is not None:
+        inc.evidence_urls = list(evidence_urls)
+    if status is not None:
+        st = status.strip().lower()
+        if st not in VALID_INCIDENT_STATUSES:
+            raise HTTPException(status_code=400, detail=f"status must be one of {', '.join(VALID_INCIDENT_STATUSES)}")
+        if inc.status == "closed" and st != "closed":
+            raise HTTPException(status_code=409, detail="Closed food safety incidents cannot be reopened; file a new incident for follow-up")
+        if st in ("resolved", "closed") and not (inc.corrective_action or inc.resolution_notes):
+            raise HTTPException(
+                status_code=400,
+                detail="Documented corrective_action or resolution_notes is required before marking an incident resolved or closed",
+            )
+        inc.status = st
+        if st == "resolved":
+            inc.resolved_at = now
+        elif st == "closed":
+            inc.closed_at = now
     record_audit_log(
         db,
         action="food_safety.incident_updated",
         entity_type="food_safety_incident",
         entity_id=inc.incident_number,
         actor_user_id=actor_user_id,
-        details={"status": inc.status, "corrective_action": bool(inc.corrective_action)},
+        details={
+            "status": inc.status,
+            "corrective_action": bool(inc.corrective_action),
+            "resolution_notes": bool(inc.resolution_notes),
+        },
     )
     db.commit()
     db.refresh(inc)
-    return _serialize_incident(inc)
+    u_map = _user_name_map(db, {u for u in (inc.reported_by_user_id, inc.assigned_to_user_id) if u})
+    return _serialize_incident(inc, user_names=u_map)
 
 
-def _serialize_incident(inc: FoodSafetyIncident) -> dict:
+def _serialize_incident(inc: FoodSafetyIncident, *, user_names: Optional[dict[UUID, str]] = None) -> dict:
+    u_map = user_names or {}
     return {
         "id": str(inc.id),
         "incident_number": inc.incident_number,
@@ -1018,7 +1159,9 @@ def _serialize_incident(inc: FoodSafetyIncident) -> dict:
         "status": inc.status,
         "occurred_at": inc.occurred_at.isoformat() if inc.occurred_at else None,
         "reported_by_user_id": str(inc.reported_by_user_id) if inc.reported_by_user_id else None,
+        "reported_by_name": u_map.get(inc.reported_by_user_id) if inc.reported_by_user_id else None,
         "assigned_to_user_id": str(inc.assigned_to_user_id) if inc.assigned_to_user_id else None,
+        "assigned_to_name": u_map.get(inc.assigned_to_user_id) if inc.assigned_to_user_id else None,
         "evidence_urls": list(inc.evidence_urls or []),
         "corrective_action": inc.corrective_action,
         "resolution_notes": inc.resolution_notes,
@@ -1031,8 +1174,37 @@ def list_incidents(db: Session, canteen_id: UUID, *, status_filter: Optional[str
     stmt = select(FoodSafetyIncident).where(FoodSafetyIncident.canteen_id == canteen_id)
     if status_filter and status_filter != "all":
         stmt = stmt.where(FoodSafetyIncident.status == status_filter)
-    rows = db.scalars(stmt.order_by(FoodSafetyIncident.occurred_at.desc()).limit(150)).all()
-    return [_serialize_incident(r) for r in rows]
+    rows = list(db.scalars(stmt.order_by(FoodSafetyIncident.occurred_at.desc()).limit(150)).all())
+    u_ids = {u for r in rows for u in (r.reported_by_user_id, r.assigned_to_user_id) if u}
+    u_map = _user_name_map(db, u_ids)
+    return [_serialize_incident(r, user_names=u_map) for r in rows]
+
+
+def get_incident_audit_history(db: Session, incident_id: UUID) -> list[dict]:
+    from app.models.system import AuditLog
+
+    inc = db.get(FoodSafetyIncident, incident_id)
+    if not inc:
+        raise HTTPException(status_code=404, detail="Food safety incident not found")
+    logs = list(
+        db.scalars(
+            select(AuditLog)
+            .where(AuditLog.entity_type == "food_safety_incident", AuditLog.entity_id == inc.incident_number)
+            .order_by(AuditLog.created_at.desc())
+            .limit(100)
+        ).all()
+    )
+    u_map = _user_name_map(db, {l.actor_user_id for l in logs if l.actor_user_id})
+    return [
+        {
+            "id": str(l.id),
+            "action": l.action,
+            "actor_name": u_map.get(l.actor_user_id) if l.actor_user_id else "System",
+            "details": l.details or {},
+            "created_at": l.created_at.isoformat() if l.created_at else None,
+        }
+        for l in logs
+    ]
 
 
 # =============================================================================
@@ -1079,10 +1251,15 @@ def get_food_safety_dashboard(db: Session, canteen_id: UUID, *, days: int = 30) 
             )
         ).all()
     )
-    overdue_cleaning = sum(
-        1
-        for t in cleaning_tasks
-        if t.status != "completed" and _ensure_utc(t.due_at) is not None and _ensure_utc(t.due_at) < now
+    # Count ALL currently overdue uncompleted tasks regardless of lookback window
+    overdue_cleaning = len(
+        db.scalars(
+            select(CleaningTaskLog.id).where(
+                CleaningTaskLog.canteen_id == canteen_id,
+                CleaningTaskLog.status != "completed",
+                CleaningTaskLog.due_at < now,
+            )
+        ).all()
     )
     completed_cleaning = sum(1 for t in cleaning_tasks if t.status == "completed")
 
@@ -1094,7 +1271,15 @@ def get_food_safety_dashboard(db: Session, canteen_id: UUID, *, days: int = 30) 
             )
         ).all()
     )
-    open_incidents = sum(1 for i in incidents if i.status in ("open", "under_investigation"))
+    # Always count ALL currently open / under_investigation incidents regardless of lookback window
+    open_incidents = len(
+        db.scalars(
+            select(FoodSafetyIncident.id).where(
+                FoodSafetyIncident.canteen_id == canteen_id,
+                FoodSafetyIncident.status.in_(("open", "under_investigation")),
+            )
+        ).all()
+    )
     resolved_incidents = sum(1 for i in incidents if i.status in ("resolved", "closed"))
 
     expiry = get_expiry_monitoring(db, canteen_id, soon_days=7)

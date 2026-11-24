@@ -41,9 +41,12 @@ def cleanup_expired_auth_artifacts(db: Session) -> dict[str, int]:
 
 
 def scan_inventory_alerts(db: Session) -> dict[str, int]:
-    """Create unread in-app low-stock & expiry alerts for active canteens without duplicates."""
+    """Create unread in-app low-stock & expiry alerts for active canteens through Notification Center without duplicates."""
+    from app.services.notification_service import create_role_notifications
+
     alerts_created = 0
     canteens = db.scalars(select(Canteen).where(Canteen.is_active.is_(True))).all()
+    day_bucket = datetime.now(timezone.utc).strftime("%Y%m%d")
     for canteen in canteens:
         alerts = get_inventory_alerts(db, canteen.id)
         low_cnt = len(alerts["low_stock"])
@@ -64,18 +67,19 @@ def scan_inventory_alerts(db: Session) -> dict[str, int]:
             parts.append(f"{low_cnt} low-stock ingredient(s)")
         if exp_cnt:
             parts.append(f"{exp_cnt} batch(es) expiring soon")
-        db.add(
-            Notification(
-                role_target="inventory_manager",
-                canteen_id=canteen.id,
-                channel="in_app",
-                title=f"Inventory Alert • {canteen.name}",
-                message=f"Action required in {canteen.name}: {', '.join(parts)}.",
-                event_type="inventory_alert",
-                delivery_status="sent",
-            )
+        created = create_role_notifications(
+            db,
+            roles=["inventory_manager", "canteen_manager"],
+            canteen_id=canteen.id,
+            event_type="inventory_alert",
+            category="inventory",
+            priority="high",
+            title=f"Inventory Alert • {canteen.name}",
+            message=f"Action required in {canteen.name}: {', '.join(parts)}.",
+            event_id_base=f"inv_scan:{canteen.id}:{day_bucket}",
         )
-        alerts_created += 1
+        if created:
+            alerts_created += 1
     db.commit()
     return {"alerts_created": alerts_created}
 
@@ -86,10 +90,15 @@ def run_scheduled_maintenance(
     actor_user_id: Optional[UUID] = None,
     trigger: str = "manual",
 ) -> dict[str, Any]:
-    """Run periodic cleanup, inventory alert scan, and automated financial reconciliation."""
+    """Run periodic cleanup, inventory alert scan, overdue cleaning alerts, and automated financial reconciliation."""
     cleanup_stats = cleanup_expired_auth_artifacts(db)
     alert_stats = scan_inventory_alerts(db)
-    from app.services import backup_service, reconciliation_service
+    from app.services import backup_service, food_safety_service, reconciliation_service
+
+    overdue_cleaning_notified = 0
+    for canteen in db.scalars(select(Canteen).where(Canteen.is_active.is_(True))).all():
+        res_clean = food_safety_service.notify_overdue_cleaning_tasks(db, canteen.id)
+        overdue_cleaning_notified += int(res_clean.get("notified_overdue_tasks", 0))
 
     reconcil_stats = reconciliation_service.run_auto_reconciliation(
         db,
@@ -107,6 +116,7 @@ def run_scheduled_maintenance(
             "trigger": trigger,
             **cleanup_stats,
             **alert_stats,
+            "overdue_cleaning_notified": overdue_cleaning_notified,
             "reconciled_checked": reconcil_stats["total_checked"],
             "reconciled_discrepancies": reconcil_stats["discrepancy_count"],
             "backup_ran": backup_stats.get("ran", False),
@@ -119,6 +129,7 @@ def run_scheduled_maintenance(
         "executed_at": datetime.now(timezone.utc).isoformat(),
         **cleanup_stats,
         **alert_stats,
+        "overdue_cleaning_notified": overdue_cleaning_notified,
         "reconciled_checked": reconcil_stats["total_checked"],
         "reconciled_discrepancies": reconcil_stats["discrepancy_count"],
         "backup_status": backup_stats,

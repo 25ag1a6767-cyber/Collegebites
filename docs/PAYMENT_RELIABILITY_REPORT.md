@@ -23,6 +23,7 @@
    - Payment failures (`mark_payment_failed`) and expired checkout windows (`release_expired_slot_reservations`) cleanly release pickup slots, release ingredient reservations, restore unpaid loyalty points, record `PaymentTransaction(status="FAILED")`, and dispatch customer failure alerts with safe retry support (`POST /api/v1/payments/retry/{order_id}`).
 
 ## 3. Verification Status
-- Pricing & exact-total checkout verification: **PASSED** (`test_phase34_pricing_and_two_counters.py` — 17/17 tests passed).
-- Payment signature verification, duplicate/late callback alerts, queue estimate snapshotting, and lock-free order sequence uniqueness: **VERIFIED** in Phase 35 test suite.
+- Pricing & exact-total checkout verification: **PASSED** (`test_phase34_pricing_and_two_counters.py`).
+- Razorpay-only removal of Stripe, 14-step payment→KOT→QR→handover workflow, delayed payment sync, `order.paid` webhook, and historical ledger preservation: **PASSED** (`test_phase36_razorpay_only_and_live_otp.py` — 6/6 passed).
+- Payment signature verification, duplicate/late callback alerts, queue estimate snapshotting, and lock-free order sequence uniqueness: **PASSED** (`test_phase35_enterprise_master_platform.py` — 6/6 passed).
 - Live Razorpay settlement testing against real bank rails: **NOT TESTED** in local sandbox (HMAC + mocked gateway status verification used to avoid real financial charges).

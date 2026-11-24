@@ -100,37 +100,60 @@ def test_encrypted_backup_verification_redaction_isolation_and_disaster_recovery
     assert dry.status_code == 200, dry.text
     assert dry.json()["verification_passed"] is True
 
-    # 5. Real isolated-schema disaster recovery drill against fresh PostgreSQL schema
-    drill_schema = "dr_drill_verify"
-    with test_engine.begin() as conn:
-        conn.execute(text(f'DROP SCHEMA IF EXISTS "{drill_schema}" CASCADE'))
-        conn.execute(text(f'CREATE SCHEMA "{drill_schema}"'))
-        conn.execute(text(f'SET LOCAL search_path TO "{drill_schema}"'))
-        Base.metadata.create_all(bind=conn)
+    # 5. Real isolated disaster recovery drill (isolated PG schema on PostgreSQL; isolated SQLite DB on SQLite)
+    if test_engine.dialect.name == "sqlite":
+        from sqlalchemy import create_engine
 
-    try:
-        with TestingSessionLocal() as db:
-            drill_res = backup_service.restore_backup(
-                db,
-                UUID(bkp["id"]),
-                dry_run=False,
-                target_engine=test_engine,
-                target_schema=drill_schema,
-                actor_user_id=UUID(admin["user"]["id"]),
-            )
-            assert drill_res["verification_passed"] is True
+        drill_engine = create_engine("sqlite:///:memory:", future=True)
+        Base.metadata.create_all(bind=drill_engine)
+        try:
+            with TestingSessionLocal() as db:
+                drill_res = backup_service.restore_backup(
+                    db,
+                    UUID(bkp["id"]),
+                    dry_run=False,
+                    target_engine=drill_engine,
+                    actor_user_id=UUID(admin["user"]["id"]),
+                )
+                assert drill_res["verification_passed"] is True
 
-        with test_engine.begin() as conn:
-            conn.execute(text(f'SET LOCAL search_path TO "{drill_schema}"'))
-            restored_order_cnt = conn.execute(text("SELECT count(*) FROM orders")).scalar()
-            restored_pay_cnt = conn.execute(text("SELECT count(*) FROM payments")).scalar()
-            restored_tok_cnt = conn.execute(text("SELECT count(*) FROM pickup_tokens")).scalar()
-            assert restored_order_cnt >= 1
-            assert restored_pay_cnt >= 1
-            assert restored_tok_cnt >= 1
-    finally:
+            with drill_engine.begin() as conn:
+                assert conn.execute(text("SELECT count(*) FROM orders")).scalar() >= 1
+                assert conn.execute(text("SELECT count(*) FROM payments")).scalar() >= 1
+                assert conn.execute(text("SELECT count(*) FROM pickup_tokens")).scalar() >= 1
+        finally:
+            drill_engine.dispose()
+    else:
+        drill_schema = "dr_drill_verify"
         with test_engine.begin() as conn:
             conn.execute(text(f'DROP SCHEMA IF EXISTS "{drill_schema}" CASCADE'))
+            conn.execute(text(f'CREATE SCHEMA "{drill_schema}"'))
+            conn.execute(text(f'SET LOCAL search_path TO "{drill_schema}"'))
+            Base.metadata.create_all(bind=conn)
+
+        try:
+            with TestingSessionLocal() as db:
+                drill_res = backup_service.restore_backup(
+                    db,
+                    UUID(bkp["id"]),
+                    dry_run=False,
+                    target_engine=test_engine,
+                    target_schema=drill_schema,
+                    actor_user_id=UUID(admin["user"]["id"]),
+                )
+                assert drill_res["verification_passed"] is True
+
+            with test_engine.begin() as conn:
+                conn.execute(text(f'SET LOCAL search_path TO "{drill_schema}"'))
+                restored_order_cnt = conn.execute(text("SELECT count(*) FROM orders")).scalar()
+                restored_pay_cnt = conn.execute(text("SELECT count(*) FROM payments")).scalar()
+                restored_tok_cnt = conn.execute(text("SELECT count(*) FROM pickup_tokens")).scalar()
+                assert restored_order_cnt >= 1
+                assert restored_pay_cnt >= 1
+                assert restored_tok_cnt >= 1
+        finally:
+            with test_engine.begin() as conn:
+                conn.execute(text(f'DROP SCHEMA IF EXISTS "{drill_schema}" CASCADE'))
 
     # 6. Checksum tampering triggers integrity failure + critical SecurityAlert
     with TestingSessionLocal() as db:

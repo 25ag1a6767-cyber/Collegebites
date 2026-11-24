@@ -257,7 +257,7 @@ const NavbarContent: React.FC = () => {
               <LayoutDashboard className="h-3.5 w-3.5" /> Admin
             </Link>
           )}
-          {isStaff(["kitchen_staff", "cashier", "pickup_staff", "inventory_manager", "canteen_manager", "college_admin"]) && (
+          {isStaff(["kitchen_staff", "cashier", "pickup_staff", "inventory_manager", "food_safety_inspector", "canteen_manager", "college_admin"]) && (
             <Link
               to="/staff"
               className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-200"

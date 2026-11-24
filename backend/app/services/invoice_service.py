@@ -34,11 +34,13 @@ def _generate_invoice_number(db: Session) -> str:
     prefix = f"INV-{today_str}-"
     if db.bind and db.bind.dialect.name == "postgresql":
         try:
-            seq_val = int(db.execute(text("SELECT nextval('invoice_number_seq')")).scalar_one())
+            with db.begin_nested():
+                seq_val = int(db.execute(text("SELECT nextval('invoice_number_seq')")).scalar_one())
             return f"{prefix}{seq_val:06d}"
         except Exception:
-            db.execute(text("CREATE SEQUENCE IF NOT EXISTS invoice_number_seq START WITH 1 INCREMENT BY 1"))
-            seq_val = int(db.execute(text("SELECT nextval('invoice_number_seq')")).scalar_one())
+            with db.begin_nested():
+                db.execute(text("CREATE SEQUENCE IF NOT EXISTS invoice_number_seq START WITH 1 INCREMENT BY 1"))
+                seq_val = int(db.execute(text("SELECT nextval('invoice_number_seq')")).scalar_one())
             return f"{prefix}{seq_val:06d}"
 
     with _INVOICE_SEQ_LOCK:

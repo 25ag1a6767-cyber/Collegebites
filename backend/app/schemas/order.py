@@ -179,6 +179,9 @@ class OrderOut(ORMModel):
     orders_ahead_count: Optional[int] = None
     counter_queue_position: Optional[int] = None
     dynamic_wait_minutes: Optional[int] = None
+    waiting_time_available: bool = True
+    waiting_time_message: Optional[str] = None
+    last_updated_at: Optional[datetime] = None
     pickup_token_code: Optional[str] = None
     qr_verification_path: Optional[str] = None
     qr_token_raw: Optional[str] = None

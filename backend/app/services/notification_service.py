@@ -386,12 +386,27 @@ def _dispatch_user_notifications(
                 metadata_json=meta,
             )
         else:
-            existing = db.scalar(select(Notification.id).where(Notification.dedup_key == dedup))
-            created = existing is None
+            notif, created = _create_notification(
+                db,
+                user_id=order.customer_id,
+                canteen_id=order.canteen_id,
+                order_id=order.id,
+                channel="external",
+                category=category,
+                priority=priority,
+                title=title,
+                message=msg,
+                event_type=event_type,
+                dedup_key=dedup,
+                metadata_json=meta,
+            )
 
         if not created or not opt_in or not send_external or notif is None:
             return
 
+        from app.integrations.email_provider import resolve_email_otp_provider
+
+        email_provider_name = resolve_email_otp_provider() or "smtp"
         delivery_errors: dict[str, str] = {}
         user = db.get(User, order.customer_id)
         if user and user.email and (not pref or pref.email_enabled):
@@ -402,7 +417,7 @@ def _dispatch_user_notifications(
                 channel="email",
                 recipient_masked=_mask_email(user.email),
                 status=st,
-                provider_name="smtp",
+                provider_name=email_provider_name,
                 last_error=reason if st == "failed" else None,
             )
             if st == "failed":
@@ -809,7 +824,28 @@ def notify_system_maintenance(
 # =============================================================================
 
 
-def _serialize_notification(n: Notification) -> dict[str, Any]:
+def _effective_notification_roles(roles: Optional[set[str]]) -> set[str]:
+    eff = set(roles or set())
+    if "super_admin" in eff:
+        eff.add("college_admin")
+    eff.add("all")
+    return eff
+
+
+def is_notification_read_for_user(n: Notification, user_id: UUID) -> bool:
+    if n.user_id is not None:
+        return bool(n.is_read)
+    meta = n.metadata_json or {}
+    read_by = meta.get("read_by_user_ids") or []
+    return bool(n.is_read) or (str(user_id) in read_by)
+
+
+def _serialize_notification(n: Notification, *, viewer_user_id: Optional[UUID] = None) -> dict[str, Any]:
+    read_flag = is_notification_read_for_user(n, viewer_user_id) if viewer_user_id else bool(n.is_read)
+    read_at_val = n.read_at.isoformat() if n.read_at else None
+    if viewer_user_id and n.user_id is None:
+        read_at_map = (n.metadata_json or {}).get("read_at_by_user") or {}
+        read_at_val = read_at_map.get(str(viewer_user_id)) or read_at_val
     return {
         "id": str(n.id),
         "user_id": str(n.user_id) if n.user_id else None,
@@ -827,11 +863,56 @@ def _serialize_notification(n: Notification) -> dict[str, Any]:
         "retry_count": n.retry_count,
         "last_error": getattr(n, "last_error", None),
         "delivered_at": n.delivered_at.isoformat() if getattr(n, "delivered_at", None) else None,
-        "is_read": n.is_read,
-        "read_at": n.read_at.isoformat() if n.read_at else None,
+        "is_read": read_flag,
+        "read_at": read_at_val,
         "metadata_json": n.metadata_json or {},
         "created_at": n.created_at.isoformat() if n.created_at else None,
     }
+
+
+def serialize_notification_for_user(n: Notification, user_id: UUID) -> dict[str, Any]:
+    return _serialize_notification(n, viewer_user_id=user_id)
+
+
+def _query_visible_notifications(
+    db: Session,
+    user_id: UUID,
+    roles: set[str],
+    assigned_canteen_id: Optional[UUID] = None,
+    *,
+    q: Optional[str] = None,
+    priority: Optional[str] = None,
+    category: Optional[str] = None,
+    event_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
+) -> list[Notification]:
+    eff_roles = _effective_notification_roles(roles)
+    conds = [Notification.user_id == user_id]
+    if eff_roles:
+        conds.append(Notification.role_target.in_(list(eff_roles)))
+    stmt = select(Notification).where(or_(*conds), Notification.channel == "in_app")
+    if priority:
+        stmt = stmt.where(Notification.priority == priority)
+    if category:
+        stmt = stmt.where(Notification.category == category)
+    if event_type:
+        stmt = stmt.where(Notification.event_type == event_type)
+    if delivery_status:
+        stmt = stmt.where(Notification.delivery_status == delivery_status)
+    if q and q.strip():
+        pat = f"%{q.strip()}%"
+        stmt = stmt.where(or_(Notification.title.ilike(pat), Notification.message.ilike(pat), Notification.event_type.ilike(pat)))
+
+    rows = db.scalars(stmt.order_by(Notification.created_at.desc())).all()
+    filtered: list[Notification] = []
+    for n in rows:
+        if n.user_id is None and n.role_target and assigned_canteen_id and n.canteen_id and n.canteen_id != assigned_canteen_id:
+            continue
+        if is_read is not None and is_notification_read_for_user(n, user_id) != is_read:
+            continue
+        filtered.append(n)
+    return filtered
 
 
 def list_my_notifications(
@@ -849,30 +930,18 @@ def list_my_notifications(
     limit: int = 100,
     offset: int = 0,
 ) -> list[Notification]:
-    conds = [Notification.user_id == user_id]
-    if roles:
-        conds.append(Notification.role_target.in_(list(roles)))
-    stmt = select(Notification).where(or_(*conds))
-    if priority:
-        stmt = stmt.where(Notification.priority == priority)
-    if category:
-        stmt = stmt.where(Notification.category == category)
-    if event_type:
-        stmt = stmt.where(Notification.event_type == event_type)
-    if delivery_status:
-        stmt = stmt.where(Notification.delivery_status == delivery_status)
-    if is_read is not None:
-        stmt = stmt.where(Notification.is_read.is_(is_read))
-    if q and q.strip():
-        pat = f"%{q.strip()}%"
-        stmt = stmt.where(or_(Notification.title.ilike(pat), Notification.message.ilike(pat), Notification.event_type.ilike(pat)))
-
-    rows = db.scalars(stmt.order_by(Notification.created_at.desc()).limit(max(150, limit + offset + 50))).all()
-    filtered = []
-    for n in rows:
-        if n.user_id is None and n.role_target and assigned_canteen_id and n.canteen_id and n.canteen_id != assigned_canteen_id:
-            continue
-        filtered.append(n)
+    filtered = _query_visible_notifications(
+        db,
+        user_id,
+        roles,
+        assigned_canteen_id=assigned_canteen_id,
+        q=q,
+        priority=priority,
+        category=category,
+        event_type=event_type,
+        delivery_status=delivery_status,
+        is_read=is_read,
+    )
     return filtered[offset : offset + max(1, min(limit, 200))]
 
 
@@ -882,8 +951,8 @@ def get_unread_count(
     roles: set[str],
     assigned_canteen_id: Optional[UUID] = None,
 ) -> int:
-    rows = list_my_notifications(
-        db, user_id, roles, assigned_canteen_id=assigned_canteen_id, is_read=False, limit=200
+    rows = _query_visible_notifications(
+        db, user_id, roles, assigned_canteen_id=assigned_canteen_id, is_read=False
     )
     return len(rows)
 
@@ -903,7 +972,7 @@ def get_notification_history(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    all_matched = list_my_notifications(
+    all_matched = _query_visible_notifications(
         db,
         user_id,
         roles,
@@ -914,17 +983,15 @@ def get_notification_history(
         event_type=event_type,
         delivery_status=delivery_status,
         is_read=is_read,
-        limit=200,
-        offset=0,
     )
-    unread = sum(1 for n in all_matched if not n.is_read)
+    unread = sum(1 for n in all_matched if not is_notification_read_for_user(n, user_id))
     page = all_matched[offset : offset + max(1, min(limit, 100))]
     return {
         "total": len(all_matched),
         "unread_count": unread,
         "limit": limit,
         "offset": offset,
-        "items": [_serialize_notification(n) for n in page],
+        "items": [_serialize_notification(n, viewer_user_id=user_id) for n in page],
     }
 
 
@@ -935,11 +1002,13 @@ def list_notification_deliveries(
     status_filter: Optional[str] = None,
     channel: Optional[str] = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     stmt = (
         select(NotificationDelivery, Notification)
         .join(Notification, Notification.id == NotificationDelivery.notification_id)
         .order_by(NotificationDelivery.created_at.desc())
+        .offset(max(0, offset))
         .limit(max(1, min(limit, 200)))
     )
     if canteen_id:
@@ -971,10 +1040,18 @@ def list_notification_deliveries(
     ]
 
 
-def retry_failed_notification(db: Session, notification_id: UUID, actor_user_id: UUID) -> dict[str, Any]:
+def retry_failed_notification(
+    db: Session,
+    notification_id: UUID,
+    actor_user_id: UUID,
+    *,
+    assigned_canteen_id: Optional[UUID] = None,
+) -> dict[str, Any]:
     notif = db.get(Notification, notification_id)
     if not notif:
         raise HTTPException(status_code=404, detail="Notification not found")
+    if assigned_canteen_id and notif.canteen_id and notif.canteen_id != assigned_canteen_id:
+        raise HTTPException(status_code=403, detail="Not authorized to retry notifications for another canteen")
     deliveries = list(
         db.scalars(
             select(NotificationDelivery).where(
@@ -984,6 +1061,11 @@ def retry_failed_notification(db: Session, notification_id: UUID, actor_user_id:
         ).all()
     )
     user = db.get(User, notif.user_id) if notif.user_id else None
+    pref = db.scalar(select(NotificationPreference).where(NotificationPreference.user_id == notif.user_id)) if notif.user_id else None
+    order = db.get(Order, notif.order_id) if notif.order_id else None
+    target_email = (user.email if user else None) or (order.guest_email if order else None)
+    target_phone = (user.phone if user else None) or (order.guest_phone if order else None)
+
     retried = 0
     succeeded = 0
     now = datetime.now(timezone.utc)
@@ -993,10 +1075,25 @@ def retry_failed_notification(db: Session, notification_id: UUID, actor_user_id:
             continue
         retried += 1
         d.attempt_count += 1
-        if d.channel == "email" and user and user.email:
-            st, reason = _safe_send_email(user.email, notif.title, notif.message)
-        elif d.channel in ("sms", "whatsapp") and user and user.phone:
-            st, reason = _safe_send_sms(user.phone, notif.message, d.channel)
+        if d.channel == "email" and target_email:
+            st, reason = _safe_send_email(target_email, notif.title, notif.message)
+        elif d.channel in ("sms", "whatsapp") and target_phone:
+            st, reason = _safe_send_sms(target_phone, notif.message, d.channel)
+        elif d.channel == "expo_push" and pref and pref.expo_push_token:
+            ok_p, reason = send_expo_push(pref.expo_push_token, notif.title, notif.message, notif.metadata_json or {})
+            st = "sent" if ok_p else "failed"
+        elif d.channel == "web_push" and pref and pref.web_push_subscriptions:
+            any_ok = False
+            reason = "web_push_failed"
+            for sub in pref.web_push_subscriptions:
+                if isinstance(sub, dict):
+                    ok_w, r_w = send_web_push(sub, notif.title, notif.message, "/", notif.metadata_json or {})
+                    if ok_w:
+                        any_ok = True
+                        reason = r_w
+                    else:
+                        reason = r_w
+            st = "sent" if any_ok else "failed"
         else:
             st, reason = "pending", "no_direct_provider_target"
         d.status = st
@@ -1030,18 +1127,44 @@ def retry_failed_notification(db: Session, notification_id: UUID, actor_user_id:
     }
 
 
-def mark_notification_read(db: Session, notification_id: UUID, user_id: UUID, roles: Optional[set[str]] = None) -> Notification:
+def mark_notification_read(
+    db: Session,
+    notification_id: UUID,
+    user_id: UUID,
+    roles: Optional[set[str]] = None,
+    assigned_canteen_id: Optional[UUID] = None,
+) -> dict[str, Any]:
+    from sqlalchemy.orm.attributes import flag_modified
+
     n = db.get(Notification, notification_id)
     if not n:
         raise HTTPException(status_code=404, detail="Notification not found")
-    role_match = bool(n.role_target and roles and n.role_target in roles)
+    eff_roles = _effective_notification_roles(roles)
+    role_match = bool(n.role_target and n.role_target in eff_roles)
     if n.user_id != user_id and not role_match:
         raise HTTPException(status_code=403, detail="Not authorized to modify this notification")
-    n.is_read = True
-    n.read_at = datetime.now(timezone.utc)
+    if n.user_id is None and assigned_canteen_id and n.canteen_id and n.canteen_id != assigned_canteen_id:
+        raise HTTPException(status_code=403, detail="Not authorized to modify notifications for another canteen")
+
+    now = datetime.now(timezone.utc)
+    if n.user_id is not None:
+        n.is_read = True
+        n.read_at = now
+    else:
+        meta = dict(n.metadata_json or {})
+        read_by = list(meta.get("read_by_user_ids") or [])
+        uid_str = str(user_id)
+        if uid_str not in read_by:
+            read_by.append(uid_str)
+        meta["read_by_user_ids"] = read_by
+        read_at_map = dict(meta.get("read_at_by_user") or {})
+        read_at_map[uid_str] = now.isoformat()
+        meta["read_at_by_user"] = read_at_map
+        n.metadata_json = meta
+        flag_modified(n, "metadata_json")
     db.commit()
     db.refresh(n)
-    return n
+    return _serialize_notification(n, viewer_user_id=user_id)
 
 
 def mark_all_notifications_read(
@@ -1050,17 +1173,29 @@ def mark_all_notifications_read(
     roles: Optional[set[str]] = None,
     assigned_canteen_id: Optional[UUID] = None,
 ) -> int:
+    from sqlalchemy.orm.attributes import flag_modified
+
     now = datetime.now(timezone.utc)
-    conds = [Notification.user_id == user_id]
-    if roles:
-        conds.append(Notification.role_target.in_(list(roles)))
-    rows = db.scalars(select(Notification).where(or_(*conds), Notification.is_read.is_(False))).all()
+    uid_str = str(user_id)
+    unread_rows = _query_visible_notifications(
+        db, user_id, roles or set(), assigned_canteen_id=assigned_canteen_id, is_read=False
+    )
     marked = 0
-    for n in rows:
-        if n.user_id is None and n.role_target and assigned_canteen_id and n.canteen_id and n.canteen_id != assigned_canteen_id:
-            continue
-        n.is_read = True
-        n.read_at = now
+    for n in unread_rows:
+        if n.user_id is not None:
+            n.is_read = True
+            n.read_at = now
+        else:
+            meta = dict(n.metadata_json or {})
+            read_by = list(meta.get("read_by_user_ids") or [])
+            if uid_str not in read_by:
+                read_by.append(uid_str)
+            meta["read_by_user_ids"] = read_by
+            read_at_map = dict(meta.get("read_at_by_user") or {})
+            read_at_map[uid_str] = now.isoformat()
+            meta["read_at_by_user"] = read_at_map
+            n.metadata_json = meta
+            flag_modified(n, "metadata_json")
         marked += 1
     db.commit()
     return marked

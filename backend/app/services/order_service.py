@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.config import settings
 from app.core.redis_client import safe_redis
@@ -70,12 +70,14 @@ def _generate_order_number(db: Session) -> str:
     prefix = f"CB-{today_str}-"
     if db.bind and db.bind.dialect.name == "postgresql":
         try:
-            seq_val = int(db.execute(text("SELECT nextval('order_number_seq')")).scalar_one())
+            with db.begin_nested():
+                seq_val = int(db.execute(text("SELECT nextval('order_number_seq')")).scalar_one())
             return f"{prefix}{seq_val:06d}"
         except Exception:
-            # Ensure sequence exists in fresh PostgreSQL environments without locking orders table
-            db.execute(text("CREATE SEQUENCE IF NOT EXISTS order_number_seq START WITH 1 INCREMENT BY 1"))
-            seq_val = int(db.execute(text("SELECT nextval('order_number_seq')")).scalar_one())
+            # Ensure sequence exists in fresh PostgreSQL environments without poisoning outer transaction
+            with db.begin_nested():
+                db.execute(text("CREATE SEQUENCE IF NOT EXISTS order_number_seq START WITH 1 INCREMENT BY 1"))
+                seq_val = int(db.execute(text("SELECT nextval('order_number_seq')")).scalar_one())
             return f"{prefix}{seq_val:06d}"
 
     with _ORDER_SEQ_LOCK:
@@ -221,6 +223,9 @@ def _serialize_order_with_maps(
         orders_ahead_count=(queue_metrics or {}).get("orders_ahead_count"),
         counter_queue_position=(queue_metrics or {}).get("counter_queue_position"),
         dynamic_wait_minutes=(queue_metrics or {}).get("dynamic_wait_minutes"),
+        waiting_time_available=(queue_metrics or {}).get("waiting_time_available", True),
+        waiting_time_message=(queue_metrics or {}).get("waiting_time_message"),
+        last_updated_at=(queue_metrics or {}).get("last_updated_at"),
         pickup_token_code=token_row.token_code if token_row else None,
         qr_verification_path=qr_row.verification_path if qr_row else None,
         qr_token_raw=qr_row.qr_payload_encoded if qr_row else None,
@@ -244,19 +249,42 @@ def serialize_orders_batch(db: Session, orders: list[Order]) -> list[OrderOut]:
         return []
     oids = [o.id for o in orders]
     cids = list({o.canteen_id for o in orders})
-    cnt_ids = list({o.counter_id for o in orders})
-    canteens = {c.id: c for c in db.scalars(select(Canteen).where(Canteen.id.in_(cids))).all()}
-    counters = {c.id: c for c in db.scalars(select(Counter).where(Counter.id.in_(cnt_ids))).all()}
+    canteens_list = (
+        db.scalars(
+            select(Canteen)
+            .options(joinedload(Canteen.counters), joinedload(Canteen.operating_hours))
+            .where(Canteen.id.in_(cids))
+        )
+        .unique()
+        .all()
+    )
+    canteens = {c.id: c for c in canteens_list}
+    counters: dict[UUID, Counter] = {}
+    active_counter_counts: dict[UUID, int] = {}
+    for c in canteens_list:
+        active_cnt = 0
+        for cnt in c.counters:
+            counters[cnt.id] = cnt
+            if cnt.is_active:
+                active_cnt += 1
+        active_counter_counts[c.id] = active_cnt
     tokens = {t.order_id: t for t in db.scalars(select(PickupToken).where(PickupToken.order_id.in_(oids))).all()}
     qrs = {q.order_id: q for q in db.scalars(select(OrderQRCode).where(OrderQRCode.order_id.in_(oids))).all()}
     pays: dict[UUID, Payment] = {}
     for p in db.scalars(select(Payment).where(Payment.order_id.in_(oids)).order_by(Payment.created_at.desc())).all():
         if p.order_id not in pays:
             pays[p.order_id] = p
-    policy_text = get_college_config_snapshot(db).get("cancellation_policy_text") or ""
+    college_cfg = get_college_config_snapshot(db)
+    policy_text = college_cfg.get("cancellation_policy_text") or ""
     from app.services.queue_service import compute_order_queue_metrics_map
 
-    q_metrics_map = compute_order_queue_metrics_map(db, orders, precomputed_canteens=canteens)
+    q_metrics_map = compute_order_queue_metrics_map(
+        db,
+        orders,
+        precomputed_canteens=canteens,
+        precomputed_active_counter_counts=active_counter_counts,
+        precomputed_tz_name=college_cfg.get("college_timezone"),
+    )
     return [
         _serialize_order_with_maps(
             o,

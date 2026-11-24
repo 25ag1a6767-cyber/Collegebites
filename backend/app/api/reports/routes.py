@@ -133,12 +133,22 @@ def export_csv(
     preset: Optional[str] = Query(default=None),
     start_date: Optional[date] = Query(default=None),
     end_date: Optional[date] = Query(default=None),
+    category_id: Optional[UUID] = Query(default=None),
+    food_item_id: Optional[UUID] = Query(default=None),
+    compare_previous: bool = Query(default=False),
     principal: AuthenticatedPrincipal = Depends(require_roles(*REPORT_ROLES)),
     db: Session = Depends(get_db),
 ):
     scoped_cid = scoped_canteen_for_principal(principal, canteen_id)
     report = report_service.get_analytics_report(
-        db, canteen_id=scoped_cid, preset=preset, start_date=start_date, end_date=end_date
+        db,
+        canteen_id=scoped_cid,
+        preset=preset,
+        start_date=start_date,
+        end_date=end_date,
+        category_id=category_id,
+        food_item_id=food_item_id,
+        compare_previous=compare_previous,
     )
     csv_text = report_service.export_report_csv(report)
     return Response(
@@ -154,12 +164,22 @@ def export_pdf(
     preset: Optional[str] = Query(default=None),
     start_date: Optional[date] = Query(default=None),
     end_date: Optional[date] = Query(default=None),
+    category_id: Optional[UUID] = Query(default=None),
+    food_item_id: Optional[UUID] = Query(default=None),
+    compare_previous: bool = Query(default=False),
     principal: AuthenticatedPrincipal = Depends(require_roles(*REPORT_ROLES)),
     db: Session = Depends(get_db),
 ):
     scoped_cid = scoped_canteen_for_principal(principal, canteen_id)
     report = report_service.get_analytics_report(
-        db, canteen_id=scoped_cid, preset=preset, start_date=start_date, end_date=end_date
+        db,
+        canteen_id=scoped_cid,
+        preset=preset,
+        start_date=start_date,
+        end_date=end_date,
+        category_id=category_id,
+        food_item_id=food_item_id,
+        compare_previous=compare_previous,
     )
     pdf_bytes = report_service.export_report_pdf(report)
     return Response(
@@ -175,12 +195,22 @@ def export_xlsx(
     preset: Optional[str] = Query(default=None),
     start_date: Optional[date] = Query(default=None),
     end_date: Optional[date] = Query(default=None),
+    category_id: Optional[UUID] = Query(default=None),
+    food_item_id: Optional[UUID] = Query(default=None),
+    compare_previous: bool = Query(default=False),
     principal: AuthenticatedPrincipal = Depends(require_roles(*REPORT_ROLES)),
     db: Session = Depends(get_db),
 ):
     scoped_cid = scoped_canteen_for_principal(principal, canteen_id)
     report = report_service.get_analytics_report(
-        db, canteen_id=scoped_cid, preset=preset, start_date=start_date, end_date=end_date
+        db,
+        canteen_id=scoped_cid,
+        preset=preset,
+        start_date=start_date,
+        end_date=end_date,
+        category_id=category_id,
+        food_item_id=food_item_id,
+        compare_previous=compare_previous,
     )
     xlsx_bytes = report_service.export_report_xlsx(report)
     return Response(
@@ -493,6 +523,32 @@ def get_operations_control_center(
             "active_promotional_campaigns_count": int(active_coupons_count),
         },
     }
+    if operational_category != "all":
+        section_map = {
+            "orders": {
+                "current_orders": current_orders,
+                "pending_orders": pending_orders,
+                "preparing_orders": preparing_orders,
+                "ready_orders": ready_orders,
+                "completed_orders": completed_orders,
+            },
+            "meal_plans": {
+                "active_meal_plans": occ_payload["active_meal_plans"],
+                "meal_plan_redemptions": occ_payload["meal_plan_redemptions"],
+            },
+            "inventory": {
+                "inventory_alerts": occ_payload["inventory_alerts"],
+                "low_stock_items": low_stock_items,
+            },
+            "procurement": {
+                "pending_purchase_orders": occ_payload["pending_purchase_orders"],
+                "vendor_outstanding_balances": occ_payload["vendor_outstanding_balances"],
+            },
+            "events": {"event_bulk_orders": occ_payload["event_bulk_orders"]},
+            "support": {"support_tickets": occ_payload["support_tickets"]},
+            "sales": {"sales_and_operational_summaries": occ_payload["sales_and_operational_summaries"]},
+        }
+        occ_payload["selected_category_data"] = section_map.get(operational_category, {})
     cache_manager.set_json(cache_ns, cache_key, occ_payload, ttl_seconds=10, l1_ttl=2.0)
     return occ_payload
 

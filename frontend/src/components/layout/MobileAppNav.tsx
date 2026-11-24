@@ -15,6 +15,9 @@ const HIDDEN_PREFIXES = [
   "/admin",
   "/staff",
   "/token-board",
+  "/food-safety",
+  "/assistant",
+  "/notifications",
   "/login",
   "/register",
 ];

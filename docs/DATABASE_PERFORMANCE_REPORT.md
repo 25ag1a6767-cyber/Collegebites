@@ -1,7 +1,7 @@
 # CollegeBites — Database Performance & Schema Optimization Report
 
-## 1. Schema & Indexing Audit (`e5f6a7b8c9d0`)
-- **Database Engine:** PostgreSQL 16+ in production (Neon serverless / PgBouncer pooled), SQLAlchemy 2.0 ORM, Alembic migration head `e5f6a7b8c9d0`.
+## 1. Schema & Indexing Audit (`f6a7b8c9d0e1`)
+- **Database Engine:** PostgreSQL 16+ in production (Neon serverless / PgBouncer pooled), SQLAlchemy 2.0 ORM, **132 tables**, Alembic single migration head `f6a7b8c9d0e1` (chaining off `e5f6a7b8c9d0`).
 - **Zero-Duplication Extensions:** Extended existing `notifications`, `suppliers`, `stock_batches`, and `recipes` tables rather than duplicating operational records.
 - **Composite Indexes Added for Hot Operational Queries:**
   - `ix_fs_insp_canteen_date` (`food_safety_inspections(canteen_id, inspected_at)`)
@@ -21,7 +21,7 @@
 ## 2. Critical Contention Bottlenecks Eliminated
 1. **Lock-Free Order & Invoice Number Generation:**
    - **Before:** `_generate_order_number` (`pg_advisory_xact_lock(918273645)`) and `_generate_invoice_number` (`pg_advisory_xact_lock(918273701)`) serialized ALL checkouts and payment confirmations behind a single global transaction-scoped lock.
-   - **After:** Replaced with lock-free PostgreSQL `SEQUENCE` (`order_number_seq`, `invoice_number_seq`) via `nextval(...)` in migration `e5f6a7b8c9d0` (with thread-safe monotonic counter fallback on SQLite). Checkout number generation no longer blocks concurrent orders across counters.
+   - **After:** Replaced with lock-free PostgreSQL `SEQUENCE` (`order_number_seq`, `invoice_number_seq`) via `nextval(...)` wrapped in `with db.begin_nested():` savepoints (preventing `InFailedSqlTransaction` if sequence auto-creation triggers on a fresh database) + thread-safe monotonic counter fallback on SQLite. Restore operations also resync both PostgreSQL sequences via `setval(...)` to prevent post-restore collisions.
 2. **Canonical Row-Lock Ordering:**
    - Order verification & webhook handlers lock `Order` before `Payment`; stock transfers lock `InventoryItem` rows in canonical sorted `(canteen_id, ingredient_id)` order; `allocate_stock_batches` locks `StockBatch` under `SELECT ... FOR UPDATE` in deterministic FEFO/FIFO order.
 3. **Post-Commit External Side Effects:**

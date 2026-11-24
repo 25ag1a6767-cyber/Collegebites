@@ -38,7 +38,7 @@ export const KitchenDisplayPage: React.FC = () => {
   const [stationId, setStationId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [delayedOnly, setDelayedOnly] = useState(false);
-  const [kdsView, setKdsView] = useState<"orders" | "production">("orders");
+  const [kdsView, setKdsView] = useState<"orders" | "grouped" | "production">("orders");
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [delayModalOrder, setDelayModalOrder] = useState<Order | null>(null);
   const [delayMins, setDelayMins] = useState(10);
@@ -131,6 +131,13 @@ export const KitchenDisplayPage: React.FC = () => {
       }),
     refetchInterval: !isOnline ? false : kdsSyncStatus === "live" ? 30000 : 4000,
     refetchIntervalInBackground: true,
+  });
+
+  const { data: groupedBoardItems = [], isLoading: groupedBoardLoading, refetch: refetchGroupedBoard } = useQuery<any[]>({
+    queryKey: ["kitchen-grouped-board", activeCanteenId],
+    enabled: Boolean(activeCanteenId && kdsView === "grouped"),
+    queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/grouped-items`)).data,
+    refetchInterval: kdsSyncStatus === "live" ? 15000 : 5000,
   });
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
@@ -364,13 +371,49 @@ export const KitchenDisplayPage: React.FC = () => {
         <Button size="sm" variant={kdsView === "orders" ? "secondary" : "outline"} onClick={() => setKdsView("orders")}>
           Live Order Board ({orders.length})
         </Button>
+        <Button size="sm" variant={kdsView === "grouped" ? "secondary" : "outline"} onClick={() => setKdsView("grouped")}>
+          Item-Grouped KDS View
+        </Button>
         <Button size="sm" variant={kdsView === "production" ? "secondary" : "outline"} onClick={() => setKdsView("production")}>
-          Production Planning, Batches &amp; Item-Grouped KDS
+          Production Planning, Recipes &amp; Batches
         </Button>
       </div>
 
       {kdsView === "production" ? (
         <ProductionManagementTab activeCanteenId={activeCanteenId} />
+      ) : kdsView === "grouped" ? (
+        <Card className="p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="font-extrabold text-sm text-slate-900">Live Item-Grouped Kitchen Preparation View</h2>
+            <Button size="sm" variant="outline" onClick={() => refetchGroupedBoard()}>Refresh</Button>
+          </div>
+          {groupedBoardLoading ? (
+            <div className="text-xs text-slate-500 py-8 text-center">Loading consolidated kitchen items...</div>
+          ) : groupedBoardItems.length === 0 ? (
+            <div className="text-xs text-slate-500 py-8 text-center">No active orders pending preparation.</div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {groupedBoardItems.map((g, idx) => (
+                <Card key={idx} className="p-4 space-y-2 border-slate-200">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-extrabold text-sm text-slate-900">
+                      {g.item_name} {g.variant_name ? `(${g.variant_name})` : ""}
+                    </div>
+                    <Badge tone="red">×{g.total_quantity}</Badge>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 text-xs">
+                    <Badge tone="amber">Pending: {g.pending_quantity}</Badge>
+                    <Badge tone="blue">Preparing: {g.preparing_quantity}</Badge>
+                    <Badge tone="green">Ready: {g.ready_quantity}</Badge>
+                  </div>
+                  <div className="text-[11px] text-slate-600">
+                    Active Orders: {(g.orders || []).map((o: any) => `${o.order_number} (×${o.quantity})`).join(", ")}
+                  </div>
+                </Card>
+              ))}
+            </div>
+          )}
+        </Card>
       ) : (
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {columns.map((col) => {
