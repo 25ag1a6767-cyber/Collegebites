@@ -203,20 +203,73 @@ class Receipt(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     receipt_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
+class PrinterDevice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Registered kitchen/counter thermal printer & local print agent metadata."""
+
+    __tablename__ = "printer_devices"
+    __table_args__ = (
+        Index("ix_printer_devices_canteen_dept", "canteen_id", "department"),
+        Index("ix_printer_devices_online", "is_connected", "is_online", "paper_status"),
+    )
+
+    canteen_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), nullable=False, index=True)
+    counter_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("counters.id", ondelete="SET NULL"))
+    department: Mapped[str] = mapped_column(String(32), nullable=False, default="kitchen")  # kitchen | counter
+    device_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
+    agent_token_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    connection_type: Mapped[str] = mapped_column(String(32), nullable=False, default="local_usb")  # local_usb | local_serial | network_escpos | os_spooler
+    network_host: Mapped[Optional[str]] = mapped_column(String(120))
+    network_port: Mapped[Optional[int]] = mapped_column(Integer)
+    paper_width: Mapped[str] = mapped_column(String(16), nullable=False, default="80mm")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="offline")  # online | offline | paused | error
+    is_connected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_online: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    paper_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")  # available | low | out_of_paper | unknown
+    supports_realtime_status: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    supports_resume_offset: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    current_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(nullable=True)
+    last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[Optional[str]] = mapped_column(String(255))
+
+
 class ReceiptPrintJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "receipt_print_jobs"
+    __table_args__ = (
+        Index("ix_print_jobs_status_created", "status", "created_at"),
+        Index("ix_print_jobs_canteen_status_created", "canteen_id", "status", "created_at"),
+    )
 
     receipt_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("receipts.id", ondelete="CASCADE"), nullable=False, index=True)
     order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
-    job_type: Mapped[str] = mapped_column(String(32), nullable=False, default="customer_receipt")  # customer_receipt | kot
-    printer_target: Mapped[str] = mapped_column(String(64), nullable=False, default="browser")  # browser | 58mm | 80mm | a4_pdf | network_escpos | usb | bluetooth
+    canteen_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("canteens.id", ondelete="CASCADE"), index=True)
+    payment_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("payments.id", ondelete="SET NULL"), index=True)
+    printer_device_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        ForeignKey("printer_devices.id", ondelete="SET NULL"), index=True
+    )
+    job_type: Mapped[str] = mapped_column(String(32), nullable=False, default="customer_receipt")  # customer_receipt | kitchen_receipt | kot
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(120), unique=True)
+    printer_target: Mapped[str] = mapped_column(String(64), nullable=False, default="browser")  # browser | 58mm | 80mm | a4_pdf | network_escpos | usb | bluetooth | local_agent_escpos
     printer_name: Mapped[Optional[str]] = mapped_column(String(120))
     paper_width: Mapped[str] = mapped_column(String(16), nullable=False, default="80mm")
     network_host: Mapped[Optional[str]] = mapped_column(String(120))
     network_port: Mapped[Optional[int]] = mapped_column(Integer)
     is_reprint: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")  # queued | completed | failed
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")  # pending | queued | printing | paused | completed | failed
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    payload_checksum: Mapped[Optional[str]] = mapped_column(String(64))
+    total_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_segments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_printed_byte_offset: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_printed_segment_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resume_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="exact_offset")  # exact_offset | controlled_reprint_continuation
+    paused_reason: Mapped[Optional[str]] = mapped_column(String(255))
+    paused_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    claimed_by_agent: Mapped[Optional[str]] = mapped_column(String(120))
     error_message: Mapped[Optional[str]] = mapped_column(String(255))
     requested_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 

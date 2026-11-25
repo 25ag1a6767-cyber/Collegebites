@@ -412,3 +412,83 @@ export interface ReceiptSnapshot {
   reprint_count: number;
   reprint_label?: string | null;
 }
+
+export interface PrinterDevice {
+  id: string;
+  canteen_id: string;
+  counter_id?: string | null;
+  department: string;
+  device_name: string;
+  agent_id: string;
+  connection_type: string;
+  network_host?: string | null;
+  network_port?: number | null;
+  paper_width: string;
+  status: string;
+  is_connected: boolean;
+  is_online: boolean;
+  paper_status: string;
+  supports_realtime_status: boolean;
+  supports_resume_offset: boolean;
+  current_job_id?: string | null;
+  current_order_number?: string | null;
+  last_heartbeat_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PrintJob {
+  id: string;
+  receipt_id: string;
+  order_id: string;
+  canteen_id?: string | null;
+  payment_id?: string | null;
+  printer_device_id?: string | null;
+  order_number?: string | null;
+  pickup_token_code?: string | null;
+  customer_name?: string | null;
+  total_amount?: string | null;
+  job_type: string;
+  idempotency_key?: string | null;
+  printer_target: string;
+  printer_name?: string | null;
+  paper_width: string;
+  is_reprint: boolean;
+  status: string;
+  retry_count: number;
+  max_retries: number;
+  payload_checksum?: string | null;
+  total_bytes: number;
+  total_segments: number;
+  last_printed_byte_offset: number;
+  last_printed_segment_index: number;
+  resume_mode: string;
+  paused_reason?: string | null;
+  paused_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  next_retry_at?: string | null;
+  claimed_by_agent?: string | null;
+  error_message?: string | null;
+  created_at: string;
+}
+
+export interface KitchenPrintDashboard {
+  canteen_id?: string | null;
+  printers: PrinterDevice[];
+  summary: {
+    total_jobs: number;
+    pending_count: number;
+    printing_count: number;
+    paused_count: number;
+    completed_count: number;
+    failed_count: number;
+    currently_printing_order?: string | null;
+    currently_printing_token?: string | null;
+    online_printers: number;
+    total_printers: number;
+    out_of_paper_printers: number;
+  };
+  jobs: PrintJob[];
+}

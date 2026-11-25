@@ -32,7 +32,11 @@ from app.schemas.payment import (
 from app.services import security_service
 from app.services.audit_service import record_audit_log
 from app.services.order_service import rollback_unpaid_incentives, serialize_order, transition_order_status
-from app.services.receipt_service import create_receipt_for_order, ensure_customer_receipt_print_job
+from app.services.receipt_service import (
+    create_receipt_for_order,
+    ensure_customer_receipt_print_job,
+    ensure_kitchen_receipt_print_job,
+)
 from app.services.token_service import generate_token_and_qr_for_confirmed_order
 from app.websockets import emit_order_event_sync
 
@@ -165,7 +169,8 @@ def _finalize_confirmed_payment(
     if payment.status == "CONFIRMED" and order.payment_status == "CONFIRMED":
         token, qr = generate_token_and_qr_for_confirmed_order(db, order)
         receipt = create_receipt_for_order(db, order, token, qr, payment)
-        ensure_customer_receipt_print_job(db, order, receipt, actor_user_id=actor_user_id)
+        ensure_customer_receipt_print_job(db, order, receipt, payment=payment, actor_user_id=actor_user_id)
+        ensure_kitchen_receipt_print_job(db, order, receipt, payment=payment, actor_user_id=actor_user_id)
         try:
             from app.services.invoice_service import ensure_invoice_for_order
 
@@ -215,7 +220,10 @@ def _finalize_confirmed_payment(
     try:
         token, qr = generate_token_and_qr_for_confirmed_order(db, order)
         receipt = create_receipt_for_order(db, order, token, qr, payment)
-        ensure_customer_receipt_print_job(db, order, receipt, actor_user_id=actor_user_id)
+        ensure_customer_receipt_print_job(db, order, receipt, payment=payment, actor_user_id=actor_user_id)
+        kitchen_print_job = ensure_kitchen_receipt_print_job(
+            db, order, receipt, payment=payment, actor_user_id=actor_user_id
+        )
         try:
             from app.services.invoice_service import ensure_invoice_for_order
 
@@ -281,7 +289,13 @@ def _finalize_confirmed_payment(
         str(canteen_id_val),
         str(order_id_val),
         "order.placed",
-        {"order_number": order_number_val, "pickup_token": token_code_val, "status": "PLACED"},
+        {
+            "order_number": order_number_val,
+            "pickup_token": token_code_val,
+            "status": "PLACED",
+            "kitchen_print_job_id": str(kitchen_print_job.id) if kitchen_print_job else None,
+            "kitchen_print_status": kitchen_print_job.status if kitchen_print_job else None,
+        },
     )
 
     return serialize_order(db, loaded)

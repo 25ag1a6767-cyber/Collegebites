@@ -107,6 +107,9 @@ def run_scheduled_maintenance(
         trigger=trigger,
         actor_user_id=actor_user_id,
     )
+    from app.services.receipt_service import process_retryable_network_print_jobs
+
+    print_recovery_stats = process_retryable_network_print_jobs(db)
     backup_stats = backup_service.run_scheduled_backup_if_due(db, trigger="cron")
     record_audit_log(
         db,
@@ -121,6 +124,7 @@ def run_scheduled_maintenance(
             "overdue_cleaning_notified": overdue_cleaning_notified,
             "reconciled_checked": reconcil_stats["total_checked"],
             "reconciled_discrepancies": reconcil_stats["discrepancy_count"],
+            "print_jobs_recovered": print_recovery_stats.get("completed", 0),
             "backup_ran": backup_stats.get("ran", False),
         },
     )
@@ -134,5 +138,6 @@ def run_scheduled_maintenance(
         "overdue_cleaning_notified": overdue_cleaning_notified,
         "reconciled_checked": reconcil_stats["total_checked"],
         "reconciled_discrepancies": reconcil_stats["discrepancy_count"],
+        "print_recovery": print_recovery_stats,
         "backup_status": backup_stats,
     }

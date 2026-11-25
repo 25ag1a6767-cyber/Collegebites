@@ -15,6 +15,9 @@ import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
 const ProductionManagementTab = lazy(() =>
   import("./components/ProductionManagementTab").then((m) => ({ default: m.ProductionManagementTab }))
 );
+const KitchenPrinterDashboardTab = lazy(() =>
+  import("./components/KitchenPrinterDashboardTab").then((m) => ({ default: m.KitchenPrinterDashboardTab }))
+);
 
 function formatClockSeconds(totalSecs: number): string {
   const safe = Math.max(0, Math.floor(totalSecs));
@@ -42,7 +45,7 @@ export const KitchenDisplayPage: React.FC = () => {
   const [stationId, setStationId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [delayedOnly, setDelayedOnly] = useState(false);
-  const [kdsView, setKdsView] = useState<"orders" | "grouped" | "production">("orders");
+  const [kdsView, setKdsView] = useState<"orders" | "grouped" | "production" | "printer_recovery">("orders");
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [delayModalOrder, setDelayModalOrder] = useState<Order | null>(null);
   const [delayMins, setDelayMins] = useState(10);
@@ -386,9 +389,16 @@ export const KitchenDisplayPage: React.FC = () => {
         <Button size="sm" variant={kdsView === "production" ? "secondary" : "outline"} onClick={() => setKdsView("production")}>
           Production Planning, Recipes &amp; Batches
         </Button>
+        <Button size="sm" variant={kdsView === "printer_recovery" ? "secondary" : "outline"} onClick={() => setKdsView("printer_recovery")}>
+          <Printer className="h-3.5 w-3.5 mr-1 inline" /> Auto Printer &amp; Recovery
+        </Button>
       </div>
 
-      {kdsView === "production" ? (
+      {kdsView === "printer_recovery" ? (
+        <Suspense fallback={<Card className="p-6 text-center text-xs text-slate-500">Loading kitchen printer dashboard...</Card>}>
+          <KitchenPrinterDashboardTab activeCanteenId={activeCanteenId} />
+        </Suspense>
+      ) : kdsView === "production" ? (
         <Suspense fallback={<Card className="p-6 text-center text-xs text-slate-500">Loading production management...</Card>}>
           <ProductionManagementTab activeCanteenId={activeCanteenId} />
         </Suspense>
