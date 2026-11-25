@@ -7,10 +7,16 @@ import time
 from typing import Any, Callable, Optional
 from uuid import UUID
 
+import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+try:
+    import orjson as _orjson
+except Exception:  # pragma: no cover
+    _orjson = None
 
 from app.core.database import get_db
 from app.core.permissions import (
@@ -54,18 +60,40 @@ TOKEN_BOARD_ROLES = (
     ROLE_CASHIER,
 )
 
-SSE_HEADERS = {
+SSE_PUBLIC_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
 }
 
+SSE_PRIVATE_HEADERS = {
+    "Cache-Control": "private, no-store, no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+def _is_serverless() -> bool:
+    return bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
+
+def _release_request_db_before_stream(request: Request, db: Optional[Session]) -> None:
+    """Return the auth/validation DB connection back to the pool before starting a long-lived SSE stream."""
+    if db is None:
+        return
+    if get_db in request.app.dependency_overrides:
+        return
+    try:
+        db.close()
+    except Exception:
+        pass
+
 
 def _default_stream_window(max_seconds: Optional[float]) -> float:
     if max_seconds is not None:
         return max(0.5, min(float(max_seconds), 55.0))
-    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
-        return 25.0
+    if _is_serverless():
+        return 20.0
     return 45.0
 
 
@@ -76,7 +104,8 @@ def _format_sse(event: str, data: dict, event_id: Optional[str] = None, retry_ms
     if event_id:
         lines.append(f"id: {event_id}")
     lines.append(f"event: {event}")
-    lines.append(f"data: {json.dumps(data, default=str)}")
+    body = json.dumps(data, default=str)
+    lines.append(f"data: {body}")
     return "\n".join(lines) + "\n\n"
 
 
@@ -120,9 +149,24 @@ def _stream_with_watermark(
     max_seconds: Optional[float],
     compute_version: Callable[[Session], Optional[str]],
     fetch_payload: Callable[[Session], tuple[Optional[str], Optional[dict[str, Any]]]],
+    is_private: bool = True,
 ) -> StreamingResponse:
     window_secs = _default_stream_window(max_seconds)
     seen_version = (last_version or last_event_id or "").strip() or None
+    serverless = _is_serverless()
+    poll_interval = 4.0 if serverless else 1.5
+    retry_hint = "retry: 3000\n\n" if serverless else "retry: 1500\n\n"
+
+    def _run_cycle(is_first: bool, woken: bool, prev_watermark: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[dict[str, Any]]]:
+        gen, sess = realtime_service.resolve_db_session(request)
+        try:
+            watermark = compute_version(sess)
+            if watermark and (is_first or woken or watermark != prev_watermark):
+                snap_ver, payload = fetch_payload(sess)
+                return watermark, (snap_ver or watermark), payload
+            return watermark, None, None
+        finally:
+            realtime_service.close_db_session(gen)
 
     async def event_generator():
         nonlocal seen_version
@@ -133,7 +177,7 @@ def _stream_with_watermark(
         first_cycle = True
 
         try:
-            yield "retry: 1500\n\n"
+            yield retry_hint
             while True:
                 if await request.is_disconnected():
                     break
@@ -144,7 +188,6 @@ def _stream_with_watermark(
                     if remaining <= 0:
                         yield _format_sse("stream.reconnect", {"reason": "cycle", "version": seen_version})
                         break
-                    poll_interval = 1.5 if (os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")) else 1.0
                     try:
                         await asyncio.wait_for(queue.get(), timeout=min(poll_interval, remaining))
                         while not queue.empty():
@@ -156,25 +199,21 @@ def _stream_with_watermark(
                     except asyncio.TimeoutError:
                         pass
 
-                gen, sess = realtime_service.resolve_db_session(request)
-                try:
-                    watermark = compute_version(sess)
-                    if watermark and (first_cycle or woken_by_event or watermark != last_watermark):
-                        last_watermark = watermark
-                        snap_ver, payload = fetch_payload(sess)
-                        eff_ver = snap_ver or watermark
-                        if payload is not None and (first_cycle or eff_ver != seen_version):
-                            seen_version = eff_ver
-                            yield _format_sse(event_name, payload, event_id=eff_ver)
-                finally:
-                    realtime_service.close_db_session(gen)
+                watermark, eff_ver, payload = await anyio.to_thread.run_sync(
+                    _run_cycle, first_cycle, woken_by_event, last_watermark
+                )
+                if watermark:
+                    last_watermark = watermark
+                if payload is not None and eff_ver and (first_cycle or eff_ver != seen_version):
+                    seen_version = eff_ver
+                    yield _format_sse(event_name, payload, event_id=eff_ver)
 
                 first_cycle = False
                 if once:
                     break
 
                 now = time.monotonic()
-                if now - last_ping >= 12.0:
+                if now - last_ping >= 15.0:
                     last_ping = now
                     yield ": keepalive\n\n"
                 if now - started_at >= window_secs:
@@ -183,7 +222,8 @@ def _stream_with_watermark(
         finally:
             ws_manager.unsubscribe(topic, queue)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
+    headers = SSE_PRIVATE_HEADERS if is_private else SSE_PUBLIC_HEADERS
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=headers)
 
 
 @router.get("/board/stream")
@@ -194,11 +234,18 @@ async def stream_digital_board(
     once: bool = Query(default=False),
     max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
-    db: Session = Depends(get_db),
 ):
     """Server-Sent Events stream for public TV Pickup Display synchronization."""
-    if canteen_id is not None and not db.get(Canteen, canteen_id):
-        raise HTTPException(status_code=404, detail="Canteen not found")
+    if canteen_id is not None:
+        def _validate_canteen() -> bool:
+            gen, sess = realtime_service.resolve_db_session(request)
+            try:
+                return sess.get(Canteen, canteen_id) is not None
+            finally:
+                realtime_service.close_db_session(gen)
+
+        if not await anyio.to_thread.run_sync(_validate_canteen):
+            raise HTTPException(status_code=404, detail="Canteen not found")
 
     def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
         snap = realtime_service.fetch_board_snapshot(sess, canteen_id)
@@ -214,6 +261,7 @@ async def stream_digital_board(
         max_seconds=max_seconds,
         compute_version=lambda sess: realtime_service.compute_board_watermark(sess, canteen_id),
         fetch_payload=_fetch,
+        is_private=False,
     )
 
 
@@ -226,9 +274,11 @@ async def stream_queue_dashboard(
     max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_ROLES)),
+    db: Session = Depends(get_db),
 ):
     """Server-Sent Events stream for live Canteen Queue Management dashboard."""
     enforce_canteen_scope(principal, canteen_id)
+    _release_request_db_before_stream(request, db)
 
     def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
         ver, snap = realtime_service.fetch_queue_snapshot(sess, canteen_id)
@@ -244,6 +294,7 @@ async def stream_queue_dashboard(
         max_seconds=max_seconds,
         compute_version=lambda sess: realtime_service.compute_queue_version(sess, canteen_id),
         fetch_payload=_fetch,
+        is_private=True,
     )
 
 
@@ -256,9 +307,11 @@ async def stream_operational_token_board(
     max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     principal: AuthenticatedPrincipal = Depends(require_roles(*TOKEN_BOARD_ROLES)),
+    db: Session = Depends(get_db),
 ):
     """Authenticated SSE stream for the 5-section Operational Token Board."""
     scoped_canteen = scoped_canteen_for_principal(principal, canteen_id)
+    _release_request_db_before_stream(request, db)
 
     def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
         snap = realtime_service.fetch_token_board_snapshot(sess, scoped_canteen)
@@ -274,6 +327,7 @@ async def stream_operational_token_board(
         max_seconds=max_seconds,
         compute_version=lambda sess: realtime_service.compute_staff_orders_version(sess, canteen_id=scoped_canteen),
         fetch_payload=_fetch,
+        is_private=True,
     )
 
 
@@ -293,6 +347,7 @@ async def stream_order_updates(
     """Server-Sent Events stream for real-time customer & staff single-order status tracking."""
     order = _authorize_order_for_stream(db, order_id_or_number, principal, guest_token or x_guest_token)
     order_id = order.id
+    _release_request_db_before_stream(request, db)
 
     def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
         ver, out = realtime_service.fetch_order_snapshot(sess, order_id)
@@ -310,6 +365,7 @@ async def stream_order_updates(
         max_seconds=max_seconds,
         compute_version=lambda sess: realtime_service.compute_order_version(sess, order_id),
         fetch_payload=_fetch,
+        is_private=True,
     )
 
 
@@ -326,9 +382,11 @@ async def stream_staff_orders(
     max_seconds: Optional[float] = Query(default=None, ge=0.2, le=55.0),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     principal: AuthenticatedPrincipal = Depends(require_roles(*STAFF_ROLES)),
+    db: Session = Depends(get_db),
 ):
     """Server-Sent Events stream for Canteen Manager, Kitchen Display, Pickup, and Admin consoles."""
     scoped_canteen = scoped_canteen_for_principal(principal, canteen_id)
+    _release_request_db_before_stream(request, db)
 
     def _compute(sess: Session) -> str:
         ver = realtime_service.compute_staff_orders_version(
@@ -350,9 +408,7 @@ async def stream_staff_orders(
             q=q,
             limit=limit,
         )
-        ver = _compute(sess)
-        snap["version"] = ver
-        return ver, snap
+        return snap.get("version"), snap
 
     return _stream_with_watermark(
         request=request,
@@ -364,6 +420,7 @@ async def stream_staff_orders(
         max_seconds=max_seconds,
         compute_version=_compute,
         fetch_payload=_fetch,
+        is_private=True,
     )
 
 
@@ -385,11 +442,13 @@ async def stream_user_notifications(
         "food_safety_inspector",
         "customer",
     )),
+    db: Session = Depends(get_db),
 ):
     """SSE stream for authenticated customer & staff in-app + browser push notifications."""
     uid = principal.user.id
-    roles = principal.roles
+    roles = set(principal.roles)
     assigned_cid = principal.assigned_canteen_id
+    _release_request_db_before_stream(request, db)
 
     def _fetch(sess: Session) -> tuple[Optional[str], Optional[dict[str, Any]]]:
         return realtime_service.fetch_user_notifications_snapshot(
@@ -408,4 +467,5 @@ async def stream_user_notifications(
             sess, user_id=uid, roles=roles, assigned_canteen_id=assigned_cid
         ),
         fetch_payload=_fetch,
+        is_private=True,
     )

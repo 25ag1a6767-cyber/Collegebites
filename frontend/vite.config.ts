@@ -7,11 +7,34 @@ export default defineConfig({
     chunkSizeWarningLimit: 650,
     rollupOptions: {
       output: {
-        manualChunks: {
-          "vendor-react": ["react", "react-dom", "react-router-dom", "@tanstack/react-query", "zustand"],
-          "vendor-ui": ["lucide-react", "framer-motion"],
-          "vendor-charts": ["recharts"],
-          "vendor-qr": ["qrcode.react", "html5-qrcode"],
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (
+            id.includes("node_modules/react/") ||
+            id.includes("node_modules/react-dom/") ||
+            id.includes("node_modules/react-router") ||
+            id.includes("node_modules/@tanstack/react-query") ||
+            id.includes("node_modules/zustand") ||
+            id.includes("node_modules/scheduler")
+          ) {
+            return "vendor-react";
+          }
+          if (id.includes("node_modules/recharts") || id.includes("node_modules/d3-") || id.includes("node_modules/victory-vendor")) {
+            return "vendor-charts";
+          }
+          if (id.includes("node_modules/html5-qrcode")) {
+            return "vendor-qr-scanner";
+          }
+          if (id.includes("node_modules/qrcode.react")) {
+            return "vendor-qr-render";
+          }
+          if (id.includes("node_modules/framer-motion")) {
+            return "vendor-motion";
+          }
+          if (id.includes("node_modules/lucide-react") || id.includes("node_modules/clsx")) {
+            return "vendor-ui";
+          }
+          return undefined;
         },
       },
     },

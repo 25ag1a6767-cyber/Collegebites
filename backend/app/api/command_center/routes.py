@@ -123,12 +123,13 @@ def list_incidents(
     status: Optional[str] = Query(default=None),
     category: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*OPS_STAFF_ROLES)),
     db: Session = Depends(get_db),
 ):
     eff_cid = scoped_canteen_for_principal(principal, canteen_id) if not principal.has_role(*ADMIN_ROLES) else canteen_id
     return command_center_service.list_operational_incidents(
-        db, canteen_id=eff_cid, status_filter=status, category=category, limit=limit
+        db, canteen_id=eff_cid, status_filter=status, category=category, limit=limit, offset=offset
     )
 
 
@@ -193,11 +194,12 @@ def run_investigation(
 def list_investigations(
     canteen_id: Optional[UUID] = Query(default=None),
     limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*MANAGER_ROLES)),
     db: Session = Depends(get_db),
 ):
     eff_cid = scoped_canteen_for_principal(principal, canteen_id) if not principal.has_role(*ADMIN_ROLES) else canteen_id
-    return command_center_service.list_investigations(db, canteen_id=eff_cid, limit=limit)
+    return command_center_service.list_investigations(db, canteen_id=eff_cid, limit=limit, offset=offset)
 
 
 @router.patch("/investigations/{investigation_id}/review")
@@ -281,10 +283,11 @@ def execute_workflow(
 def list_executions(
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=80, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*MANAGER_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return automation_service.list_executions(db, status_filter=status, limit=limit)
+    return automation_service.list_executions(db, status_filter=status, limit=limit, offset=offset)
 
 
 @router.post("/executions/{execution_id}/decision")
@@ -374,10 +377,11 @@ def run_simulation(
 @router.get("/simulations")
 def list_simulations(
     limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*MANAGER_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return simulation_service.list_simulations(db, limit=limit)
+    return simulation_service.list_simulations(db, limit=limit, offset=offset)
 
 
 @router.get("/simulations/{scenario_id}/export/csv")
@@ -420,10 +424,11 @@ def generate_report(
 @router.get("/reports")
 def list_reports(
     limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*MANAGER_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return command_center_service.list_operational_reports(db, limit=limit)
+    return command_center_service.list_operational_reports(db, limit=limit, offset=offset)
 
 
 @router.get("/reports/{report_id}/export/csv")

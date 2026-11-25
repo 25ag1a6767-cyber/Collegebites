@@ -632,6 +632,7 @@ def system_health(
 @router.get("/maintenance/run")
 @router.post("/maintenance/run")
 def run_scheduled_maintenance_endpoint(
+    request: Request,
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
@@ -651,6 +652,7 @@ def run_scheduled_maintenance_endpoint(
         )
 
     principal = get_optional_principal(
+        request=request,
         credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=token),
         db=db,
     )

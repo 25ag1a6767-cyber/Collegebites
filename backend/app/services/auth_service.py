@@ -64,8 +64,15 @@ def recompute_loyalty_tier(acct: LoyaltyAccount) -> None:
         acct.tier_level = "BRONZE"
 
 
-def build_user_out(db: Session, user: User) -> UserOut:
-    roles, perms, assigned_canteen_id = load_user_roles_and_permissions(db, user.id)
+def build_user_out(
+    db: Session,
+    user: User,
+    *,
+    preloaded_rbac: Optional[tuple[set[str], set[str], Optional[UUID]]] = None,
+) -> UserOut:
+    roles, perms, assigned_canteen_id = (
+        preloaded_rbac if preloaded_rbac is not None else load_user_roles_and_permissions(db, user.id)
+    )
     return UserOut(
         id=user.id,
         email=user.email,
@@ -94,7 +101,7 @@ def _issue_session_tokens(
     db.add(session_rec)
     db.flush()
 
-    roles, perms, _ = load_user_roles_and_permissions(db, user.id)
+    roles, perms, assigned_cid = load_user_roles_and_permissions(db, user.id)
     access_token = create_access_token(
         subject=str(user.id),
         session_id=str(session_rec.id),
@@ -121,7 +128,7 @@ def _issue_session_tokens(
         access_token=access_token,
         refresh_token=refresh_jwt,
         expires_in_seconds=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=build_user_out(db, user),
+        user=build_user_out(db, user, preloaded_rbac=(roles, perms, assigned_cid)),
     )
 
 
@@ -321,7 +328,7 @@ def refresh_user_session(db: Session, raw_refresh_token: str, ip_address: Option
             expires_at=new_exp,
         )
     )
-    roles, perms, _ = load_user_roles_and_permissions(db, user.id)
+    roles, perms, assigned_cid = load_user_roles_and_permissions(db, user.id)
     access_token = create_access_token(
         subject=str(user.id),
         session_id=str(session_rec.id),
@@ -333,7 +340,7 @@ def refresh_user_session(db: Session, raw_refresh_token: str, ip_address: Option
         access_token=access_token,
         refresh_token=new_refresh_jwt,
         expires_in_seconds=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        user=build_user_out(db, user),
+        user=build_user_out(db, user, preloaded_rbac=(roles, perms, assigned_cid)),
     )
 
 

@@ -2,12 +2,13 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.http_cache import set_public_cache
 from app.core.permissions import (
     ROLE_COLLEGE_ADMIN,
     ROLE_SUPER_ADMIN,
@@ -52,7 +53,8 @@ class KioskOrderIn(BaseModel):
 
 
 @router.get("/status")
-def kiosk_status(db: Session = Depends(get_db)):
+def kiosk_status(response: Response, db: Session = Depends(get_db)):
+    set_public_cache(response, s_maxage=15, swr=30)
     college = college_service.get_or_create_college_settings(db)
     devices = db.scalars(select(KioskDevice).order_by(KioskDevice.device_code)).all()
     return {
@@ -154,11 +156,13 @@ def create_kiosk_order(payload: KioskOrderIn, request: Request, db: Session = De
 @router.get("/recommendations/{canteen_id}")
 def smart_recommendations(
     canteen_id: UUID,
+    response: Response,
     veg_only: Optional[bool] = Query(default=None),
     max_prep_minutes: Optional[int] = Query(default=None, ge=1, le=60),
     db: Session = Depends(get_db),
 ):
     """Smart meal recommender combining popularity, ratings, crowd speed, and time-of-day suitability."""
+    set_public_cache(response, s_maxage=15, swr=30)
     items = menu_service.list_food_items(
         db, canteen_id, is_veg=veg_only, available_only=True, sort_by="popularity"
     )

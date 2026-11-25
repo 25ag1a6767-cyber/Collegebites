@@ -10,7 +10,13 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.cache import NS_MENU, cache_manager, invalidate_board_and_queue
+from app.core.cache import (
+    NS_CAMPUS_INTEL,
+    NS_MENU,
+    cache_manager,
+    invalidate_board_and_queue,
+    invalidate_campus_intel,
+)
 from app.core.time_utils import now_college, today_college
 from app.models.auth import User
 from app.models.campus_ops import (
@@ -21,7 +27,7 @@ from app.models.campus_ops import (
     SeatingOccupancyLog,
     SeatingZone,
 )
-from app.models.college import Canteen, CollegeHoliday, Counter, DiningTable, KitchenStation, OperatingHour
+from app.models.college import Canteen, CollegeHoliday, Counter, DiningTable, Kitchen, KitchenStation, OperatingHour
 from app.models.enterprise import QueueEstimateHistory
 from app.models.event import CollegeEvent
 from app.models.inventory import InventoryItem
@@ -60,23 +66,119 @@ def _activity_level_from_workload(workload_pct: int, active_orders: int, canteen
 # =============================================================================
 
 
-def get_live_crowd_intelligence(db: Session, *, days: int = 7) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
+def _fit_ridge_pure(
+    features_x: list[list[float]], targets_y: list[float], alpha: float = 2.0
+) -> Optional[tuple[list[float], float]]:
+    """
+    Exact closed-form Ridge regression with intercept using 4x4 Gaussian elimination.
+    Mathematically equivalent to sklearn.linear_model.Ridge(alpha=alpha) with ~0.05ms CPU
+    and zero numpy/scikit-learn cold-import overhead on serverless Fluid Compute.
+    """
+    n = len(features_x)
+    if n < 2:
+        return None
+    p = len(features_x[0])
+    x_mean = [sum(row[j] for row in features_x) / n for j in range(p)]
+    y_mean = sum(targets_y) / n
+
+    # Build normal equations A = Xc^T Xc + alpha*I, b = Xc^T yc
+    A = [[0.0] * p for _ in range(p)]
+    b = [0.0] * p
+    for i in range(n):
+        row = features_x[i]
+        yc = targets_y[i] - y_mean
+        xc = [row[j] - x_mean[j] for j in range(p)]
+        for r in range(p):
+            xr = xc[r]
+            b[r] += xr * yc
+            Ar = A[r]
+            for c in range(p):
+                Ar[c] += xr * xc[c]
+    for d in range(p):
+        A[d][d] += alpha
+
+    # Solve A w = b via partial-pivoting Gaussian elimination
+    M = [A[r][:] + [b[r]] for r in range(p)]
+    for col in range(p):
+        piv = max(range(col, p), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) < 1e-12:
+            return None
+        M[col], M[piv] = M[piv], M[col]
+        diag = M[col][col]
+        for k in range(col, p + 1):
+            M[col][k] /= diag
+        for r in range(p):
+            if r != col:
+                f = M[r][col]
+                if f != 0.0:
+                    for k in range(col, p + 1):
+                        M[r][k] -= f * M[col][k]
+    w = [M[r][p] for r in range(p)]
+    intercept = y_mean - sum(w[j] * x_mean[j] for j in range(p))
+    return w, intercept
+
+
+def _predict_ridge_pure(w: list[float], intercept: float, x: list[float]) -> float:
+    return intercept + sum(w[j] * x[j] for j in range(len(w)))
+
+
+def get_live_crowd_intelligence(db: Session, *, days: int = 7, include_history: bool = True) -> dict[str, Any]:
     lookback_days = max(1, min(int(days or 7), 60))
+    cache_key = f"crowd:d={lookback_days}:hist={int(bool(include_history))}"
+    hit, cached = cache_manager.get_json(NS_CAMPUS_INTEL, cache_key, l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
+    now = datetime.now(timezone.utc)
     since = now - timedelta(days=lookback_days)
+    col_offset = now_college().utcoffset() or timedelta(0)
 
     canteens = list(
         db.scalars(select(Canteen).where(Canteen.is_active.is_(True)).order_by(Canteen.code.asc())).all()
     )
-    counters_out: list[dict[str, Any]] = []
+    canteen_ids = [c.id for c in canteens]
 
-    for idx, canteen in enumerate(canteens, start=1):
-        live_rows = db.execute(
-            select(Order.status, func.count(Order.id))
-            .where(Order.canteen_id == canteen.id, Order.status.in_(ALL_LIVE_STATUSES))
-            .group_by(Order.status)
+    # Single batched SQL aggregate for live order counts across all counters
+    live_by_canteen: dict[UUID, dict[str, int]] = {}
+    if canteen_ids:
+        for cid, st, cnt in db.execute(
+            select(Order.canteen_id, Order.status, func.count(Order.id))
+            .where(Order.canteen_id.in_(canteen_ids), Order.status.in_(ALL_LIVE_STATUSES))
+            .group_by(Order.canteen_id, Order.status)
+        ).all():
+            live_by_canteen.setdefault(cid, {})[st] = int(cnt or 0)
+
+    # Single batched query for historical timestamps & recent snapshots when requested
+    hist_by_canteen: dict[UUID, dict[int, int]] = {cid: {h: 0 for h in range(7, 22)} for cid in canteen_ids}
+    snaps_by_canteen: dict[UUID, list[CrowdActivitySnapshot]] = {cid: [] for cid in canteen_ids}
+    if include_history and canteen_ids:
+        for cid, ts in db.execute(
+            select(Order.canteen_id, Order.created_at).where(
+                Order.canteen_id.in_(canteen_ids),
+                Order.created_at >= since,
+                Order.status.notin_(("PAYMENT_FAILED", "CANCELLED")),
+            )
+        ).all():
+            local_ts = _as_utc(ts)
+            if local_ts:
+                hr = (local_ts + col_offset).hour
+                bucket = hist_by_canteen.get(cid)
+                if bucket is not None and hr in bucket:
+                    bucket[hr] += 1
+        snap_rows = db.scalars(
+            select(CrowdActivitySnapshot)
+            .where(CrowdActivitySnapshot.canteen_id.in_(canteen_ids), CrowdActivitySnapshot.captured_at >= since)
+            .order_by(CrowdActivitySnapshot.captured_at.desc())
+            .limit(48 * max(1, len(canteen_ids)))
         ).all()
-        counts = {st: int(cnt or 0) for st, cnt in live_rows}
+        for s in snap_rows:
+            arr = snaps_by_canteen.get(s.canteen_id)
+            if arr is not None and len(arr) < 24:
+                arr.append(s)
+
+    counters_out: list[dict[str, Any]] = []
+    for idx, canteen in enumerate(canteens, start=1):
+        counts = live_by_canteen.get(canteen.id, {})
         waiting = sum(counts.get(s, 0) for s in ACTIVE_WAITING_STATUSES)
         preparing = sum(counts.get(s, 0) for s in ACTIVE_PREPARING_STATUSES)
         ready = sum(counts.get(s, 0) for s in ACTIVE_READY_STATUSES)
@@ -88,24 +190,7 @@ def get_live_crowd_intelligence(db: Session, *, days: int = 7) -> dict[str, Any]
             db, canteen, precomputed_active_count=waiting + preparing
         )
 
-        # Historical hourly order activity from actual orders
-        hist_orders = db.scalars(
-            select(Order.created_at).where(
-                Order.canteen_id == canteen.id,
-                Order.created_at >= since,
-                Order.status.notin_(("PAYMENT_FAILED", "CANCELLED")),
-            )
-        ).all()
-        hourly_counts: dict[int, int] = {h: 0 for h in range(7, 22)}
-        for ts in hist_orders:
-            local_ts = _as_utc(ts)
-            if local_ts:
-                # Approximate IST (+5:30) or college tz via now_college offset
-                col_offset = now_college().utcoffset() or timedelta(0)
-                hr = (local_ts + col_offset).hour
-                if hr in hourly_counts:
-                    hourly_counts[hr] += 1
-
+        hourly_counts = hist_by_canteen.get(canteen.id, {h: 0 for h in range(7, 22)})
         total_hist = sum(hourly_counts.values())
         hourly_trends = [
             {
@@ -118,15 +203,7 @@ def get_live_crowd_intelligence(db: Session, *, days: int = 7) -> dict[str, Any]
         ]
         sorted_peaks = sorted(hourly_trends, key=lambda x: x["total_orders"], reverse=True)
         peak_periods = [p for p in sorted_peaks[:3] if p["total_orders"] > 0]
-
-        snapshots = list(
-            db.scalars(
-                select(CrowdActivitySnapshot)
-                .where(CrowdActivitySnapshot.canteen_id == canteen.id, CrowdActivitySnapshot.captured_at >= since)
-                .order_by(CrowdActivitySnapshot.captured_at.desc())
-                .limit(24)
-            ).all()
-        )
+        snapshots = snaps_by_canteen.get(canteen.id, [])
 
         counters_out.append(
             {
@@ -178,7 +255,7 @@ def get_live_crowd_intelligence(db: Session, *, days: int = 7) -> dict[str, Any]
             "active_orders": best["active_orders"],
         }
 
-    return {
+    result = {
         "counters_count": len(counters_out),
         "counters": counters_out,
         "recommended_lower_workload_counter": lower_counter,
@@ -191,6 +268,8 @@ def get_live_crowd_intelligence(db: Session, *, days: int = 7) -> dict[str, Any]
         ),
         "last_updated_at": now.isoformat(),
     }
+    cache_manager.set_json(NS_CAMPUS_INTEL, cache_key, result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 def capture_crowd_snapshots(db: Session, *, actor_user_id: Optional[UUID] = None) -> list[dict[str, Any]]:
@@ -230,12 +309,74 @@ def capture_crowd_snapshots(db: Session, *, actor_user_id: Optional[UUID] = None
             details={"count": len(created)},
         )
     db.commit()
+    invalidate_campus_intel()
     return created
 
 
 # =============================================================================
 # FEATURE 2: AI SMART PICKUP TIME PREDICTION (STATISTICAL + CONDITIONAL ML)
 # =============================================================================
+
+
+def _get_cached_prep_model(db: Session, canteen_id: UUID, default_prep: float) -> dict[str, Any]:
+    """Load & cache 60-day historical prep model parameters (statistical median + closed-form Ridge)."""
+    model_ns = f"{NS_CAMPUS_INTEL}:model:{canteen_id}"
+    hit, cached = cache_manager.get_json(model_ns, "prep_model", l1_ttl=30.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
+    since_60d = datetime.now(timezone.utc) - timedelta(days=60)
+    hist_rows = db.execute(
+        select(Order.confirmed_at, Order.ready_at, Order.estimated_prep_minutes, Order.delayed_minutes)
+        .where(
+            Order.canteen_id == canteen_id,
+            Order.confirmed_at.is_not(None),
+            Order.ready_at.is_not(None),
+            Order.ready_at >= since_60d,
+        )
+        .order_by(Order.ready_at.asc())
+        .limit(500)
+    ).all()
+
+    durations: list[float] = []
+    features_x: list[list[float]] = []
+    targets_y: list[float] = []
+    for c_at, r_at, est_p, del_m in hist_rows:
+        c_u, r_u = _as_utc(c_at), _as_utc(r_at)
+        if not c_u or not r_u or r_u <= c_u:
+            continue
+        dur = min(120.0, max(1.0, (r_u - c_u).total_seconds() / 60.0))
+        durations.append(dur)
+        features_x.append([float(c_u.hour), float(c_u.weekday()), float(est_p or 10), float(del_m or 0)])
+        targets_y.append(dur)
+
+    sample_count = len(durations)
+    median_hist = statistics.median(durations) if durations else float(default_prep)
+    ridge_weights: Optional[list[float]] = None
+    ridge_intercept: Optional[float] = None
+    holdout_mae: Optional[float] = None
+
+    if sample_count >= 25:
+        split = max(15, int(sample_count * 0.8))
+        val_fit = _fit_ridge_pure(features_x[:split], targets_y[:split], alpha=2.0)
+        if val_fit is not None and split < sample_count:
+            vw, vi = val_fit
+            abs_errs = [abs(targets_y[i] - _predict_ridge_pure(vw, vi, features_x[i])) for i in range(split, sample_count)]
+            holdout_mae = round(sum(abs_errs) / len(abs_errs), 2)
+        full_fit = _fit_ridge_pure(features_x, targets_y, alpha=2.0)
+        if full_fit is not None:
+            ridge_weights, ridge_intercept = full_fit
+
+    summary = {
+        "sample_count": sample_count,
+        "median_hist": float(median_hist),
+        "has_durations": bool(durations),
+        "ridge_weights": ridge_weights,
+        "ridge_intercept": ridge_intercept,
+        "holdout_mae": holdout_mae,
+    }
+    cache_manager.set_json(model_ns, "prep_model", summary, ttl_seconds=300, l1_ttl=30.0)
+    return summary
 
 
 def get_smart_pickup_prediction(
@@ -245,6 +386,13 @@ def get_smart_pickup_prediction(
     food_item_ids: Optional[list[UUID]] = None,
     order_id: Optional[UUID] = None,
 ) -> dict[str, Any]:
+    is_generic = order_id is None and not food_item_ids
+    cache_ns = f"{NS_CAMPUS_INTEL}:{canteen_id}"
+    if is_generic:
+        hit, cached = cache_manager.get_json(cache_ns, "pickup_pred", l1_ttl=3.0)
+        if hit and isinstance(cached, dict):
+            return cached
+
     canteen = db.get(Canteen, canteen_id)
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")
@@ -253,22 +401,26 @@ def get_smart_pickup_prediction(
     now_loc = now_college()
     order_obj = db.get(Order, order_id) if order_id else None
 
-    active_orders = list(
-        db.scalars(
-            select(Order).where(
-                Order.canteen_id == canteen_id,
-                Order.status.in_(ACTIVE_WAITING_STATUSES + ACTIVE_PREPARING_STATUSES),
-            )
-        ).all()
-    )
-    pending_count = len(active_orders)
-    preparing_count = sum(1 for o in active_orders if o.status == "PREPARING")
+    # Fast SQL aggregate for pending/preparing orders instead of hydrating full Order ORM rows
+    status_rows = db.execute(
+        select(Order.status, func.count(Order.id))
+        .where(
+            Order.canteen_id == canteen_id,
+            Order.status.in_(ACTIVE_WAITING_STATUSES + ACTIVE_PREPARING_STATUSES),
+        )
+        .group_by(Order.status)
+    ).all()
+    status_counts = {st: int(cnt or 0) for st, cnt in status_rows}
+    pending_count = sum(status_counts.values())
+    preparing_count = status_counts.get("PREPARING", 0)
     staff_on_duty = max(1, queue_service._canteen_on_duty_staff_count(db, canteen_id))
+
+    # Fixed join: scope KitchenStation cleanly through Kitchen.canteen_id (no Cartesian join)
     active_stations = int(
         db.scalar(
             select(func.count(KitchenStation.id))
-            .join(Canteen, Canteen.id == canteen_id)
-            .where(KitchenStation.is_active.is_(True))
+            .join(Kitchen, Kitchen.id == KitchenStation.kitchen_id)
+            .where(Kitchen.canteen_id == canteen_id, KitchenStation.is_active.is_(True))
         )
         or 0
     )
@@ -307,82 +459,47 @@ def get_smart_pickup_prediction(
             item_prep_mins = float(max(preps))
             item_count = len(food_item_ids)
 
-    # Real historical actual prep durations (confirmed_at -> ready_at)
-    since_60d = now - timedelta(days=60)
-    hist_rows = db.execute(
-        select(Order.confirmed_at, Order.ready_at, Order.estimated_prep_minutes, Order.delayed_minutes)
-        .where(
-            Order.canteen_id == canteen_id,
-            Order.confirmed_at.is_not(None),
-            Order.ready_at.is_not(None),
-            Order.ready_at >= since_60d,
-        )
-        .order_by(Order.ready_at.asc())
-        .limit(500)
-    ).all()
+    model_info = _get_cached_prep_model(db, canteen_id, item_prep_mins)
+    sample_count = int(model_info["sample_count"])
+    median_hist = float(model_info["median_hist"]) if model_info["has_durations"] else item_prep_mins
+    holdout_mae = model_info.get("holdout_mae")
 
-    durations: list[float] = []
-    features_x: list[list[float]] = []
-    targets_y: list[float] = []
-    for c_at, r_at, est_p, del_m in hist_rows:
-        c_u, r_u = _as_utc(c_at), _as_utc(r_at)
-        if not c_u or not r_u or r_u <= c_u:
-            continue
-        dur = min(120.0, max(1.0, (r_u - c_u).total_seconds() / 60.0))
-        durations.append(dur)
-        features_x.append([float(c_u.hour), float(c_u.weekday()), float(est_p or 10), float(del_m or 0)])
-        targets_y.append(dur)
-
-    sample_count = len(durations)
     is_open, crowd_level, _, _ = college_service.compute_canteen_live_status(
         db, canteen, precomputed_active_count=pending_count
     )
     available_now = bool(is_open and not canteen.ordering_paused and crowd_level != "TEMPORARILY_UNAVAILABLE")
 
     parallel_capacity = max(1, staff_on_duty + max(0, active_counters - 1) + min(2, active_stations // 2))
-    median_hist = statistics.median(durations) if durations else item_prep_mins
     queue_factor = max(1.0, min(6.0, median_hist / parallel_capacity))
     stat_estimate = max(1.0, round(max(item_prep_mins, median_hist * 0.65) + (pending_count * queue_factor * 0.55), 1))
 
     prediction_method = "statistical"
     model_version = "pickup-statistical-v1"
     predicted_minutes = stat_estimate
-    holdout_mae: Optional[float] = None
     confidence_score = 0.55 if sample_count >= 5 else (0.40 if sample_count >= 1 else 0.30)
 
     # Upgrade to real Ridge regression ONLY when >= 25 actual completed orders exist
-    if sample_count >= 25:
-        try:
-            import numpy as np
-            from sklearn.linear_model import Ridge
-
-            X = np.array(features_x, dtype=float)
-            y = np.array(targets_y, dtype=float)
-            split = max(15, int(len(X) * 0.8))
-            model = Ridge(alpha=2.0)
-            model.fit(X[:split], y[:split])
-            if split < len(X):
-                preds_val = model.predict(X[split:])
-                holdout_mae = round(float(np.mean(np.abs(y[split:] - preds_val))), 2)
-            # Refit on all verified samples
-            model.fit(X, y)
-            x_now = np.array([[float(now_loc.hour), float(now_loc.weekday()), item_prep_mins, 0.0]], dtype=float)
-            ml_base = max(1.0, float(model.predict(x_now)[0]))
-            predicted_minutes = round(max(1.0, ml_base + (pending_count * queue_factor * 0.45)), 1)
-            prediction_method = "ml_ridge"
-            model_version = f"pickup-ridge-v1-n{sample_count}"
-            err_penalty = min(0.35, (holdout_mae or 4.0) / 25.0)
-            confidence_score = round(max(0.45, min(0.92, 0.88 - err_penalty)), 2)
-        except Exception:
-            prediction_method = "statistical"
-            model_version = "pickup-statistical-v1"
+    if sample_count >= 25 and model_info.get("ridge_weights") is not None and model_info.get("ridge_intercept") is not None:
+        ml_base = max(
+            1.0,
+            _predict_ridge_pure(
+                model_info["ridge_weights"],
+                float(model_info["ridge_intercept"]),
+                [float(now_loc.hour), float(now_loc.weekday()), item_prep_mins, 0.0],
+            ),
+        )
+        predicted_minutes = round(max(1.0, ml_base + (pending_count * queue_factor * 0.45)), 1)
+        prediction_method = "ml_ridge"
+        model_version = f"pickup-ridge-v1-n{sample_count}"
+        err_penalty = min(0.35, (float(holdout_mae) if holdout_mae is not None else 4.0) / 25.0)
+        confidence_score = round(max(0.45, min(0.92, 0.88 - err_penalty)), 2)
 
     confidence_label = "high" if confidence_score >= 0.75 else ("medium" if confidence_score >= 0.52 else "low")
     accuracy = queue_service.get_queue_accuracy_metrics(db, canteen_id, days=30)
     est_int = max(1, int(round(predicted_minutes))) if available_now else None
     est_pickup_at = (now + timedelta(minutes=est_int)).isoformat() if est_int is not None else None
 
-    return {
+    result = {
         "canteen_id": str(canteen.id),
         "canteen_name": canteen.name,
         "order_id": str(order_obj.id) if order_obj else None,
@@ -402,7 +519,7 @@ def get_smart_pickup_prediction(
             "preparing_orders": preparing_count,
             "item_base_prep_minutes": item_prep_mins,
             "item_count": item_count,
-            "historical_median_prep_minutes": round(median_hist, 1) if durations else None,
+            "historical_median_prep_minutes": round(median_hist, 1) if model_info["has_durations"] else None,
             "staff_on_duty": staff_on_duty,
             "active_stations": active_stations,
             "active_counters": active_counters,
@@ -415,6 +532,9 @@ def get_smart_pickup_prediction(
         ),
         "last_updated_at": now.isoformat(),
     }
+    if is_generic:
+        cache_manager.set_json(cache_ns, "pickup_pred", result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 # =============================================================================
@@ -746,11 +866,14 @@ def submit_tray_verification(
     }
 
 
-def list_tray_verifications(db: Session, *, canteen_id: Optional[UUID] = None, limit: int = 50) -> list[dict[str, Any]]:
+def list_tray_verifications(
+    db: Session, *, canteen_id: Optional[UUID] = None, limit: int = 50, offset: int = 0
+) -> list[dict[str, Any]]:
     stmt = (
         select(OrderTrayVerification, Order.order_number)
         .join(Order, Order.id == OrderTrayVerification.order_id)
         .order_by(OrderTrayVerification.created_at.desc())
+        .offset(max(0, offset))
         .limit(max(1, min(limit, 200)))
     )
     if canteen_id:
@@ -938,7 +1061,12 @@ def import_academic_timetable(
 
 
 def list_timetable_slots(
-    db: Session, *, canteen_id: Optional[UUID] = None, day_of_week: Optional[int] = None
+    db: Session,
+    *,
+    canteen_id: Optional[UUID] = None,
+    day_of_week: Optional[int] = None,
+    limit: int = 500,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     stmt = (
         select(AcademicTimetableSlot)
@@ -951,7 +1079,7 @@ def list_timetable_slots(
         )
     if day_of_week is not None:
         stmt = stmt.where(AcademicTimetableSlot.day_of_week == day_of_week)
-    rows = db.scalars(stmt.limit(500)).all()
+    rows = db.scalars(stmt.offset(max(0, offset)).limit(max(1, min(limit, 500)))).all()
     return [
         {
             "id": str(s.id),
@@ -1165,6 +1293,12 @@ def get_timetable_demand_prediction(
 def get_intelligent_menu_availability(
     db: Session, canteen_id: UUID, *, include_history: bool = True
 ) -> dict[str, Any]:
+    cache_ns = f"{NS_CAMPUS_INTEL}:{canteen_id}"
+    cache_key = f"menu_avail:hist={int(bool(include_history))}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
     canteen = db.get(Canteen, canteen_id)
     if not canteen:
         raise HTTPException(status_code=404, detail="Canteen not found")
@@ -1255,7 +1389,7 @@ def get_intelligent_menu_availability(
             for ev, fname in ev_rows
         ]
 
-    return {
+    result = {
         "canteen_id": str(canteen.id),
         "canteen_name": canteen.name,
         "summary": {
@@ -1269,6 +1403,8 @@ def get_intelligent_menu_availability(
         "availability_history": history,
         "last_updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    cache_manager.set_json(cache_ns, cache_key, result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 def override_menu_item_availability(
@@ -1323,6 +1459,7 @@ def override_menu_item_availability(
         )
     db.commit()
     cache_manager.invalidate_namespace(f"{NS_MENU}:{item.canteen_id}")
+    invalidate_campus_intel(item.canteen_id)
     return {
         "food_item_id": str(item.id),
         "item_name": item.name,
@@ -1450,6 +1587,11 @@ def get_live_order_journey(
 
 
 def list_seating_availability(db: Session, *, canteen_id: Optional[UUID] = None) -> dict[str, Any]:
+    cache_key = f"seating:{canteen_id or 'all'}"
+    hit, cached = cache_manager.get_json(NS_CAMPUS_INTEL, cache_key, l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
     stmt = select(SeatingZone).where(SeatingZone.is_active.is_(True)).order_by(SeatingZone.zone_code.asc())
     if canteen_id:
         stmt = stmt.where((SeatingZone.canteen_id == canteen_id) | (SeatingZone.canteen_id.is_(None)))
@@ -1498,7 +1640,7 @@ def list_seating_availability(db: Session, *, canteen_id: Optional[UUID] = None)
             }
         )
 
-    return {
+    result = {
         "configured": len(zones_out) > 0,
         "zones": zones_out,
         "registered_dining_table_seats": table_capacity,
@@ -1512,6 +1654,8 @@ def list_seating_availability(db: Session, *, canteen_id: Optional[UUID] = None)
         "privacy_notice": "No facial recognition, video identity tracking, or individual student tracking is used.",
         "last_updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    cache_manager.set_json(NS_CAMPUS_INTEL, cache_key, result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 def upsert_seating_zone(
@@ -1571,6 +1715,7 @@ def upsert_seating_zone(
     )
     db.commit()
     db.refresh(zone)
+    invalidate_campus_intel(zone.canteen_id)
     return {
         "id": str(zone.id),
         "zone_code": zone.zone_code,
@@ -1630,6 +1775,7 @@ def update_seating_occupancy(
         details={"occupied_seats": occupied_seats, "total_seats": zone.total_seats, "data_source": src},
     )
     db.commit()
+    invalidate_campus_intel(zone.canteen_id)
     return {
         "zone_id": str(zone.id),
         "zone_code": zone.zone_code,

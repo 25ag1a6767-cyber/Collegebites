@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
@@ -43,6 +43,61 @@ function formatCountdown(secs: number): string {
   return `${String(m).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
 }
 
+const OrderCountdownBar: React.FC<{
+  status: string;
+  counterName?: string | null;
+  confirmedAt?: string | null;
+  createdAt: string;
+  estimatedPickupAt?: string | null;
+  estimatedPrepMinutes: number;
+  delayedMinutes: number;
+}> = React.memo(({ status, counterName, confirmedAt, createdAt, estimatedPickupAt, estimatedPrepMinutes, delayedMinutes }) => {
+  const isTerminal = ["READY", "COMPLETED", "CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(status);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (isTerminal) return;
+    const id = setInterval(() => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") {
+        setNowMs(Date.now());
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [isTerminal]);
+
+  const startMs = new Date(confirmedAt || createdAt).getTime();
+  const targetMs = estimatedPickupAt
+    ? new Date(estimatedPickupAt).getTime()
+    : startMs + (estimatedPrepMinutes + delayedMinutes) * 60000;
+  const remainingSecs = Math.max(0, Math.floor((targetMs - nowMs) / 1000));
+  const totalEtaSecs = Math.max(60, Math.floor((targetMs - startMs) / 1000));
+  const progressPct =
+    status === "READY" || status === "COMPLETED"
+      ? 100
+      : Math.min(95, Math.max(8, Math.round(((totalEtaSecs - remainingSecs) / totalEtaSecs) * 100)));
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-xs font-semibold text-slate-600">
+        <span>
+          {status === "READY"
+            ? `Order ready at ${counterName}! Present your QR token.`
+            : remainingSecs > 0
+            ? `Estimated ready in ${formatCountdown(remainingSecs)} (Target ${new Date(targetMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})`
+            : "Finishing preparation shortly — kitchen is finalizing your order."}
+        </span>
+        <span className="font-mono">{progressPct}%</span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+        <div
+          className={`h-full transition-all duration-500 ${status === "READY" ? "bg-emerald-500" : "bg-[#76010d]"}`}
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
+    </div>
+  );
+});
+
 export const OrderTrackingPage: React.FC = () => {
   const { orderNumber } = useParams<{ orderNumber: string }>();
   const [searchParams] = useSearchParams();
@@ -51,27 +106,20 @@ export const OrderTrackingPage: React.FC = () => {
   const { pushToast } = useToast();
   const { accessToken, guestOrderTokens, setSelectedCanteen } = useAppStore();
   const isOnline = useOfflineStore((s) => s.isOnline);
-  const offlineCachedOrder = orderNumber ? readOfflineCache<Order>(`order:${orderNumber}`) : null;
+  const offlineCachedOrder = useMemo(
+    () => (orderNumber ? readOfflineCache<Order>(`order:${orderNumber}`) : null),
+    [orderNumber, isOnline]
+  );
 
   const guestToken = searchParams.get("guest_token") || (orderNumber ? guestOrderTokens[orderNumber] : undefined);
   const [manualGuestToken, setManualGuestToken] = useState(guestToken || "");
   const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [notifPerm, setNotifPerm] = useState<string>(() =>
     typeof window !== "undefined" && "Notification" in window ? Notification.permission : "unsupported"
   );
   const realtimeLiveRef = useRef(false);
   const prevTrackStateRef = useRef<{ status: string; delayed: number } | null>(null);
-
-  const terminalStatusRef = useRef(false);
-
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (!terminalStatusRef.current) setNowMs(Date.now());
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
   const effectiveToken = guestToken || manualGuestToken || undefined;
   const querySuffix = effectiveToken ? `?guest_token=${encodeURIComponent(effectiveToken)}` : "";
 
@@ -85,7 +133,7 @@ export const OrderTrackingPage: React.FC = () => {
     refetchInterval: (query) => {
       const st = query.state.data?.status;
       if (st && ["COMPLETED", "CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(st)) return false;
-      return !isOnline ? false : realtimeLiveRef.current ? 30000 : 5000;
+      return !isOnline ? false : realtimeLiveRef.current ? 45000 : 8000;
     },
     refetchIntervalInBackground: false,
   });
@@ -93,7 +141,6 @@ export const OrderTrackingPage: React.FC = () => {
   const isTerminalOrder = Boolean(
     order?.status && ["COMPLETED", "CANCELLED", "REJECTED", "PAYMENT_FAILED"].includes(order.status)
   );
-  terminalStatusRef.current = isTerminalOrder;
 
   const { status: orderSyncStatus, lastSyncedAt: orderLastSyncedAt } = useRealtimeSync<{ order?: Order }>({
     enabled: Boolean(order?.id && !isTerminalOrder && (accessToken || effectiveToken)),
@@ -295,17 +342,6 @@ export const OrderTrackingPage: React.FC = () => {
     }
   };
 
-  const startMs = new Date(order.confirmed_at || order.created_at).getTime();
-  const targetMs = order.estimated_pickup_at
-    ? new Date(order.estimated_pickup_at).getTime()
-    : startMs + (order.estimated_prep_minutes + order.delayed_minutes) * 60000;
-  const remainingSecs = Math.max(0, Math.floor((targetMs - nowMs) / 1000));
-  const totalEtaSecs = Math.max(60, Math.floor((targetMs - startMs) / 1000));
-  const progressPct =
-    order.status === "READY" || order.status === "COMPLETED"
-      ? 100
-      : Math.min(95, Math.max(8, Math.round(((totalEtaSecs - remainingSecs) / totalEtaSecs) * 100)));
-
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 space-y-6">
       {/* Status Banner */}
@@ -425,24 +461,15 @@ export const OrderTrackingPage: React.FC = () => {
                     </div>
                   </div>
                 </div>
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between text-xs font-semibold text-slate-600">
-                    <span>
-                      {order.status === "READY"
-                        ? `Order ready at ${order.counter_name}! Present your QR token.`
-                        : remainingSecs > 0
-                        ? `Estimated ready in ${formatCountdown(remainingSecs)} (Target ${new Date(targetMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})`
-                        : "Finishing preparation shortly — kitchen is finalizing your order."}
-                    </span>
-                    <span className="font-mono">{progressPct}%</span>
-                  </div>
-                  <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
-                    <div
-                      className={`h-full transition-all duration-500 ${order.status === "READY" ? "bg-emerald-500" : "bg-[#76010d]"}`}
-                      style={{ width: `${progressPct}%` }}
-                    />
-                  </div>
-                </div>
+                <OrderCountdownBar
+                  status={order.status}
+                  counterName={order.counter_name}
+                  confirmedAt={order.confirmed_at}
+                  createdAt={order.created_at}
+                  estimatedPickupAt={order.estimated_pickup_at}
+                  estimatedPrepMinutes={order.estimated_prep_minutes}
+                  delayedMinutes={order.delayed_minutes}
+                />
               </div>
             )}
           </div>

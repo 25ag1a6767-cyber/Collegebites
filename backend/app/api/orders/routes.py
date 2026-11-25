@@ -1,12 +1,13 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Query, Request, status
+from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.database import get_db
+from app.core.http_cache import set_public_cache
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_CASHIER,
@@ -36,7 +37,8 @@ STAFF_ROLES = (
 
 
 @router.get("/slots/{canteen_id}", response_model=list[PickupSlotOut])
-def get_pickup_slots(canteen_id: UUID, db: Session = Depends(get_db)):
+def get_pickup_slots(canteen_id: UUID, response: Response, db: Session = Depends(get_db)):
+    set_public_cache(response, s_maxage=10, swr=20)
     return order_service.list_pickup_slots(db, canteen_id)
 
 

@@ -88,12 +88,16 @@ export const CommandCenterPage: React.FC = () => {
 
   const { data: unified, isLoading: uniLoading, refetch: refetchUnified } = useQuery<any>({
     queryKey: ["cc-unified", selectedCanteenId],
-    refetchInterval: 20_000,
+    staleTime: 15_000,
+    refetchInterval: tab === "overview" ? 30_000 : false,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get(`/command-center/unified-status${qCanteen}`)).data,
   });
 
   const { data: incidents = [], refetch: refetchIncidents } = useQuery<any[]>({
     queryKey: ["cc-incidents", selectedCanteenId],
+    enabled: tab === "overview" || tab === "ai_rca",
+    staleTime: 15_000,
     queryFn: async () => (await api.get(`/command-center/incidents${qCanteen}`)).data,
   });
 
@@ -148,7 +152,9 @@ export const CommandCenterPage: React.FC = () => {
   const { data: mapData, refetch: refetchMap } = useQuery<any>({
     queryKey: ["cc-map", mapHours],
     enabled: tab === "map_sim",
-    refetchInterval: 20_000,
+    staleTime: 15_000,
+    refetchInterval: tab === "map_sim" ? 30_000 : false,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get(`/command-center/cafeteria-map?hours=${mapHours}`)).data,
   });
 

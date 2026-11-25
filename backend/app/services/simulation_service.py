@@ -200,10 +200,13 @@ def _serialize_scenario(s: SimulationScenario) -> dict[str, Any]:
     }
 
 
-def list_simulations(db: Session, *, limit: int = 30) -> list[dict[str, Any]]:
+def list_simulations(db: Session, *, limit: int = 30, offset: int = 0) -> list[dict[str, Any]]:
     rows = list(
         db.scalars(
-            select(SimulationScenario).order_by(SimulationScenario.created_at.desc()).limit(max(1, min(limit, 100)))
+            select(SimulationScenario)
+            .order_by(SimulationScenario.created_at.desc())
+            .offset(max(0, offset))
+            .limit(max(1, min(limit, 100)))
         ).all()
     )
     return [_serialize_scenario(r) for r in rows]

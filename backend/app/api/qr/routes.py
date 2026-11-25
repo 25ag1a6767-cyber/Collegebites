@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.http_cache import set_public_cache
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_COLLEGE_ADMIN,
@@ -57,7 +58,8 @@ def replace_location_qr(
 
 
 @router.get("/locations/resolve/{code}")
-def resolve_location_qr(code: str, db: Session = Depends(get_db)):
+def resolve_location_qr(code: str, response: Response, db: Session = Depends(get_db)):
+    set_public_cache(response, s_maxage=300, swr=600)
     return qr_location_service.resolve_location_qr(db, code)
 
 
@@ -72,7 +74,14 @@ def get_location_qr_image(qr_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Location QR not found")
     url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/scan/{row.code}"
     png = qr_location_service.render_qr_png_bytes(url, box_size=10)
-    return Response(content=png, media_type="image/png")
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400",
+            "CDN-Cache-Control": "public, s-maxage=86400, stale-while-revalidate=86400",
+        },
+    )
 
 
 class WebsiteQRGenerateIn(BaseModel):

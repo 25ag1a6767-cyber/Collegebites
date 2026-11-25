@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
@@ -33,9 +33,49 @@ function formatDuration(seconds: number): string {
   return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+const ElapsedTimerBadge: React.FC<{
+  startIso: string;
+  endIso: string | null;
+  status: string;
+  slaSeconds: number;
+}> = memo(({ startIso, endIso, status, slaSeconds }) => {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (status === "COMPLETED" || endIso) return;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      setNowMs(Date.now());
+    };
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [status, endIso]);
+
+  const elapsedSeconds = Math.max(
+    0,
+    ((endIso ? new Date(endIso).getTime() : nowMs) - new Date(startIso).getTime()) / 1000
+  );
+  const isOverdue = status !== "COMPLETED" && elapsedSeconds > slaSeconds;
+
+  return (
+    <div
+      className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-mono font-extrabold ${
+        isOverdue
+          ? "bg-red-100 text-red-700 animate-pulse"
+          : status === "COMPLETED"
+          ? "bg-slate-100 text-slate-600"
+          : "bg-amber-50 text-amber-800"
+      }`}
+      title="Live Preparation / Queue Timer"
+    >
+      <Clock className="h-3 w-3" />
+      {formatDuration(elapsedSeconds)}
+    </div>
+  );
+});
+ElapsedTimerBadge.displayName = "ElapsedTimerBadge";
+
 interface CardProps {
   card: OperationalTokenCard;
-  nowMs: number;
   busy: boolean;
   canKitchen: boolean;
   canHandover: boolean;
@@ -45,7 +85,6 @@ interface CardProps {
 
 const TokenOrderCard: React.FC<CardProps> = memo(({
   card,
-  nowMs,
   busy,
   canKitchen,
   canHandover,
@@ -53,13 +92,13 @@ const TokenOrderCard: React.FC<CardProps> = memo(({
   onShowQr,
 }) => {
   const startIso = card.confirmed_at || card.created_at;
-  const endIso = card.status === "COMPLETED" ? card.completed_at || card.ready_at : null;
-  const elapsedSeconds = Math.max(
-    0,
-    ((endIso ? new Date(endIso).getTime() : nowMs) - new Date(startIso).getTime()) / 1000
-  );
+  const endIso = card.status === "COMPLETED" ? (card.completed_at || card.ready_at || null) : null;
   const slaSeconds = (card.estimated_prep_minutes + card.delayed_minutes) * 60;
-  const isOverdue = card.status !== "COMPLETED" && elapsedSeconds > slaSeconds;
+  const initialElapsed = Math.max(
+    0,
+    ((endIso ? new Date(endIso).getTime() : Date.now()) - new Date(startIso).getTime()) / 1000
+  );
+  const isOverdue = card.status !== "COMPLETED" && initialElapsed > slaSeconds;
   const orderTimeLabel = new Date(card.created_at).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
@@ -97,19 +136,7 @@ const TokenOrderCard: React.FC<CardProps> = memo(({
         </div>
 
         <div className="text-right space-y-1">
-          <div
-            className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-mono font-extrabold ${
-              isOverdue
-                ? "bg-red-100 text-red-700 animate-pulse"
-                : card.status === "COMPLETED"
-                ? "bg-slate-100 text-slate-600"
-                : "bg-amber-50 text-amber-800"
-            }`}
-            title="Live Preparation / Queue Timer"
-          >
-            <Clock className="h-3 w-3" />
-            {formatDuration(elapsedSeconds)}
-          </div>
+          <ElapsedTimerBadge startIso={startIso} endIso={endIso} status={card.status} slaSeconds={slaSeconds} />
           <div className="text-[10px] text-slate-500 font-semibold">
             {orderTimeLabel} • {card.counter_name}
           </div>
@@ -213,15 +240,10 @@ export const OperationalTokenBoardPage: React.FC = () => {
   const [activeMobileTab, setActiveMobileTab] = useState<string>("all");
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
   const [qrModalCard, setQrModalCard] = useState<OperationalTokenCard | null>(null);
-  const [nowMs, setNowMs] = useState(() => Date.now());
-
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
@@ -259,9 +281,7 @@ export const OperationalTokenBoardPage: React.FC = () => {
     queryFn: async () => {
       const qs = activeScope === "all" ? "" : `?canteen_id=${encodeURIComponent(activeScope)}`;
       try {
-        const res = await api.get<OperationalTokenBoardResponse>(`/pickup/token-board${qs}`, {
-          headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
-        });
+        const res = await api.get<OperationalTokenBoardResponse>(`/pickup/token-board${qs}`);
         const live = res.data;
         if (live?.version && live.version !== lastOpCachedVerRef.current) {
           lastOpCachedVerRef.current = live.version;
@@ -276,14 +296,14 @@ export const OperationalTokenBoardPage: React.FC = () => {
         throw err;
       }
     },
-    staleTime: 0,
+    staleTime: 2000,
     retry: false,
     refetchInterval: () =>
       typeof navigator !== "undefined" && navigator.onLine === false
         ? false
         : syncStatus === "live"
-        ? 15000
-        : 2000,
+        ? 20000
+        : 5000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
@@ -294,7 +314,7 @@ export const OperationalTokenBoardPage: React.FC = () => {
       ? new Date(opUpdatedAt)
       : lastSyncedAt;
 
-  const handleAction = async (
+  const handleAction = useCallback(async (
     card: OperationalTokenCard,
     action: "accept" | "start-preparing" | "mark-ready" | "handover"
   ) => {
@@ -332,7 +352,7 @@ export const OperationalTokenBoardPage: React.FC = () => {
     } finally {
       setBusyOrderId(null);
     }
-  };
+  }, [isOnline, pushToast, triggerSync]);
 
   const sections = useMemo(() => {
     const rawSections = [
@@ -488,7 +508,6 @@ export const OperationalTokenBoardPage: React.FC = () => {
                     <TokenOrderCard
                       key={card.order_id}
                       card={card}
-                      nowMs={nowMs}
                       busy={busyOrderId === card.order_id}
                       canKitchen={canKitchen}
                       canHandover={canHandover}

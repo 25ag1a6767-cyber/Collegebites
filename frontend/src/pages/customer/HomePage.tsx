@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { motion } from "framer-motion";
 import {
   Clock,
   Flame,
@@ -55,8 +54,9 @@ export const HomePage: React.FC = () => {
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
     queryFn: () => fetchWithOfflineCache("canteens", async () => (await api.get("/canteens")).data),
-    staleTime: 15_000,
-    refetchInterval: isOnline ? 30_000 : false,
+    staleTime: 30_000,
+    refetchInterval: isOnline ? 60_000 : false,
+    refetchIntervalInBackground: false,
   });
 
   const activeCanteen = useMemo(
@@ -71,8 +71,9 @@ export const HomePage: React.FC = () => {
       fetchWithOfflineCache(`categories:${activeCanteen!.id}`, async () =>
         (await api.get(`/menus/canteens/${activeCanteen!.id}/categories`)).data
       ),
-    staleTime: 60_000,
-    refetchInterval: isOnline ? 60_000 : false,
+    staleTime: 180_000,
+    refetchInterval: isOnline ? 300_000 : false,
+    refetchIntervalInBackground: false,
   });
 
   // Honor QR deep-link query params (?canteen=<slug|id>&category=<id|slug>#menu) and /canteen/:canteenSlug
@@ -107,8 +108,9 @@ export const HomePage: React.FC = () => {
   const { data: items = [], isLoading: itemsLoading } = useQuery<FoodItem[]>({
     queryKey: ["menu-items", activeCanteen?.id, debouncedSearch, selectedCategoryId, vegFilter, maxPrice, sortBy, activeTag],
     enabled: Boolean(activeCanteen?.id),
-    staleTime: 20_000,
-    refetchInterval: isOnline ? 30_000 : false,
+    staleTime: 60_000,
+    refetchInterval: isOnline ? 120_000 : false,
+    refetchIntervalInBackground: false,
     queryFn: async () => {
       const params = new URLSearchParams();
       if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
@@ -135,30 +137,44 @@ export const HomePage: React.FC = () => {
   const { data: recommended = [] } = useQuery<FoodItem[]>({
     queryKey: ["smart-recs", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
-    staleTime: 30_000,
-    refetchInterval: isOnline ? 45_000 : false,
+    staleTime: 60_000,
+    refetchInterval: isOnline ? 120_000 : false,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get(`/kiosk/recommendations/${activeCanteen!.id}`)).data,
   });
 
+  const availableRecommended = useMemo(
+    () =>
+      recommended.filter(
+        (r) => r.is_available && !r.insufficient_ingredients && r.is_schedule_active_now !== false
+      ),
+    [recommended]
+  );
+
   const { data: promotions = [] } = useQuery<any[]>({
     queryKey: ["promotions", activeCanteen?.id],
-    queryFn: async () => (await api.get(`/promotions${activeCanteen ? `?canteen_id=${activeCanteen.id}` : ""}`)).data,
+    enabled: Boolean(activeCanteen?.id),
+    staleTime: 120_000,
+    queryFn: async () => (await api.get(`/promotions?canteen_id=${activeCanteen!.id}`)).data,
   });
 
   const { data: announcements = [] } = useQuery<any[]>({
-    queryKey: ["announcements", activeCanteen?.id],
+    queryKey: ["announcements"],
+    staleTime: 120_000,
     queryFn: async () => (await api.get(`/notifications/announcements`)).data,
   });
 
   const { data: cart } = useQuery<CartSummary>({
     queryKey: ["cart", activeCanteen?.id],
     enabled: Boolean(activeCanteen?.id),
+    staleTime: 15_000,
     queryFn: async () => (await api.get(`/carts?canteen_id=${activeCanteen!.id}`)).data,
   });
 
   const { data: profile } = useQuery<any>({
     queryKey: ["customer-profile"],
     enabled: Boolean(user),
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/customers/profile")).data,
   });
 
@@ -254,8 +270,15 @@ export const HomePage: React.FC = () => {
   const { data: myOrders = [] } = useQuery<any[]>({
     queryKey: ["my-orders"],
     enabled: Boolean(user),
-    queryFn: async () => (await api.get("/orders/my")).data,
-    refetchInterval: 20000,
+    staleTime: 20_000,
+    queryFn: async () => (await api.get("/orders/my?limit=15")).data,
+    refetchInterval: (query) => {
+      if (!isOnline) return false;
+      const list = (query.state.data as any[]) || [];
+      const hasActive = list.some((o) => ["PLACED", "ACCEPTED", "PREPARING", "READY"].includes(o.status));
+      return hasActive ? 30_000 : false;
+    },
+    refetchIntervalInBackground: false,
   });
   const activeOrder = myOrders.find((o) =>
     ["PLACED", "ACCEPTED", "PREPARING", "READY"].includes(o.status)
@@ -362,17 +385,14 @@ export const HomePage: React.FC = () => {
       </div>
 
       {/* Smart Recommendations Strip */}
-      {recommended.filter((r) => r.is_available && !r.insufficient_ingredients && r.is_schedule_active_now !== false).length > 0 && (
+      {availableRecommended.length > 0 && (
         <div>
           <div className="mb-3 flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-[#76010d]" />
             <h2 className="text-lg font-extrabold text-slate-900">Recommended Right Now</h2>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {recommended
-              .filter((r) => r.is_available && !r.insufficient_ingredients && r.is_schedule_active_now !== false)
-              .slice(0, 3)
-              .map((item) => (
+            {availableRecommended.slice(0, 3).map((item) => (
               <Card
                 key={item.id}
                 onClick={() => openItemModal(item)}
@@ -482,17 +502,12 @@ export const HomePage: React.FC = () => {
         />
       ) : (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {items.map((item, idx) => {
+          {items.map((item) => {
             const outOfSchedule = item.is_schedule_active_now === false;
             const unavailable = !item.is_available || item.insufficient_ingredients || outOfSchedule || !activeCanteen?.is_open_now;
             const isFav = profile?.favourite_item_ids?.includes(item.id);
             return (
-              <motion.div
-                key={item.id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: Math.min(idx, 10) * 0.02 }}
-              >
+              <div key={item.id} className="transition-opacity duration-200">
                 <Card className="overflow-hidden flex flex-col h-full">
                   <div className="relative h-44 bg-slate-100">
                     <img
@@ -570,7 +585,7 @@ export const HomePage: React.FC = () => {
                     </div>
                   </div>
                 </Card>
-              </motion.div>
+              </div>
             );
           })}
         </div>

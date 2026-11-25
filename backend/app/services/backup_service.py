@@ -13,6 +13,11 @@ import tempfile
 from typing import Any, Optional
 from uuid import UUID
 
+try:
+    import orjson as _orjson
+except Exception:  # pragma: no cover
+    _orjson = None
+
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
 from sqlalchemy import Boolean, Date, DateTime, Integer, Numeric, Time, Uuid, select, text
@@ -263,8 +268,11 @@ def create_backup(
             "redacted_fields": sorted(c for cols in REDACTED_COLUMNS.values() for c in cols),
             "tables": snapshot_tables,
         }
-        raw_json = json.dumps(bundle, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        compressed = gzip.compress(raw_json, compresslevel=6)
+        if _orjson is not None:
+            raw_json = _orjson.dumps(bundle, option=_orjson.OPT_NON_STR_KEYS, default=str)
+        else:
+            raw_json = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+        compressed = gzip.compress(raw_json, compresslevel=3)
         checksum = hashlib.sha256(compressed).hexdigest()
         encrypted_token = _derive_fernet().encrypt(compressed).decode("ascii")
 

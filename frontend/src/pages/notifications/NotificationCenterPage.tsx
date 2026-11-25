@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Bell, CheckCheck, Megaphone, RefreshCw, Search, Settings2, ShieldAlert } from "lucide-react";
 import { api, getApiError } from "../../api/client";
+import { useDebouncedValue } from "../../hooks/useDebouncedValue";
 import { useAppStore } from "../../store/useAppStore";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
 
@@ -18,6 +19,7 @@ export const NotificationCenterPage: React.FC = () => {
 
   const [tab, setTab] = useState<"inbox" | "deliveries" | "preferences" | "broadcast">("inbox");
   const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search, 300);
   const [priority, setPriority] = useState("all");
   const [category, setCategory] = useState("all");
   const [readFilter, setReadFilter] = useState("all");
@@ -34,7 +36,7 @@ export const NotificationCenterPage: React.FC = () => {
   const [busy, setBusy] = useState(false);
 
   const qs = new URLSearchParams();
-  if (search.trim()) qs.set("q", search.trim());
+  if (debouncedSearch.trim()) qs.set("q", debouncedSearch.trim());
   if (priority !== "all") qs.set("priority", priority);
   if (category !== "all") qs.set("category", category);
   if (readFilter === "unread") qs.set("is_read", "false");

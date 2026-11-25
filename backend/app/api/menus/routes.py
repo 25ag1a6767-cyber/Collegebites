@@ -4,11 +4,13 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from PIL import Image, UnidentifiedImageError
 from sqlalchemy.orm import Session
 
+from app.core.cache import NS_MENU, cache_manager, invalidate_menu
 from app.core.database import get_db
+from app.core.http_cache import apply_etag_and_check_304, set_private_no_store, set_public_cache
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_COLLEGE_ADMIN,
@@ -46,8 +48,21 @@ router = APIRouter(prefix="/menus", tags=["Menus & Food Catalog"])
 
 
 @router.get("/canteens/{canteen_id}/categories", response_model=list[FoodCategoryOut])
-def get_categories(canteen_id: UUID, include_inactive: bool = False, db: Session = Depends(get_db)):
-    return menu_service.list_categories_cached(db, canteen_id, include_inactive=include_inactive)
+def get_categories(
+    canteen_id: UUID,
+    request: Request,
+    response: Response,
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+):
+    data = menu_service.list_categories_cached(db, canteen_id, include_inactive=include_inactive)
+    if include_inactive:
+        set_private_no_store(response)
+        return data
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=60, swr=120)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/categories", response_model=FoodCategoryOut, status_code=status.HTTP_201_CREATED)
@@ -101,6 +116,8 @@ def delete_category(
 @router.get("/canteens/{canteen_id}/items", response_model=list[FoodItemOut])
 def list_items(
     canteen_id: UUID,
+    request: Request,
+    response: Response,
     q: Optional[str] = Query(default=None),
     category_id: Optional[UUID] = Query(default=None),
     is_veg: Optional[bool] = Query(default=None),
@@ -113,9 +130,11 @@ def list_items(
     available_only: bool = Query(default=False),
     include_inactive: bool = Query(default=False),
     sort_by: str = Query(default="popularity", pattern="^(popularity|price_asc|price_desc|rating)$"),
+    limit: Optional[int] = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    return menu_service.list_food_items(
+    items = menu_service.list_food_items(
         db,
         canteen_id,
         q=q,
@@ -130,12 +149,30 @@ def list_items(
         available_only=available_only,
         include_inactive=include_inactive,
         sort_by=sort_by,
+        limit=limit,
+        offset=offset,
     )
+    if include_inactive:
+        set_private_no_store(response)
+        return items
+    seed = [
+        (str(i.id), str(i.base_price), i.is_available, i.is_available_to_order, i.insufficient_ingredients, i.name)
+        for i in items
+    ]
+    not_mod = apply_etag_and_check_304(request, response, seed, s_maxage=15, swr=45)
+    if not_mod is not None:
+        return not_mod
+    return items
 
 
 @router.get("/items/{item_id}", response_model=FoodItemOut)
-def get_item(item_id: UUID, db: Session = Depends(get_db)):
-    return menu_service.get_food_item(db, item_id)
+def get_item(item_id: UUID, request: Request, response: Response, db: Session = Depends(get_db)):
+    data = menu_service.get_food_item(db, item_id)
+    seed = (str(data.id), str(data.base_price), data.is_available, data.is_available_to_order, data.name)
+    not_mod = apply_etag_and_check_304(request, response, seed, s_maxage=15, swr=45)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/items", response_model=FoodItemOut, status_code=status.HTTP_201_CREATED)
@@ -309,8 +346,12 @@ def delete_variant(
 
 
 @router.get("/canteens/{canteen_id}/addons", response_model=list[FoodAddonOut])
-def list_addons(canteen_id: UUID, db: Session = Depends(get_db)):
-    return menu_service.list_addons(db, canteen_id)
+def list_addons(canteen_id: UUID, request: Request, response: Response, db: Session = Depends(get_db)):
+    data = menu_service.list_addons(db, canteen_id)
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=60, swr=120)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/addons", response_model=FoodAddonOut, status_code=status.HTTP_201_CREATED)
@@ -497,12 +538,21 @@ async def import_csv(
 
 
 @router.get("/allergens")
-def list_allergens(db: Session = Depends(get_db)):
+def list_allergens(request: Request, response: Response, db: Session = Depends(get_db)):
     from sqlalchemy import select
     from app.models.menu import Allergen
 
-    rows = db.scalars(select(Allergen).order_by(Allergen.name.asc())).all()
-    return [{"id": str(a.id), "name": a.name, "description": a.description} for a in rows]
+    hit, cached = cache_manager.get_json(NS_MENU, "allergens", l1_ttl=30.0)
+    if hit and isinstance(cached, list):
+        data = cached
+    else:
+        rows = db.scalars(select(Allergen).order_by(Allergen.name.asc())).all()
+        data = [{"id": str(a.id), "name": a.name, "description": a.description} for a in rows]
+        cache_manager.set_json(NS_MENU, "allergens", data, ttl_seconds=300, l1_ttl=30.0)
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=3600, swr=86400)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/allergens", status_code=status.HTTP_201_CREATED)
@@ -524,10 +574,12 @@ def create_allergen(
             existing.description = description
             db.commit()
             db.refresh(existing)
+            invalidate_menu()
         return {"id": str(existing.id), "name": existing.name, "description": existing.description}
     alg = Allergen(name=clean, description=description)
     db.add(alg)
     db.commit()
     db.refresh(alg)
+    invalidate_menu()
     return {"id": str(alg.id), "name": alg.name, "description": alg.description}
 

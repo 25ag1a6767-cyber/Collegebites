@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from uuid import UUID
 
 from fastapi import Request
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.cache import NS_BOARD, NS_QUEUE, cache_manager
@@ -161,9 +161,11 @@ def compute_staff_orders_version(
 ) -> str:
     cache_ns = f"{NS_BOARD}:{canteen_id}" if canteen_id is not None else NS_BOARD
     cache_key = f"staff_wm:{canteen_id or 'all'}:{status_filter or ''}:{payment_status or ''}:{(q or '').strip().lower()}"
-    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=0.8)
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=1.5)
     if hit and isinstance(cached, str):
         return cached
+    since_window = datetime.now(timezone.utc) - timedelta(hours=36)
+    active_statuses = ("PAYMENT_PENDING", "PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING", "READY")
     stmt = select(
         func.count(Order.id),
         func.max(Order.updated_at),
@@ -177,7 +179,7 @@ def compute_staff_orders_version(
         func.coalesce(func.sum(case((Order.status.in_(("CANCELLED", "REJECTED")), 1), else_=0)), 0),
         func.coalesce(func.sum(Order.delayed_minutes), 0),
         func.coalesce(func.sum(case((Order.is_priority.is_(True), 1), else_=0)), 0),
-    )
+    ).where(or_(Order.created_at >= since_window, Order.status.in_(active_statuses)))
     if canteen_id is not None:
         stmt = stmt.where(Order.canteen_id == canteen_id)
     if status_filter:
@@ -185,9 +187,18 @@ def compute_staff_orders_version(
     if payment_status:
         stmt = stmt.where(Order.payment_status == payment_status)
     row = db.execute(stmt).one()
-    item_prep_ready = db.scalar(
-        select(func.count(OrderItem.id)).where(OrderItem.prep_status != "PENDING")
-    ) or 0
+    # Scope OrderItem prep check strictly to active kitchen orders instead of full-table scan
+    item_stmt = (
+        select(func.count(OrderItem.id))
+        .join(Order, Order.id == OrderItem.order_id)
+        .where(
+            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
+            OrderItem.prep_status != "PENDING",
+        )
+    )
+    if canteen_id is not None:
+        item_stmt = item_stmt.where(Order.canteen_id == canteen_id)
+    item_prep_ready = db.scalar(item_stmt) or 0
     raw = "|".join(
         [
             str(canteen_id or "all"),
@@ -202,7 +213,7 @@ def compute_staff_orders_version(
         ]
     )
     wm = sha256_hex(raw)[:16]
-    cache_manager.set_json(cache_ns, cache_key, wm, ttl_seconds=2, l1_ttl=0.8)
+    cache_manager.set_json(cache_ns, cache_key, wm, ttl_seconds=3, l1_ttl=1.5)
     return wm
 
 
@@ -213,9 +224,10 @@ def fetch_token_board_snapshot(db: Session, canteen_id: Optional[UUID] = None) -
 def compute_queue_version(db: Session, canteen_id: UUID) -> str:
     cache_ns = f"{NS_QUEUE}:{canteen_id}"
     cache_key = f"qwm:{canteen_id}"
-    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=0.8)
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=1.5)
     if hit and isinstance(cached, str):
         return cached
+    since_completed = datetime.now(timezone.utc) - timedelta(hours=24)
     row = db.execute(
         select(
             func.count(Order.id),
@@ -229,7 +241,10 @@ def compute_queue_version(db: Session, canteen_id: UUID) -> str:
             func.coalesce(func.sum(Order.delayed_minutes), 0),
         ).where(
             Order.canteen_id == canteen_id,
-            Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY", "COMPLETED")),
+            or_(
+                Order.status.in_(("PLACED", "ACCEPTED", "PREPARING", "READY")),
+                and_(Order.status == "COMPLETED", Order.completed_at >= since_completed),
+            ),
         )
     ).one()
     raw = "|".join(
@@ -242,7 +257,7 @@ def compute_queue_version(db: Session, canteen_id: UUID) -> str:
         ]
     )
     wm = sha256_hex(raw)[:16]
-    cache_manager.set_json(cache_ns, cache_key, wm, ttl_seconds=2, l1_ttl=0.8)
+    cache_manager.set_json(cache_ns, cache_key, wm, ttl_seconds=3, l1_ttl=1.5)
     return wm
 
 
@@ -260,14 +275,9 @@ def compute_user_notifications_version(
     roles: set[str],
     assigned_canteen_id: Optional[UUID] = None,
 ) -> str:
-    rows = notification_service.list_my_notifications(
-        db, user_id, roles, assigned_canteen_id=assigned_canteen_id, limit=200
+    return notification_service.compute_notifications_watermark(
+        db, user_id, roles, assigned_canteen_id=assigned_canteen_id
     )
-    unread_cnt = sum(1 for n in rows if not notification_service.is_notification_read_for_user(n, user_id))
-    latest_created = max((n.created_at.isoformat() for n in rows if n.created_at), default="")
-    latest_updated = max((n.updated_at.isoformat() for n in rows if n.updated_at), default="")
-    raw = "|".join([str(user_id), str(len(rows)), str(unread_cnt), latest_created, latest_updated])
-    return sha256_hex(raw)[:16]
 
 
 def fetch_user_notifications_snapshot(
@@ -277,14 +287,17 @@ def fetch_user_notifications_snapshot(
     roles: set[str],
     assigned_canteen_id: Optional[UUID] = None,
 ) -> tuple[str, dict[str, Any]]:
-    version = compute_user_notifications_version(
-        db, user_id=user_id, roles=roles, assigned_canteen_id=assigned_canteen_id
+    rows = notification_service.list_my_notifications(
+        db, user_id, roles, assigned_canteen_id=assigned_canteen_id, limit=100
     )
-    rows = notification_service.list_my_notifications(db, user_id, roles, assigned_canteen_id=assigned_canteen_id)
     serialized = [notification_service.serialize_notification_for_user(n, user_id) for n in rows]
+    unread_cnt = sum(1 for r in serialized if not r["is_read"])
+    latest_created = max((r["created_at"] or "" for r in serialized), default="")
+    latest_updated = max((n.updated_at.isoformat() for n in rows if n.updated_at), default="")
+    version = sha256_hex(f"{user_id}|{len(serialized)}|{unread_cnt}|{latest_created}|{latest_updated}")[:16]
     return version, {
         "version": version,
-        "unread_count": sum(1 for r in serialized if not r["is_read"]),
+        "unread_count": unread_cnt,
         "notifications": serialized,
     }
 

@@ -110,9 +110,13 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
   );
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
   const [reconnectTick, setReconnectTick] = useState(0);
+  const [isTabVisible, setIsTabVisible] = useState<boolean>(() =>
+    typeof document === "undefined" ? true : document.visibilityState !== "hidden"
+  );
 
   const lastVersionRef = useRef<string | null>(null);
   const prevStatusRef = useRef<RealtimeStatus>(status);
+  const hiddenSinceRef = useRef<number | null>(null);
   const onSnapshotRef = useRef(onSnapshot);
   const onEventRef = useRef(onEvent);
   const queryKeysRef = useRef(queryKeys);
@@ -181,15 +185,19 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
       setStatus("offline");
     };
     const handleVisible = () => {
-      if (document.visibilityState === "visible") {
-        if (navigator.onLine !== false) {
-          // Only tear down & reconnect if stream is not already live
-          if (statusRef.current !== "live") {
-            setReconnectTick((n) => n + 1);
-            invalidateAll();
-          }
-          void flushSyncQueue(qc);
+      const visible = document.visibilityState !== "hidden";
+      setIsTabVisible(visible);
+      if (!visible) {
+        hiddenSinceRef.current = Date.now();
+        return;
+      }
+      const hiddenMs = hiddenSinceRef.current ? Date.now() - hiddenSinceRef.current : 0;
+      hiddenSinceRef.current = null;
+      if (navigator.onLine !== false) {
+        if (hiddenMs > 5000 || statusRef.current !== "live") {
+          invalidateAll();
         }
+        void flushSyncQueue(qc);
       }
     };
 
@@ -203,22 +211,28 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
     };
   }, [enabled]);
 
-  // Primary cross-instance SSE connection (with Last-Event-ID + exponential backoff)
+  // Primary cross-instance SSE connection (paused automatically in hidden tabs to eliminate idle serverless CPU)
   useEffect(() => {
-    if (!enabled || !ssePath) return;
+    if (!enabled || !ssePath || !isTabVisible) return;
     let cancelled = false;
     let controller: AbortController | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
+    let isCleanCycle = false;
 
     const connectSse = async () => {
       if (cancelled) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       if (typeof navigator !== "undefined" && navigator.onLine === false) {
         setStatus("offline");
         return;
       }
 
-      setStatus(attempt === 0 ? "connecting" : "reconnecting");
+      // Preserve "live" across expected serverless window rollovers so fallback polling doesn't burst
+      if (!isCleanCycle) {
+        setStatus(attempt === 0 ? "connecting" : "reconnecting");
+      }
+      isCleanCycle = false;
       controller = new AbortController();
 
       try {
@@ -249,6 +263,12 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
           signal: controller.signal,
           cache: "no-store",
         });
+
+        // Stop retrying permanently on terminal auth/authorization/not-found errors until credentials or route change
+        if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
+          setStatus("offline");
+          return;
+        }
 
         if (!resp.ok || !resp.body) {
           throw new Error(`SSE stream HTTP ${resp.status}`);
@@ -291,14 +311,15 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
         }
 
         if (!cancelled) {
-          const delayMs = cycleRequested ? 150 : 1200;
+          isCleanCycle = cycleRequested;
+          const delayMs = cycleRequested ? 500 : 1500;
           timer = setTimeout(connectSse, delayMs);
         }
       } catch (err: any) {
         if (cancelled || err?.name === "AbortError") return;
         attempt += 1;
         setStatus(typeof navigator !== "undefined" && navigator.onLine === false ? "offline" : "reconnecting");
-        const delayMs = computeReconnectDelayMs(attempt, 1000, 15000, 400);
+        const delayMs = computeReconnectDelayMs(attempt, 1500, 20000, 500);
         timer = setTimeout(connectSse, delayMs);
       }
     };
@@ -310,15 +331,15 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
       if (timer) clearTimeout(timer);
       controller?.abort();
     };
-  }, [enabled, ssePath, accessToken, wsToken, wsGuestToken, guestSessionId, reconnectTick]);
+  }, [enabled, ssePath, isTabVisible, accessToken, wsToken, wsGuestToken, guestSessionId, reconnectTick]);
 
-  // Low-latency WebSocket push channel with ping keepalive & auto-reconnect (skipped on serverless vercel.app unless explicitly enabled)
+  // Low-latency WebSocket push channel (disabled in production builds when SSE is configured unless VITE_WS_ENABLED=true)
   useEffect(() => {
-    const isVercelServerless =
-      typeof window !== "undefined" &&
-      window.location.hostname.endsWith(".vercel.app") &&
+    const wsDisabledByServerless =
+      (import.meta.env.PROD || (typeof window !== "undefined" && window.location.hostname.endsWith(".vercel.app"))) &&
+      Boolean(ssePath) &&
       import.meta.env.VITE_WS_ENABLED !== "true";
-    if (!enabled || !wsPath || isVercelServerless) return;
+    if (!enabled || !wsPath || !isTabVisible || wsDisabledByServerless) return;
     let cancelled = false;
     let ws: WebSocket | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -385,7 +406,7 @@ export function useRealtimeSync<T = any>(options: UseRealtimeSyncOptions<T>) {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [enabled, wsPath, accessToken, wsToken, wsGuestToken, reconnectTick]);
+  }, [enabled, wsPath, isTabVisible, ssePath, accessToken, wsToken, wsGuestToken, reconnectTick]);
 
   return {
     status,

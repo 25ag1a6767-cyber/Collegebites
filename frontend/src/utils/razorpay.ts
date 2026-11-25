@@ -12,25 +12,64 @@ declare global {
   }
 }
 
+let _rzpScriptPromise: Promise<boolean> | null = null;
+
 export function loadRazorpayCheckoutScript(): Promise<boolean> {
   if (typeof window === "undefined") return Promise.resolve(false);
   if (window.Razorpay) return Promise.resolve(true);
-  return new Promise((resolve) => {
+  if (_rzpScriptPromise) return _rzpScriptPromise;
+
+  _rzpScriptPromise = new Promise((resolve) => {
     const existing = document.querySelector<HTMLScriptElement>(
       'script[src="https://checkout.razorpay.com/v1/checkout.js"]'
     );
     if (existing) {
-      existing.addEventListener("load", () => resolve(Boolean(window.Razorpay)), { once: true });
-      existing.addEventListener("error", () => resolve(false), { once: true });
-      return;
+      if (existing.dataset.rzpState === "error") {
+        existing.remove();
+      } else {
+        existing.addEventListener("load", () => resolve(Boolean(window.Razorpay)), { once: true });
+        existing.addEventListener("error", () => resolve(false), { once: true });
+        return;
+      }
     }
+
     const script = document.createElement("script");
     script.src = "https://checkout.razorpay.com/v1/checkout.js";
     script.async = true;
-    script.onload = () => resolve(Boolean(window.Razorpay));
-    script.onerror = () => resolve(false);
+    script.onload = () => {
+      script.dataset.rzpState = "loaded";
+      resolve(Boolean(window.Razorpay));
+    };
+    script.onerror = () => {
+      script.dataset.rzpState = "error";
+      resolve(false);
+    };
     document.body.appendChild(script);
   });
+
+  return _rzpScriptPromise;
+}
+
+function sanitizePrefill(prefill?: { name?: string; email?: string; contact?: string }): Record<string, string> | undefined {
+  if (!prefill) return undefined;
+  const out: Record<string, string> = {};
+  const name = prefill.name?.trim();
+  if (name) out.name = name.slice(0, 80);
+
+  const email = prefill.email?.trim();
+  if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    out.email = email;
+  }
+
+  const rawContact = prefill.contact?.trim();
+  if (rawContact) {
+    const digits = rawContact.replace(/[^\d+]/g, "");
+    const digitCount = digits.replace(/\D/g, "").length;
+    if (digitCount >= 10 && digitCount <= 15) {
+      out.contact = digits;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export interface RazorpayModalOptions {
@@ -42,8 +81,18 @@ export interface RazorpayModalOptions {
   onDismiss?: () => void;
 }
 
+export function isSyntheticRazorpayOrderId(orderId?: string | null): boolean {
+  return Boolean(orderId && orderId.startsWith("order_test_"));
+}
+
 export function getPublicRazorpayKeyId(order?: Order | null): string | null {
-  return order?.razorpay_key_id || import.meta.env.VITE_RAZORPAY_KEY_ID || null;
+  if (order) {
+    // Backend is authoritative: never pair a local/stale VITE_RAZORPAY_KEY_ID with a synthetic
+    // order_test_* ID or an order created while server Razorpay credentials were unconfigured.
+    if (isSyntheticRazorpayOrderId(order.razorpay_order_id)) return null;
+    return order.razorpay_key_id || null;
+  }
+  return import.meta.env.VITE_RAZORPAY_KEY_ID || null;
 }
 
 export function buildRazorpayOptions(opts: RazorpayModalOptions): Record<string, any> {
@@ -55,7 +104,7 @@ export function buildRazorpayOptions(opts: RazorpayModalOptions): Record<string,
     name: "CollegeBites",
     description: opts.description || `Order ${order.order_number}`,
     order_id: order.razorpay_order_id,
-    prefill: opts.prefill,
+    prefill: sanitizePrefill(opts.prefill),
     // Prioritize UPI Apps / Collect / QR first while keeping Razorpay Test Mode & fallback rails accessible
     config: {
       display: {
@@ -103,33 +152,38 @@ export function buildRazorpayOptions(opts: RazorpayModalOptions): Record<string,
 export async function openRazorpayModal(opts: RazorpayModalOptions): Promise<boolean> {
   const { order } = opts;
   const publicKey = getPublicRazorpayKeyId(order);
-  if (!order.razorpay_order_id || !publicKey) {
+  if (!order.razorpay_order_id || isSyntheticRazorpayOrderId(order.razorpay_order_id) || !publicKey) {
     return false;
   }
   const loaded = await loadRazorpayCheckoutScript();
   if (!loaded || !window.Razorpay) {
     return false;
   }
-  const rzp = new window.Razorpay(buildRazorpayOptions(opts));
-  rzp.on?.("payment.failed", async (resp) => {
-    const reason =
-      resp?.error?.description || resp?.error?.reason || "Payment failed on Razorpay";
-    try {
-      const gTok = order.guest_access_token
-        ? `?guest_token=${encodeURIComponent(order.guest_access_token)}`
-        : "";
-      await api.post(`/payments/razorpay/fail${gTok}`, {
-        order_id: order.id,
-        razorpay_order_id: order.razorpay_order_id,
-        reason: reason.slice(0, 255),
-      });
-    } catch {
-      // Failure recording is best-effort; still surface gateway error cleanly
-    }
-    opts.onError(new Error(reason));
-  });
-  rzp.open();
-  return true;
+  try {
+    const rzp = new window.Razorpay(buildRazorpayOptions(opts));
+    rzp.on?.("payment.failed", async (resp) => {
+      const reason =
+        resp?.error?.description || resp?.error?.reason || "Payment failed on Razorpay";
+      try {
+        const gTok = order.guest_access_token
+          ? `?guest_token=${encodeURIComponent(order.guest_access_token)}`
+          : "";
+        await api.post(`/payments/razorpay/fail${gTok}`, {
+          order_id: order.id,
+          razorpay_order_id: order.razorpay_order_id,
+          reason: reason.slice(0, 255),
+        });
+      } catch {
+        // Failure recording is best-effort; still surface gateway error cleanly
+      }
+      opts.onError(new Error(reason));
+    });
+    rzp.open();
+    return true;
+  } catch (err) {
+    opts.onError(err);
+    return false;
+  }
 }
 
 export interface RazorpayCustomPaymentOptions {
@@ -144,44 +198,49 @@ export interface RazorpayCustomPaymentOptions {
 }
 
 export async function openRazorpayCustomCheckout(opts: RazorpayCustomPaymentOptions): Promise<boolean> {
-  const publicKey = opts.razorpayKeyId || import.meta.env.VITE_RAZORPAY_KEY_ID || null;
-  if (!opts.razorpayOrderId || !publicKey) {
+  const publicKey = opts.razorpayKeyId || null;
+  if (!opts.razorpayOrderId || isSyntheticRazorpayOrderId(opts.razorpayOrderId) || !publicKey) {
     return false;
   }
   const loaded = await loadRazorpayCheckoutScript();
   if (!loaded || !window.Razorpay) {
     return false;
   }
-  const rzp = new window.Razorpay({
-    key: publicKey,
-    amount: Math.round(Number(opts.amountInr) * 100),
-    currency: "INR",
-    name: "CollegeBites",
-    description: opts.description,
-    order_id: opts.razorpayOrderId,
-    prefill: opts.prefill,
-    theme: { color: "#76010d" },
-    handler: async (response: {
-      razorpay_order_id: string;
-      razorpay_payment_id: string;
-      razorpay_signature: string;
-    }) => {
-      try {
-        const res = await api.post(opts.verifyEndpoint, {
-          razorpay_order_id: response.razorpay_order_id,
-          razorpay_payment_id: response.razorpay_payment_id,
-          razorpay_signature: response.razorpay_signature,
-        });
-        opts.onVerified(res.data);
-      } catch (err) {
-        opts.onError(err);
-      }
-    },
-  });
-  rzp.on?.("payment.failed", (resp) => {
-    const reason = resp?.error?.description || resp?.error?.reason || "Payment failed on Razorpay";
-    opts.onError(new Error(reason));
-  });
-  rzp.open();
-  return true;
+  try {
+    const rzp = new window.Razorpay({
+      key: publicKey,
+      amount: Math.round(Number(opts.amountInr) * 100),
+      currency: "INR",
+      name: "CollegeBites",
+      description: opts.description,
+      order_id: opts.razorpayOrderId,
+      prefill: sanitizePrefill(opts.prefill),
+      theme: { color: "#76010d" },
+      handler: async (response: {
+        razorpay_order_id: string;
+        razorpay_payment_id: string;
+        razorpay_signature: string;
+      }) => {
+        try {
+          const res = await api.post(opts.verifyEndpoint, {
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature,
+          });
+          opts.onVerified(res.data);
+        } catch (err) {
+          opts.onError(err);
+        }
+      },
+    });
+    rzp.on?.("payment.failed", (resp) => {
+      const reason = resp?.error?.description || resp?.error?.reason || "Payment failed on Razorpay";
+      opts.onError(new Error(reason));
+    });
+    rzp.open();
+    return true;
+  } catch (err) {
+    opts.onError(err);
+    return false;
+  }
 }

@@ -465,7 +465,7 @@ export const CheckoutPage: React.FC = () => {
               <span>
                 {getPublicRazorpayKeyId(pendingOrder)
                   ? "Backend independently verifies Razorpay HMAC signature and amount/currency before issuing your Pickup Token, QR code & digital receipt."
-                  : "Razorpay public key is not configured in this environment. Track your pending order or cancel to release your slot."}
+                  : "Razorpay gateway API credentials (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET) are not configured on this server yet. Add your Razorpay Test or Live keys in deployment environment settings to open Razorpay Checkout."}
               </span>
             </div>
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, BellRing, Check, Clock, Flame, Printer, Search, Star, Trash2, Volume2, VolumeX } from "lucide-react";
 import { api, getApiError } from "../../api/client";
@@ -11,7 +11,10 @@ import { playOrderAlertChime, showBrowserNotification } from "../../utils/notifi
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
-import { ProductionManagementTab } from "./components/ProductionManagementTab";
+
+const ProductionManagementTab = lazy(() =>
+  import("./components/ProductionManagementTab").then((m) => ({ default: m.ProductionManagementTab }))
+);
 
 function formatClockSeconds(totalSecs: number): string {
   const safe = Math.max(0, Math.floor(totalSecs));
@@ -28,6 +31,7 @@ export const KitchenDisplayPage: React.FC = () => {
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
@@ -64,7 +68,10 @@ export const KitchenDisplayPage: React.FC = () => {
   const initialLoadedRef = useRef(false);
 
   useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      setNowMs(Date.now());
+    }, 5000);
     return () => clearInterval(id);
   }, []);
 
@@ -76,6 +83,7 @@ export const KitchenDisplayPage: React.FC = () => {
   const { data: canteenDetail } = useQuery<Canteen>({
     queryKey: ["kitchen-canteen-detail", activeCanteenId],
     enabled: Boolean(activeCanteenId),
+    staleTime: 60_000,
     queryFn: async () => (await api.get(`/canteens/${activeCanteenId}`)).data,
   });
 
@@ -97,22 +105,21 @@ export const KitchenDisplayPage: React.FC = () => {
         qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
       }
     },
-    onEvent: () => {
-      qc.invalidateQueries({ queryKey: ["kitchen-orders", activeCanteenId] });
-      qc.invalidateQueries({ queryKey: ["kitchen-stations", activeCanteenId] });
-    },
   });
 
   const { data: stations = [] } = useQuery<any[]>({
     queryKey: ["kitchen-stations", activeCanteenId],
     enabled: Boolean(activeCanteenId),
+    staleTime: 15_000,
     queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/stations`)).data,
-    refetchInterval: kdsSyncStatus === "live" ? 30000 : 8000,
+    refetchInterval: kdsSyncStatus === "live" ? 45000 : 12000,
+    refetchIntervalInBackground: false,
   });
 
   const { data: kitchenStaff = [] } = useQuery<any[]>({
     queryKey: ["kitchen-staff-list", activeCanteenId],
     enabled: Boolean(activeCanteenId),
+    staleTime: 60_000,
     queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/staff`)).data,
   });
 
@@ -129,21 +136,23 @@ export const KitchenDisplayPage: React.FC = () => {
         const data = (await api.get(`/kitchen/canteens/${activeCanteenId}/orders${q}`)).data;
         return data;
       }),
-    refetchInterval: !isOnline ? false : kdsSyncStatus === "live" ? 30000 : 4000,
-    refetchIntervalInBackground: true,
+    refetchInterval: !isOnline ? false : kdsSyncStatus === "live" ? 30000 : 8000,
+    refetchIntervalInBackground: false,
   });
 
   const { data: groupedBoardItems = [], isLoading: groupedBoardLoading, refetch: refetchGroupedBoard } = useQuery<any[]>({
     queryKey: ["kitchen-grouped-board", activeCanteenId],
     enabled: Boolean(activeCanteenId && kdsView === "grouped"),
     queryFn: async () => (await api.get(`/kitchen/canteens/${activeCanteenId}/grouped-items`)).data,
-    refetchInterval: kdsSyncStatus === "live" ? 15000 : 5000,
+    refetchInterval: kdsSyncStatus === "live" ? 20000 : 8000,
+    refetchIntervalInBackground: false,
   });
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
     queryKey: ["kitchen-menu", activeCanteenId],
     enabled: Boolean(activeCanteenId && showAvailabilityModal),
-    refetchInterval: showAvailabilityModal ? 10000 : false,
+    refetchInterval: showAvailabilityModal ? 15000 : false,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items?include_inactive=false`)).data,
   });
 
@@ -380,7 +389,9 @@ export const KitchenDisplayPage: React.FC = () => {
       </div>
 
       {kdsView === "production" ? (
-        <ProductionManagementTab activeCanteenId={activeCanteenId} />
+        <Suspense fallback={<Card className="p-6 text-center text-xs text-slate-500">Loading production management...</Card>}>
+          <ProductionManagementTab activeCanteenId={activeCanteenId} />
+        </Suspense>
       ) : kdsView === "grouped" ? (
         <Card className="p-4 space-y-3">
           <div className="flex items-center justify-between">

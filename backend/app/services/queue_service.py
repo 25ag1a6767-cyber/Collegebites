@@ -85,6 +85,7 @@ def compute_order_queue_metrics_map(
     precomputed_staff_counts: Optional[dict[UUID, int]] = None,
     precomputed_avg_prep: Optional[dict[UUID, float]] = None,
     precomputed_active_counter_counts: Optional[dict[UUID, int]] = None,
+    precomputed_item_units: Optional[dict[UUID, int]] = None,
     precomputed_tz_name: Optional[str] = None,
 ) -> dict[UUID, dict]:
     """Compute real-time queue position, orders ahead, counter position, and dynamic wait from DB."""
@@ -126,10 +127,10 @@ def compute_order_queue_metrics_map(
     canteen_open_map: dict[UUID, bool] = {}
 
     all_waiting_ids = [wo.id for q_list in waiting_by_canteen.values() for wo in q_list]
-    waiting_item_units: dict[UUID, int] = {}
+    waiting_item_units: dict[UUID, int] = dict(precomputed_item_units or {})
     # Reuse already eager-loaded order.items from the caller to avoid redundant SQL round-trips
     for o in orders:
-        if "items" not in sa_inspect(o).unloaded:
+        if o.id not in waiting_item_units and "items" not in sa_inspect(o).unloaded:
             waiting_item_units[o.id] = max(1, sum(int(it.quantity or 0) for it in o.items))
     missing_item_ids = [oid for oid in all_waiting_ids if oid not in waiting_item_units]
     if missing_item_ids:
@@ -505,6 +506,16 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
             str(o.id),
         )
     )
+    active_order_ids = [o.id for o in active_orders]
+    item_counts: dict[UUID, int] = {}
+    if active_order_ids:
+        for oid, q_sum in db.execute(
+            select(OrderItem.order_id, func.coalesce(func.sum(OrderItem.quantity), 0))
+            .where(OrderItem.order_id.in_(active_order_ids))
+            .group_by(OrderItem.order_id)
+        ).all():
+            item_counts[oid] = int(q_sum or 0)
+
     metrics_map = compute_order_queue_metrics_map(
         db,
         active_orders,
@@ -512,9 +523,10 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         precomputed_canteens={canteen_id: canteen},
         precomputed_staff_counts={canteen_id: max(1, on_duty_staff)},
         precomputed_avg_prep={canteen_id: avg_prep},
+        precomputed_active_counter_counts={canteen_id: len(counters)},
+        precomputed_item_units={oid: max(1, cnt) for oid, cnt in item_counts.items()},
     )
 
-    active_order_ids = [o.id for o in active_orders]
     token_map = (
         {t.order_id: t.token_code for t in db.scalars(select(PickupToken).where(PickupToken.order_id.in_(active_order_ids))).all()}
         if active_order_ids
@@ -526,14 +538,6 @@ def get_live_queue_dashboard(db: Session, canteen_id: UUID) -> dict:
         if cust_ids
         else {}
     )
-    item_counts: dict[UUID, int] = {}
-    if active_order_ids:
-        for oid, q_sum in db.execute(
-            select(OrderItem.order_id, func.coalesce(func.sum(OrderItem.quantity), 0))
-            .where(OrderItem.order_id.in_(active_order_ids))
-            .group_by(OrderItem.order_id)
-        ).all():
-            item_counts[oid] = int(q_sum or 0)
 
     active_orders_queue = []
     delayed_orders = []
@@ -794,10 +798,17 @@ def get_queue_accuracy_metrics(db: Session, canteen_id: UUID, days: int = 30) ->
     """Compute real queue estimate vs actual ready-time error metrics from QueueEstimateHistory (zero fabrication)."""
     from app.models.enterprise import QueueEstimateHistory
 
+    eff_days = max(1, min(days, 365))
+    cache_ns = f"{NS_QUEUE}:{canteen_id}"
+    cache_key = f"accuracy:{eff_days}"
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=5.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
     canteen = db.get(Canteen, canteen_id)
     if not canteen or not canteen.is_active:
         raise HTTPException(status_code=404, detail="Canteen not found")
-    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365)))
+    since = datetime.now(timezone.utc) - timedelta(days=eff_days)
     rows = db.scalars(
         select(QueueEstimateHistory)
         .join(Order, Order.id == QueueEstimateHistory.order_id)
@@ -811,7 +822,7 @@ def get_queue_accuracy_metrics(db: Session, canteen_id: UUID, days: int = 30) ->
         .limit(1000)
     ).all()
     if not rows:
-        return {
+        out = {
             "canteen_id": str(canteen_id),
             "canteen_name": canteen.name,
             "lookback_days": days,
@@ -826,6 +837,8 @@ def get_queue_accuracy_metrics(db: Session, canteen_id: UUID, days: int = 30) ->
             "average_actual_minutes": None,
             "recent_samples": [],
         }
+        cache_manager.set_json(cache_ns, cache_key, out, ttl_seconds=60, l1_ttl=5.0)
+        return out
 
     errors = sorted(float(r.absolute_error_minutes or 0.0) for r in rows)
     n = len(errors)
@@ -834,7 +847,7 @@ def get_queue_accuracy_metrics(db: Session, canteen_id: UUID, days: int = 30) ->
     within_5 = round((sum(1 for e in errors if e <= 5.0) / n) * 100.0, 1)
     avg_est = round(sum(float(r.estimated_wait_minutes) for r in rows) / n, 2)
     avg_act = round(sum(float(r.actual_wait_minutes or 0.0) for r in rows) / n, 2)
-    return {
+    out = {
         "canteen_id": str(canteen_id),
         "canteen_name": canteen.name,
         "lookback_days": days,
@@ -860,6 +873,8 @@ def get_queue_accuracy_metrics(db: Session, canteen_id: UUID, days: int = 30) ->
             for r in rows[:25]
         ],
     }
+    cache_manager.set_json(cache_ns, cache_key, out, ttl_seconds=60, l1_ttl=5.0)
+    return out
 
 
 def update_queue_controls(db: Session, canteen_id: UUID, updates: dict, actor_user_id: UUID) -> dict:
@@ -931,5 +946,6 @@ def upsert_pickup_slot(
         db.add(slot)
     db.commit()
     db.refresh(slot)
+    invalidate_board_and_queue(canteen_id)
     safe_redis(lambda r: r.set(f"cb:slot:{slot.id}:reserved", slot.reserved_count, ex=86400))
     return slot

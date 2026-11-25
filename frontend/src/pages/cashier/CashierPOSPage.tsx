@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { CreditCard, Printer, QrCode, Search, ShoppingBag, Trash2 } from "lucide-react";
 import { api, getApiError } from "../../api/client";
@@ -24,6 +24,7 @@ export const CashierPOSPage: React.FC = () => {
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
@@ -47,12 +48,15 @@ export const CashierPOSPage: React.FC = () => {
   const { data: items = [] } = useQuery<FoodItem[]>({
     queryKey: ["pos-menu", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    refetchInterval: posSyncStatus === "live" ? 30000 : 8000,
+    staleTime: 30_000,
+    refetchInterval: posSyncStatus === "live" ? 120000 : 30000,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get(`/menus/canteens/${activeCanteenId}/items?available_only=true`)).data,
   });
 
   const { data: currentShift, refetch: refetchShift } = useQuery<any>({
     queryKey: ["pos-shift"],
+    staleTime: 30_000,
     queryFn: async () => (await api.get("/pos/shifts/current")).data,
   });
 
@@ -61,15 +65,19 @@ export const CashierPOSPage: React.FC = () => {
   const { data: pendingCounterOrders = [], refetch: refetchPendingCounter } = useQuery<Order[]>({
     queryKey: ["pos-pending-counter", activeCanteenId],
     enabled: Boolean(activeCanteenId),
+    staleTime: 10_000,
     queryFn: async () => (await api.get(`/pos/orders/pending-counter?canteen_id=${activeCanteenId}`)).data,
-    refetchInterval: posSyncStatus === "live" ? 30000 : 6000,
+    refetchInterval: posSyncStatus === "live" ? 45000 : 12000,
+    refetchIntervalInBackground: false,
   });
 
   const { data: activeOrders = [], refetch: refetchActiveOrders } = useQuery<Order[]>({
     queryKey: ["pos-active-orders", activeCanteenId],
     enabled: Boolean(activeCanteenId),
+    staleTime: 10_000,
     queryFn: async () => (await api.get(`/pos/orders/active?canteen_id=${activeCanteenId}`)).data,
-    refetchInterval: posSyncStatus === "live" ? 30000 : 5000,
+    refetchInterval: posSyncStatus === "live" ? 45000 : 12000,
+    refetchIntervalInBackground: false,
   });
 
   const [searchMenu, setSearchMenu] = useState("");
@@ -168,7 +176,10 @@ export const CashierPOSPage: React.FC = () => {
     }
   };
 
-  const filteredMenu = items.filter((i) => i.name.toLowerCase().includes(searchMenu.toLowerCase()));
+  const filteredMenu = useMemo(
+    () => items.filter((i) => i.name.toLowerCase().includes(searchMenu.toLowerCase())),
+    [items, searchMenu]
+  );
 
   return (
     <div className="mx-auto max-w-[1440px] px-4 py-5 space-y-5">

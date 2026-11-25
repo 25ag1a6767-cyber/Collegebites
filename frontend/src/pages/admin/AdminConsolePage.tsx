@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { Suspense, lazy, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api, getApiError } from "../../api/client";
 import { useRealtimeSync } from "../../hooks/useRealtimeSync";
@@ -9,19 +9,38 @@ import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
 import { NetworkSyncPanel } from "../../components/ui/NetworkSyncPanel";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
-import { BiAnalyticsPanel } from "./components/BiAnalyticsPanel";
-import { BackupRecoveryPanel } from "./components/BackupRecoveryPanel";
 import { LocationsTab } from "./components/LocationsTab";
 import { MenuTab, QRTab } from "./components/MenuQrTab";
 import { QueueTab, StaffTab } from "./components/QueueStaffTab";
 import { PromotionsTab, SystemTab } from "./components/PromotionsSystemTab";
 import { OrdersUsersTab } from "./components/OrdersUsersTab";
-import { ReconciliationPanel } from "./components/ReconciliationPanel";
-import { SecurityMonitorPanel } from "./components/SecurityMonitorPanel";
 import { WebsiteQrTab } from "./components/WebsiteQrTab";
-import { OperationsControlCenterPanel } from "./components/OperationsControlCenterPanel";
-import { MealPlansEventsInvoicesTab } from "./components/MealPlansEventsInvoicesTab";
-import { ForecastingAssistantTab } from "./components/ForecastingAssistantTab";
+
+const BiAnalyticsPanel = lazy(() =>
+  import("./components/BiAnalyticsPanel").then((m) => ({ default: m.BiAnalyticsPanel }))
+);
+const BackupRecoveryPanel = lazy(() =>
+  import("./components/BackupRecoveryPanel").then((m) => ({ default: m.BackupRecoveryPanel }))
+);
+const ReconciliationPanel = lazy(() =>
+  import("./components/ReconciliationPanel").then((m) => ({ default: m.ReconciliationPanel }))
+);
+const SecurityMonitorPanel = lazy(() =>
+  import("./components/SecurityMonitorPanel").then((m) => ({ default: m.SecurityMonitorPanel }))
+);
+const OperationsControlCenterPanel = lazy(() =>
+  import("./components/OperationsControlCenterPanel").then((m) => ({ default: m.OperationsControlCenterPanel }))
+);
+const MealPlansEventsInvoicesTab = lazy(() =>
+  import("./components/MealPlansEventsInvoicesTab").then((m) => ({ default: m.MealPlansEventsInvoicesTab }))
+);
+const ForecastingAssistantTab = lazy(() =>
+  import("./components/ForecastingAssistantTab").then((m) => ({ default: m.ForecastingAssistantTab }))
+);
+
+const AdminPanelFallback = () => (
+  <Card className="p-6 text-center text-xs text-slate-500">Loading operations module...</Card>
+);
 
 export const AdminConsolePage: React.FC = () => {
   const { pushToast } = useToast();
@@ -53,11 +72,13 @@ export const AdminConsolePage: React.FC = () => {
 
   const { data: college, refetch: refetchCollege } = useQuery<CollegeSettings>({
     queryKey: ["college-settings"],
+    staleTime: 300_000,
     queryFn: async () => (await api.get("/canteens/college")).data,
   });
 
   const { data: canteens = [], refetch: refetchCanteens } = useQuery<Canteen[]>({
-    queryKey: ["canteens-all"],
+    queryKey: ["canteens"],
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
@@ -89,8 +110,11 @@ export const AdminConsolePage: React.FC = () => {
       : scopeReportToCanteen && activeCanteenId
       ? activeCanteenId
       : "";
-  const { status: adminSyncStatus, lastSyncedAt: adminLastSyncedAt } = useRealtimeSync({
-    enabled: Boolean(user),
+  const adminRealtimeActive = Boolean(
+    user && (tab === "control_center" || tab === "analytics" || tab === "orders" || tab === "queue")
+  );
+  const { status: adminSyncStatus, lastSyncedAt: adminLastSyncedAt, triggerSync: triggerAdminSync } = useRealtimeSync({
+    enabled: adminRealtimeActive,
     ssePath: `/realtime/staff/orders/stream${streamCanteenScope ? `?canteen_id=${streamCanteenScope}` : ""}`,
     wsPath: activeCanteenId ? `/ws/kitchen/${activeCanteenId}` : "/ws/board/all",
     queryKeys: [["admin-report"], ["admin-queue"], ["admin-all-orders"]],
@@ -109,8 +133,10 @@ export const AdminConsolePage: React.FC = () => {
       reportComparePrevious,
     ],
     enabled: tab === "analytics",
+    staleTime: 15_000,
     queryFn: async () => (await api.get(`/reports/dashboard${reportQueryCanteen}`)).data,
-    refetchInterval: adminSyncStatus === "live" ? 30000 : 6000,
+    refetchInterval: adminSyncStatus === "live" ? 60000 : 20000,
+    refetchIntervalInBackground: false,
   });
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<FoodItem[]>({
@@ -237,15 +263,19 @@ export const AdminConsolePage: React.FC = () => {
       </div>
 
       {tab === "control_center" && (
-        <OperationsControlCenterPanel activeCanteenId={activeCanteenId} isCollegeAdmin={isCollegeAdmin} />
+        <Suspense fallback={<AdminPanelFallback />}>
+          <OperationsControlCenterPanel activeCanteenId={activeCanteenId} isCollegeAdmin={isCollegeAdmin} />
+        </Suspense>
       )}
 
       {tab === "meal_events_invoices" && (
-        <MealPlansEventsInvoicesTab
-          activeCanteenId={activeCanteenId}
-          menuItems={menuItems}
-          downloadBlob={downloadBlob}
-        />
+        <Suspense fallback={<AdminPanelFallback />}>
+          <MealPlansEventsInvoicesTab
+            activeCanteenId={activeCanteenId}
+            menuItems={menuItems}
+            downloadBlob={downloadBlob}
+          />
+        </Suspense>
       )}
 
       {tab === "analytics" && reportLoading && !report && (
@@ -255,35 +285,46 @@ export const AdminConsolePage: React.FC = () => {
         <Card className="p-4 border-red-200 bg-red-50 text-xs text-red-700">Failed to load BI analytics report.</Card>
       )}
       {tab === "analytics" && report && (
-        <BiAnalyticsPanel
-          report={report}
-          isCollegeAdmin={isCollegeAdmin}
-          scopeReportToCanteen={scopeReportToCanteen}
-          setScopeReportToCanteen={setScopeReportToCanteen}
-          reportPreset={reportPreset}
-          setReportPreset={setReportPreset}
-          reportStartDate={reportStartDate}
-          setReportStartDate={setReportStartDate}
-          reportEndDate={reportEndDate}
-          setReportEndDate={setReportEndDate}
-          reportCategoryId={reportCategoryId}
-          setReportCategoryId={setReportCategoryId}
-          reportFoodItemId={reportFoodItemId}
-          setReportFoodItemId={setReportFoodItemId}
-          reportComparePrevious={reportComparePrevious}
-          setReportComparePrevious={setReportComparePrevious}
-          categories={categories}
-          menuItems={menuItems}
-          reportQueryCanteen={reportQueryCanteen}
-          downloadBlob={downloadBlob}
-        />
+        <Suspense fallback={<AdminPanelFallback />}>
+          <BiAnalyticsPanel
+            report={report}
+            isCollegeAdmin={isCollegeAdmin}
+            scopeReportToCanteen={scopeReportToCanteen}
+            setScopeReportToCanteen={setScopeReportToCanteen}
+            reportPreset={reportPreset}
+            setReportPreset={setReportPreset}
+            reportStartDate={reportStartDate}
+            setReportStartDate={setReportStartDate}
+            reportEndDate={reportEndDate}
+            setReportEndDate={setReportEndDate}
+            reportCategoryId={reportCategoryId}
+            setReportCategoryId={setReportCategoryId}
+            reportFoodItemId={reportFoodItemId}
+            setReportFoodItemId={setReportFoodItemId}
+            reportComparePrevious={reportComparePrevious}
+            setReportComparePrevious={setReportComparePrevious}
+            categories={categories}
+            menuItems={menuItems}
+            reportQueryCanteen={reportQueryCanteen}
+            downloadBlob={downloadBlob}
+          />
+        </Suspense>
       )}
 
       {tab === "ai_forecast_assistant" && (
-        <ForecastingAssistantTab activeCanteenId={activeCanteenId} canTrainForecast canViewForecast canViewAudit />
+        <Suspense fallback={<AdminPanelFallback />}>
+          <ForecastingAssistantTab activeCanteenId={activeCanteenId} canTrainForecast canViewForecast canViewAudit />
+        </Suspense>
       )}
 
-      {tab === "orders" && <OrdersUsersTab activeCanteenId={activeCanteenId} />}
+      {tab === "orders" && (
+        <OrdersUsersTab
+          activeCanteenId={activeCanteenId}
+          syncStatus={adminSyncStatus}
+          lastSyncedAt={adminLastSyncedAt}
+          triggerSync={triggerAdminSync}
+        />
+      )}
 
       {tab === "locations" && (
         <LocationsTab canteens={canteens} activeCanteenId={activeCanteenId} refetchCanteens={refetchCanteens} />
@@ -456,14 +497,22 @@ export const AdminConsolePage: React.FC = () => {
       )}
 
       {tab === "reconciliation" && (
-        <ReconciliationPanel isCollegeAdmin={isCollegeAdmin} activeCanteenId={activeCanteenId} downloadBlob={downloadBlob} />
+        <Suspense fallback={<AdminPanelFallback />}>
+          <ReconciliationPanel isCollegeAdmin={isCollegeAdmin} activeCanteenId={activeCanteenId} downloadBlob={downloadBlob} />
+        </Suspense>
       )}
 
       {tab === "security" && (
-        <SecurityMonitorPanel isCollegeAdmin={isCollegeAdmin} activeCanteenId={activeCanteenId} />
+        <Suspense fallback={<AdminPanelFallback />}>
+          <SecurityMonitorPanel isCollegeAdmin={isCollegeAdmin} activeCanteenId={activeCanteenId} />
+        </Suspense>
       )}
 
-      {tab === "backup" && isCollegeAdmin && <BackupRecoveryPanel downloadBlob={downloadBlob} />}
+      {tab === "backup" && isCollegeAdmin && (
+        <Suspense fallback={<AdminPanelFallback />}>
+          <BackupRecoveryPanel downloadBlob={downloadBlob} />
+        </Suspense>
+      )}
 
       {tab === "network" && <NetworkSyncPanel />}
 

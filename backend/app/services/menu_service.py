@@ -326,6 +326,8 @@ def list_food_items(
     available_only: bool = False,
     include_inactive: bool = False,
     sort_by: str = "popularity",
+    limit: Optional[int] = None,
+    offset: int = 0,
 ) -> list[FoodItemOut]:
     cache_ns = f"{NS_MENU}:{canteen_id}"
     q_norm = (q or "").strip().lower()
@@ -334,9 +336,11 @@ def list_food_items(
         f"feat={featured}|pop={popular}|spec={todays_special}|rec={recommended}|"
         f"avail={int(bool(available_only))}|inc={int(bool(include_inactive))}|sort={sort_by}"
     )
-    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=2.0)
+    eff_offset = max(0, int(offset or 0))
+    hit, cached = cache_manager.get_json(cache_ns, cache_key, l1_ttl=3.0)
     if hit and isinstance(cached, list):
-        return [FoodItemOut.model_validate(x) for x in cached]
+        sliced = cached[eff_offset : eff_offset + limit] if limit is not None else cached[eff_offset:]
+        return [FoodItemOut.model_validate(x) for x in sliced]
 
     canteen = db.get(Canteen, canteen_id)
     if not canteen or (not include_inactive and not canteen.is_active):
@@ -423,9 +427,9 @@ def list_food_items(
         cache_key,
         [s.model_dump(mode="json") for s in serialized],
         ttl_seconds=10 if q_norm else 20,
-        l1_ttl=2.0,
+        l1_ttl=3.0,
     )
-    return serialized
+    return serialized[eff_offset : eff_offset + limit] if limit is not None else serialized[eff_offset:]
 
 
 def get_food_item(db: Session, item_id: UUID) -> FoodItemOut:
@@ -689,8 +693,15 @@ def update_addon(db: Session, addon: FoodAddon, payload: FoodAddonUpdate, actor_
     return addon
 
 
-def list_addons(db: Session, canteen_id: UUID) -> list[FoodAddon]:
-    return list(db.scalars(select(FoodAddon).where(FoodAddon.canteen_id == canteen_id).order_by(FoodAddon.name)).all())
+def list_addons(db: Session, canteen_id: UUID) -> list[dict]:
+    cache_ns = f"{NS_MENU}:{canteen_id}"
+    hit, cached = cache_manager.get_json(cache_ns, "addons", l1_ttl=5.0)
+    if hit and isinstance(cached, list):
+        return cached
+    rows = list(db.scalars(select(FoodAddon).where(FoodAddon.canteen_id == canteen_id).order_by(FoodAddon.name)).all())
+    out = [FoodAddonOut.model_validate(a).model_dump(mode="json") for a in rows]
+    cache_manager.set_json(cache_ns, "addons", out, ttl_seconds=60, l1_ttl=5.0)
+    return out
 
 
 def add_addon_to_food_item(db: Session, item_id: UUID, payload: FoodItemAddonCreate, actor_user_id: UUID) -> FoodAddon:
@@ -765,13 +776,19 @@ def unlink_addon_from_food_item(db: Session, item_id: UUID, addon_id: UUID, acto
     return {"status": "removed", "item_id": str(item_id), "addon_id": str(addon_id)}
 
 
-def _serialize_schedule(db: Session, sched: MenuSchedule) -> MenuScheduleOut:
-    item_ids = list(
-        db.scalars(
-            select(MenuAvailability.food_item_id).where(
-                MenuAvailability.menu_schedule_id == sched.id, MenuAvailability.is_available.is_(True)
-            )
-        ).all()
+def _serialize_schedule(
+    db: Session, sched: MenuSchedule, *, preloaded_item_ids: Optional[list[UUID]] = None
+) -> MenuScheduleOut:
+    item_ids = (
+        preloaded_item_ids
+        if preloaded_item_ids is not None
+        else list(
+            db.scalars(
+                select(MenuAvailability.food_item_id).where(
+                    MenuAvailability.menu_schedule_id == sched.id, MenuAvailability.is_available.is_(True)
+                )
+            ).all()
+        )
     )
     return MenuScheduleOut(
         id=sched.id,
@@ -897,8 +914,21 @@ def review_restore_approval(
 
 
 def list_schedules(db: Session, canteen_id: UUID) -> list[MenuScheduleOut]:
-    rows = db.scalars(select(MenuSchedule).where(MenuSchedule.canteen_id == canteen_id).order_by(MenuSchedule.start_time)).all()
-    return [_serialize_schedule(db, s) for s in rows]
+    rows = list(
+        db.scalars(select(MenuSchedule).where(MenuSchedule.canteen_id == canteen_id).order_by(MenuSchedule.start_time)).all()
+    )
+    if not rows:
+        return []
+    sched_ids = [s.id for s in rows]
+    items_by_sched: dict[UUID, list[UUID]] = {sid: [] for sid in sched_ids}
+    for sid, fid in db.execute(
+        select(MenuAvailability.menu_schedule_id, MenuAvailability.food_item_id).where(
+            MenuAvailability.menu_schedule_id.in_(sched_ids),
+            MenuAvailability.is_available.is_(True),
+        )
+    ).all():
+        items_by_sched.setdefault(sid, []).append(fid)
+    return [_serialize_schedule(db, s, preloaded_item_ids=items_by_sched.get(s.id, [])) for s in rows]
 
 
 def create_schedule(db: Session, payload: MenuScheduleCreate, actor_user_id: UUID) -> MenuScheduleOut:

@@ -10,6 +10,11 @@ from uuid import UUID
 
 import redis
 
+try:
+    import orjson as _orjson
+except Exception:  # pragma: no cover
+    _orjson = None
+
 from app.core.config import settings
 from app.core.redis_client import get_redis
 
@@ -24,6 +29,9 @@ NS_BOARD = "board"
 NS_QUEUE = "queue"
 NS_REPORTS = "reports"
 NS_AUTH = "auth"
+NS_CAMPUS_INTEL = "campus_intel"
+NS_COMMAND_CENTER = "command_center"
+NS_ANNOUNCEMENTS = "announcements"
 
 
 class _BoundedL1Cache:
@@ -89,7 +97,7 @@ class CacheManager:
 
     def __init__(self) -> None:
         self._l1 = _BoundedL1Cache(max_entries=settings.CACHE_L1_MAX_ENTRIES)
-        self._ver_l1 = _BoundedL1Cache(max_entries=256)
+        self._ver_l1 = _BoundedL1Cache(max_entries=4096)
         self._lock = threading.Lock()
         self._redis_circuit_open_until: float = 0.0
         self._stats = {
@@ -178,7 +186,7 @@ class CacheManager:
                 raw = get_redis().get(full_key)
                 self._close_redis_circuit()
                 if raw is not None:
-                    parsed = json.loads(raw)
+                    parsed = _orjson.loads(raw) if _orjson is not None else json.loads(raw)
                     eff_l1 = min(
                         float(l1_ttl if l1_ttl is not None else settings.CACHE_L1_MAX_TTL_SECONDS),
                         float(settings.CACHE_L1_MAX_TTL_SECONDS),
@@ -217,7 +225,10 @@ class CacheManager:
             self._l1.set(full_key, value, ttl_seconds=eff_l1)
         if not self._redis_circuit_open():
             try:
-                payload = json.dumps(value, default=str, separators=(",", ":"))
+                if _orjson is not None:
+                    payload = _orjson.dumps(value, option=_orjson.OPT_NON_STR_KEYS, default=str).decode("utf-8")
+                else:
+                    payload = json.dumps(value, default=str, separators=(",", ":"))
                 get_redis().setex(full_key, int(max(1, ttl_seconds)), payload)
                 self._close_redis_circuit()
                 self._inc("sets")
@@ -307,18 +318,44 @@ def invalidate_canteens(canteen_id: Optional[UUID | str] = None) -> None:
 
 def invalidate_menu(canteen_id: Optional[UUID | str] = None) -> None:
     cache_manager.invalidate_namespace(NS_MENU)
+    cache_manager.invalidate_namespace(NS_CAMPUS_INTEL)
+    cache_manager.invalidate_namespace(NS_COMMAND_CENTER)
     if canteen_id is not None:
         cache_manager.invalidate_namespace(_ns_scoped(NS_MENU, canteen_id))
+        cache_manager.invalidate_namespace(_ns_scoped(NS_CAMPUS_INTEL, canteen_id))
+        cache_manager.invalidate_namespace(_ns_scoped(NS_COMMAND_CENTER, canteen_id))
 
 
 def invalidate_board_and_queue(canteen_id: Optional[UUID | str] = None) -> None:
     cache_manager.invalidate_namespace(NS_BOARD)
     cache_manager.invalidate_namespace(NS_QUEUE)
     cache_manager.invalidate_namespace(NS_CANTEENS)
+    cache_manager.invalidate_namespace(NS_CAMPUS_INTEL)
+    cache_manager.invalidate_namespace(NS_COMMAND_CENTER)
     if canteen_id is not None:
         cache_manager.invalidate_namespace(_ns_scoped(NS_BOARD, canteen_id))
         cache_manager.invalidate_namespace(_ns_scoped(NS_QUEUE, canteen_id))
         cache_manager.invalidate_namespace(_ns_scoped(NS_CANTEENS, canteen_id))
+        cache_manager.invalidate_namespace(_ns_scoped(NS_CAMPUS_INTEL, canteen_id))
+        cache_manager.invalidate_namespace(_ns_scoped(NS_COMMAND_CENTER, canteen_id))
+
+
+def invalidate_campus_intel(canteen_id: Optional[UUID | str] = None) -> None:
+    cache_manager.invalidate_namespace(NS_CAMPUS_INTEL)
+    cache_manager.invalidate_namespace(NS_COMMAND_CENTER)
+    if canteen_id is not None:
+        cache_manager.invalidate_namespace(_ns_scoped(NS_CAMPUS_INTEL, canteen_id))
+        cache_manager.invalidate_namespace(_ns_scoped(NS_COMMAND_CENTER, canteen_id))
+
+
+def invalidate_command_center(canteen_id: Optional[UUID | str] = None) -> None:
+    cache_manager.invalidate_namespace(NS_COMMAND_CENTER)
+    if canteen_id is not None:
+        cache_manager.invalidate_namespace(_ns_scoped(NS_COMMAND_CENTER, canteen_id))
+
+
+def invalidate_announcements() -> None:
+    cache_manager.invalidate_namespace(NS_ANNOUNCEMENTS)
 
 
 def invalidate_reports(canteen_id: Optional[UUID | str] = None) -> None:
