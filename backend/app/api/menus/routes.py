@@ -418,8 +418,15 @@ def delete_schedule(
     if not sched:
         raise HTTPException(status_code=404, detail="Menu schedule not found")
     enforce_canteen_scope(principal, sched.canteen_id)
+    canteen_id = sched.canteen_id
+    from sqlalchemy import delete as _sa_delete
+    from app.core.cache import invalidate_menu
+    from app.models.menu import MenuAvailability
+
+    db.execute(_sa_delete(MenuAvailability).where(MenuAvailability.menu_schedule_id == sched.id))
     db.delete(sched)
     db.commit()
+    invalidate_menu(canteen_id)
     return {"status": "deleted", "id": str(schedule_id)}
 
 

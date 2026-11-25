@@ -23,7 +23,6 @@ export interface CollegeSettings {
   currency_symbol: string;
   cancellation_policy_text: string;
   kiosk_enabled: boolean;
-  guest_otp_required: boolean;
   razorpay_enabled: boolean;
   cash_at_counter_enabled: boolean;
   pay_at_pickup_enabled: boolean;

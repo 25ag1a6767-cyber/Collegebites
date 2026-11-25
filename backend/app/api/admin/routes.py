@@ -19,6 +19,7 @@ from app.core.permissions import (
     client_ip_from_request,
     enforce_canteen_scope,
     get_optional_principal,
+    load_user_roles_and_permissions,
     require_roles,
     scoped_canteen_for_principal,
 )
@@ -333,6 +334,9 @@ def create_staff(
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN, ROLE_CANTEEN_MANAGER)),
     db: Session = Depends(get_db),
 ):
+    if ROLE_SUPER_ADMIN not in principal.roles:
+        if any(r == ROLE_SUPER_ADMIN for r in payload.role_names):
+            raise HTTPException(status_code=403, detail="Only super_admin may create super_admin accounts")
     if ROLE_CANTEEN_MANAGER in principal.roles and not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN):
         if any(r in {"super_admin", "college_admin"} for r in payload.role_names):
             payload.role_names = [r for r in payload.role_names if r not in {"super_admin", "college_admin"}]
@@ -351,6 +355,12 @@ def assign_roles(
     principal: AuthenticatedPrincipal = Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN)),
     db: Session = Depends(get_db),
 ):
+    if ROLE_SUPER_ADMIN not in principal.roles:
+        if ROLE_SUPER_ADMIN in payload.role_names:
+            raise HTTPException(status_code=403, detail="Only super_admin may assign the super_admin role")
+        existing_roles, _, _ = load_user_roles_and_permissions(db, user_id)
+        if ROLE_SUPER_ADMIN in existing_roles:
+            raise HTTPException(status_code=403, detail="Only super_admin may modify super_admin roles")
     return auth_service.assign_user_roles(db, user_id, payload, principal.user.id, client_ip_from_request(request))
 
 
@@ -371,6 +381,10 @@ def update_user_status(
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    if ROLE_SUPER_ADMIN not in principal.roles:
+        target_roles, _, _ = load_user_roles_and_permissions(db, target.id)
+        if ROLE_SUPER_ADMIN in target_roles:
+            raise HTTPException(status_code=403, detail="Only super_admin may modify super_admin account status")
     target.is_active = payload.is_active
     revoked_session_ids: list[UUID] = []
     if not payload.is_active:
@@ -466,6 +480,8 @@ def update_user_custom_permissions(
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    if ROLE_SUPER_ADMIN not in principal.roles and any(c.strip() == "*" for c in payload.grant):
+        raise HTTPException(status_code=403, detail="Only super_admin may grant wildcard permissions")
 
     old_rows = db.scalars(select(UserPermission).where(UserPermission.user_id == target.id)).all()
     for row in old_rows:

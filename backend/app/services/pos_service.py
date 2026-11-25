@@ -34,7 +34,7 @@ def create_pos_walkin_order(
         order_channel="pos",
         payment_method=payload.payment_method,
         coupon_code=None,
-        guest_name=payload.customer_name,
+        guest_name=payload.customer_name or "Walk-in Customer",
         guest_phone=payload.customer_phone or "0000000000",
         notes=payload.notes,
         use_cart=False,

@@ -5,7 +5,6 @@ import { LifeBuoy, MessageSquare, Send } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import { BrandLogo } from "../../components/branding/BrandLogo";
-import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { Badge, Button, Card, Input, Select, useToast } from "../../components/ui/Primitives";
 
 export const SupportPage: React.FC = () => {
@@ -19,7 +18,7 @@ export const SupportPage: React.FC = () => {
   const [description, setDescription] = useState("");
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
-  const [guestOtpToken, setGuestOtpToken] = useState("");
+  const [guestTicketNumber, setGuestTicketNumber] = useState("");
   const [guestTickets, setGuestTickets] = useState<any[]>([]);
   const [guestMessages, setGuestMessages] = useState<any[]>([]);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
@@ -71,13 +70,13 @@ export const SupportPage: React.FC = () => {
     }
   };
 
-  const loadGuestThread = async (ticketId: string, tokenOverride?: string) => {
-    const tok = tokenOverride || guestOtpToken;
-    if (!tok || !guestPhone.trim()) return;
+  const loadGuestThread = async (ticketId: string, ticketNumOverride?: string) => {
+    const tNum = ticketNumOverride || guestTicketNumber.trim();
+    if (!tNum || !guestPhone.trim()) return;
     try {
       const res = await api.post(`/support/tickets/${ticketId}/guest-thread`, {
+        ticket_number: tNum,
         guest_phone: guestPhone.trim(),
-        otp_verification_token: tok,
       });
       setSelectedTicketId(ticketId);
       setGuestMessages(res.data.messages || []);
@@ -96,13 +95,15 @@ export const SupportPage: React.FC = () => {
         setReplyText("");
         refetchMessages();
       } else {
+        const activeTicket = guestTickets.find((t) => t.id === selectedTicketId);
+        const tNum = activeTicket?.ticket_number || guestTicketNumber.trim();
         await api.post(`/support/tickets/${selectedTicketId}/guest-messages`, {
+          ticket_number: tNum,
           guest_phone: guestPhone.trim(),
-          otp_verification_token: guestOtpToken,
           message: replyText,
         });
         setReplyText("");
-        await loadGuestThread(selectedTicketId);
+        await loadGuestThread(selectedTicketId, tNum);
       }
     } catch (err) {
       pushToast(getApiError(err), "error");
@@ -184,20 +185,29 @@ export const SupportPage: React.FC = () => {
           </h2>
           {!user && (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2 text-xs">
-              <div className="font-bold text-slate-700">Guest Ticket Lookup (via Live OTP)</div>
-              <OtpVerificationBox
-                target={guestPhone}
-                onTargetChange={setGuestPhone}
-                targetPlaceholder="Guest Mobile or Email"
-                purpose="guest_checkout"
-                verifyButtonLabel="Verify & Load Tickets"
-                compact
-                onVerified={async (tok) => {
-                  setGuestOtpToken(tok);
+              <div className="font-bold text-slate-700">Guest Ticket Lookup (Ticket Number + Mobile)</div>
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  value={guestTicketNumber}
+                  onChange={(e) => setGuestTicketNumber(e.target.value)}
+                  placeholder="Ticket # (e.g. TKT-...)"
+                />
+                <Input
+                  value={guestPhone}
+                  onChange={(e) => setGuestPhone(e.target.value)}
+                  placeholder="Guest Mobile"
+                />
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                className="w-full"
+                disabled={!guestTicketNumber.trim() || !guestPhone.trim()}
+                onClick={async () => {
                   try {
                     const rows = await api.post("/support/tickets/guest/lookup", {
+                      ticket_number: guestTicketNumber.trim(),
                       guest_phone: guestPhone.trim(),
-                      otp_verification_token: tok,
                     });
                     setGuestTickets(rows.data);
                     pushToast(`Loaded ${rows.data.length} ticket(s)`, "success");
@@ -205,7 +215,9 @@ export const SupportPage: React.FC = () => {
                     pushToast(getApiError(err), "error");
                   }
                 }}
-              />
+              >
+                Load Guest Ticket
+              </Button>
             </div>
           )}
 
@@ -217,7 +229,7 @@ export const SupportPage: React.FC = () => {
                 <button
                   key={t.id}
                   type="button"
-                  onClick={() => (user ? setSelectedTicketId(t.id) : void loadGuestThread(t.id))}
+                  onClick={() => (user ? setSelectedTicketId(t.id) : void loadGuestThread(t.id, t.ticket_number))}
                   className={`w-full rounded-xl border p-3 text-left text-xs ${
                     selectedTicketId === t.id ? "border-[#76010d] bg-[#fdf8f0]" : "border-slate-200"
                   }`}
@@ -250,7 +262,7 @@ export const SupportPage: React.FC = () => {
                   </div>
                 ))}
               </div>
-              {(user || guestOtpToken) && (
+              {(user || (guestPhone.trim() && (guestTicketNumber.trim() || guestTickets.length > 0))) && (
                 <form onSubmit={sendReply} className="flex gap-2">
                   <Input value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Type a reply..." />
                   <Button size="sm" type="submit" disabled={busy}>

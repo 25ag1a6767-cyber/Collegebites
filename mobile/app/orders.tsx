@@ -1,8 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import { authApi } from "../src/api/auth.api";
 import { cartApi } from "../src/api/cart.api";
 import { getMobileApiError } from "../src/api/client";
 import { ordersApi } from "../src/api/orders.api";
@@ -16,18 +15,9 @@ export default function OrdersScreen() {
   const [lookupNo, setLookupNo] = useState("");
   const [lookupTok, setLookupTok] = useState("");
   const [recoverPhone, setRecoverPhone] = useState("");
-  const [recoverOtp, setRecoverOtp] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCooldown, setOtpCooldown] = useState(0);
   const [recovered, setRecovered] = useState<any[]>([]);
   const [statusMsg, setStatusMsg] = useState("");
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (otpCooldown <= 0) return;
-    const id = setInterval(() => setOtpCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
-    return () => clearInterval(id);
-  }, [otpCooldown]);
 
   const reorder = async (o: any) => {
     setStatusMsg("");
@@ -130,73 +120,36 @@ export default function OrdersScreen() {
         </View>
         {!user && (
           <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: "#f1f5f9", gap: 6 }}>
-            <Text style={{ fontSize: 11, fontWeight: "700", color: "#475569" }}>Recover Lost Guest Orders via OTP</Text>
+            <Text style={{ fontSize: 11, fontWeight: "700", color: "#475569" }}>Recover Guest Order (Order # + Contact)</Text>
             <View style={{ flexDirection: "row", gap: 6 }}>
               <TextInput
                 style={[styles.input, { flex: 1 }]}
                 value={recoverPhone}
                 onChangeText={setRecoverPhone}
-                placeholder="+919876543210"
+                placeholder="Guest Phone or Email"
               />
               <Pressable
-                disabled={busy || otpCooldown > 0 || !recoverPhone.trim()}
+                disabled={busy || !lookupNo.trim() || !recoverPhone.trim()}
                 onPress={async () => {
                   setBusy(true);
                   setStatusMsg("");
                   try {
-                    const r = await authApi.requestOtp({ target: recoverPhone.trim(), purpose: "guest_checkout" });
-                    setOtpSent(true);
-                    setOtpCooldown(Number(r.resend_cooldown_seconds ?? 60));
+                    const rows = await ordersApi.lookupGuestOrders(lookupNo.trim(), recoverPhone.trim());
+                    (rows || []).forEach((ord: any) => {
+                      if (ord.guest_access_token) saveGuestOrderToken(ord.order_number, ord.guest_access_token);
+                    });
+                    setRecovered(rows || []);
                   } catch (e: unknown) {
-                    setStatusMsg(getMobileApiError(e, "Failed to send OTP"));
+                    setStatusMsg(getMobileApiError(e, "Lookup failed"));
                   } finally {
                     setBusy(false);
                   }
                 }}
-                style={styles.goBtn}
+                style={[styles.goBtn, { backgroundColor: "#0f172a" }]}
               >
-                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>
-                  {otpCooldown > 0 ? `Wait ${otpCooldown}s` : otpSent ? "Resend" : "Send OTP"}
-                </Text>
+                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>Find</Text>
               </Pressable>
             </View>
-            {otpSent && (
-              <View style={{ flexDirection: "row", gap: 6 }}>
-                <TextInput
-                  style={[styles.input, { flex: 1 }]}
-                  value={recoverOtp}
-                  onChangeText={setRecoverOtp}
-                  placeholder="6-digit OTP"
-                  maxLength={6}
-                />
-                <Pressable
-                  disabled={busy || recoverOtp.trim().length < 6}
-                  onPress={async () => {
-                    setBusy(true);
-                    setStatusMsg("");
-                    try {
-                      const ver = await authApi.verifyOtp({
-                        target: recoverPhone.trim(),
-                        purpose: "guest_checkout",
-                        code: recoverOtp.trim(),
-                      });
-                      const rows = await ordersApi.lookupGuestOrders(recoverPhone.trim(), ver.verification_token);
-                      (rows || []).forEach((ord: any) => {
-                        if (ord.guest_access_token) saveGuestOrderToken(ord.order_number, ord.guest_access_token);
-                      });
-                      setRecovered(rows || []);
-                    } catch (e: unknown) {
-                      setStatusMsg(getMobileApiError(e, "Lookup failed"));
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                  style={[styles.goBtn, { backgroundColor: "#0f172a" }]}
-                >
-                  <Text style={{ color: "#fff", fontWeight: "700", fontSize: 11 }}>Find</Text>
-                </Pressable>
-              </View>
-            )}
             {recovered.map((ro) => (
               <Pressable key={ro.id} onPress={() => router.push(`/order/${ro.order_number}`)} style={styles.card}>
                 <Text style={styles.ordNo}>{ro.order_number} ({ro.status})</Text>

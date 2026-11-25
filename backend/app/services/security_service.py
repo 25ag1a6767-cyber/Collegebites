@@ -28,7 +28,15 @@ def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
 
 def _find_user_by_identifier(db: Session, identifier: str) -> Optional[User]:
     ident = identifier.strip()
-    return db.scalar(select(User).where(or_(User.email == ident.lower(), User.phone == ident)))
+    digits = "".join(ch for ch in ident if ch.isdigit())
+    phone_candidates = {ident}
+    if len(digits) == 10:
+        phone_candidates.update({digits, f"+91{digits}", f"91{digits}"})
+    elif len(digits) == 12 and digits.startswith("91"):
+        phone_candidates.update({f"+{digits}", digits, digits[-10:]})
+    elif digits:
+        phone_candidates.update({digits, f"+{digits}"})
+    return db.scalar(select(User).where(or_(User.email == ident.lower(), User.phone.in_(phone_candidates))))
 
 
 def create_security_alert(

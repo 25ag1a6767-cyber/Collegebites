@@ -339,8 +339,14 @@ def update_cart_item(
     if not ci:
         raise HTTPException(status_code=404, detail="Cart item not found")
     cart = db.get(Cart, ci.cart_id)
-    if not cart or cart.status != "active" or (user_id and cart.user_id != user_id) or (not user_id and cart.guest_session_id != guest_session_id):
+    if not cart or cart.status != "active":
         raise HTTPException(status_code=403, detail="Not authorized for this cart")
+    if user_id is not None:
+        if cart.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized for this cart")
+    else:
+        if cart.user_id is not None or not guest_session_id or cart.guest_session_id != guest_session_id:
+            raise HTTPException(status_code=403, detail="Not authorized for this cart")
 
     if payload.quantity == 0:
         canteen_id = cart.canteen_id

@@ -187,19 +187,19 @@ def test_duplicate_handover_fraud_alert_and_rate_limit_enforcement(client: TestC
     assert client.get("/api/v1/security/dashboard", headers=student["headers"]).status_code == 403
     assert client.get("/api/v1/security/audit-logs", headers=manager["headers"]).status_code == 403
 
-    # Explicitly exercise SlowAPI rate limiter on /otp/request (temporarily enabled)
+    # Explicitly exercise SlowAPI rate limiter on /auth/password-reset/request (temporarily enabled)
     prev_enabled = limiter.enabled
     limiter.enabled = True
     try:
         hit_429 = False
         for idx in range(12):
             resp = client.post(
-                "/api/v1/auth/otp/request",
-                json={"target": f"rl{idx}@collegebites.edu", "purpose": "login"},
+                "/api/v1/auth/password-reset/request",
+                json={"identifier": f"rl{idx}@collegebites.edu"},
             )
             if resp.status_code == 429:
                 hit_429 = True
                 break
-        assert hit_429, "Expected HTTP 429 from rate limiter on /auth/otp/request"
+        assert hit_429, "Expected HTTP 429 from rate limiter on /auth/password-reset/request"
     finally:
         limiter.enabled = prev_enabled

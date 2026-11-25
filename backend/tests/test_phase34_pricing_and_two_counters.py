@@ -960,8 +960,8 @@ def test_25_third_counter_blocked_and_migration_safely_cleans_legacy_db(client: 
             conn.execute(
                 text(
                     "INSERT INTO college_settings (id, college_name, college_short_code, default_tax_rate_percent, currency_code, currency_symbol, "
-                    "cancellation_policy_text, kiosk_enabled, guest_otp_required, razorpay_enabled, cash_at_counter_enabled, pay_at_pickup_enabled, college_timezone, created_at, updated_at) "
-                    "VALUES (:id, 'ACE', 'ACE', 5.00, 'INR', 'Rs', 'Policy', 0, 1, 1, 0, 0, 'Asia/Kolkata', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    "cancellation_policy_text, kiosk_enabled, razorpay_enabled, cash_at_counter_enabled, pay_at_pickup_enabled, college_timezone, created_at, updated_at) "
+                    "VALUES (:id, 'ACE', 'ACE', 5.00, 'INR', 'Rs', 'Policy', 0, 1, 0, 0, 'Asia/Kolkata', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 ),
                 {"id": uuid4().hex},
             )

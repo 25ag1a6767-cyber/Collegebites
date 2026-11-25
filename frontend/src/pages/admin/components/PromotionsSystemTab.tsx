@@ -270,14 +270,7 @@ export const SystemTab: React.FC<{
                   Razorpay Enabled
                 </label>
                 <Badge tone="green">Razorpay Only (No Cash)</Badge>
-                <label className="flex items-center gap-1.5 font-semibold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(college.guest_otp_required)}
-                    onChange={() => void toggleSetting("guest_otp_required", !college.guest_otp_required, "Guest OTP")}
-                  />
-                  Guest OTP Required
-                </label>
+                <Badge tone="blue">Password Auth (OTP Removed)</Badge>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button

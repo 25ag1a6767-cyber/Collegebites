@@ -25,7 +25,7 @@ def dispatch_notification_task(self, channel: str, target: str, subject: str, bo
 
 @celery_app.task
 def cleanup_expired_auth_artifacts_task() -> dict:
-    """Remove expired OTP records, expired refresh tokens, and stale unpaid slot reservations."""
+    """Remove expired password reset tokens, refresh tokens, sessions, and stale unpaid slot reservations."""
     with SessionLocal() as db:
         return cleanup_expired_auth_artifacts(db)
 

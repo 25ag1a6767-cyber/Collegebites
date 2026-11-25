@@ -29,7 +29,7 @@ const ONBOARDING_SLIDES = [
   {
     icon: "card-outline" as const,
     title: "Pay Online Instantly",
-    body: "Checkout as a student or live OTP-verified guest using Razorpay — backed by cryptographic server verification.",
+    body: "Checkout as a signed-in student or direct guest using Razorpay — backed by cryptographic server verification.",
   },
   {
     icon: "qr-code-outline" as const,

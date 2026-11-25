@@ -59,23 +59,11 @@ export default function CheckoutScreen() {
   const [guestName, setGuestName] = useState("");
   const [guestEmail, setGuestEmail] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
-  const [otpCode, setOtpCode] = useState("");
-  const [otpToken, setOtpToken] = useState<string | null>(null);
-  const [otpNotice, setOtpNotice] = useState<string | null>(null);
-  const [otpCooldown, setOtpCooldown] = useState(0);
-  const [otpSending, setOtpSending] = useState(false);
-  const [otpVerifying, setOtpVerifying] = useState(false);
   const [acceptedPolicy, setAcceptedPolicy] = useState(false);
   const [orderNotes, setOrderNotes] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [busy, setBusy] = useState(false);
-  const [idemKey] = useState(() => `cb-mob-idem-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-
-  useEffect(() => {
-    if (otpCooldown <= 0) return;
-    const id = setInterval(() => setOtpCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
-    return () => clearInterval(id);
-  }, [otpCooldown]);
+  const [idemKey, setIdemKey] = useState(() => `cb-mob-idem-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
   const updateQty = async (cartItemId: string, nextQty: number) => {
     try {
@@ -83,49 +71,6 @@ export default function CheckoutScreen() {
       refetchCart();
     } catch (e: unknown) {
       setErrorMsg(getMobileApiError(e, "Could not update item"));
-    }
-  };
-
-  const otpTarget = guestEmail.trim() || guestPhone.trim();
-
-  const requestOtp = async () => {
-    setErrorMsg("");
-    setOtpNotice(null);
-    if (!otpTarget) {
-      setErrorMsg("Enter your email or mobile number first.");
-      return;
-    }
-    setOtpSending(true);
-    try {
-      const res = await authApi.requestOtp({ target: otpTarget, purpose: "guest_checkout" });
-      setOtpCooldown(Number(res.resend_cooldown_seconds ?? 60));
-      setOtpNotice(res.message || "Verification code sent.");
-    } catch (e: unknown) {
-      setErrorMsg(getMobileApiError(e, "Failed to send OTP"));
-    } finally {
-      setOtpSending(false);
-    }
-  };
-
-  const verifyOtp = async () => {
-    setErrorMsg("");
-    if (otpCode.trim().length !== 6) {
-      setErrorMsg("Enter the 6-digit verification code.");
-      return;
-    }
-    setOtpVerifying(true);
-    try {
-      const res = await authApi.verifyOtp({
-        target: otpTarget,
-        purpose: "guest_checkout",
-        code: otpCode.trim(),
-      });
-      setOtpToken(res.verification_token);
-      setOtpNotice("OTP verified for guest checkout.");
-    } catch (e: unknown) {
-      setErrorMsg(getMobileApiError(e, "OTP verification failed"));
-    } finally {
-      setOtpVerifying(false);
     }
   };
 
@@ -145,10 +90,6 @@ export default function CheckoutScreen() {
         setErrorMsg(parsed.error.issues[0]?.message || "Enter valid guest details.");
         return;
       }
-      if (college?.guest_otp_required && !otpToken) {
-        setErrorMsg("Verify guest OTP before placing order.");
-        return;
-      }
     }
     setBusy(true);
     try {
@@ -164,13 +105,13 @@ export default function CheckoutScreen() {
           guest_name: !user ? guestName.trim() : null,
           guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
           guest_email: !user && guestEmail.trim() ? guestEmail.trim() : null,
-          guest_otp_verification_token: !user ? otpToken : null,
           notes: orderNotes.trim() || null,
           accepted_policy: true,
         },
         idemKey
       );
       if (ord.guest_access_token) saveGuestOrderToken(ord.order_number, ord.guest_access_token);
+      setIdemKey(`cb-mob-idem-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       qc.invalidateQueries({ queryKey: ["m-cart", activeCanteenId] });
       qc.invalidateQueries({ queryKey: ["m-orders"] });
       router.push(`/order/${ord.order_number}`);
@@ -310,51 +251,22 @@ export default function CheckoutScreen() {
 
       {!user && (
         <View style={styles.box}>
-          <Text style={styles.sub}>Guest Ordering (Live Email / Mobile OTP Required)</Text>
+          <Text style={styles.sub}>Direct Guest Ordering Details</Text>
           <TextInput style={styles.input} value={guestName} onChangeText={setGuestName} placeholder="Full Name" />
           <TextInput
             style={styles.input}
+            value={guestPhone}
+            onChangeText={setGuestPhone}
+            placeholder="Mobile Number (+919876543210)"
+          />
+          <TextInput
+            style={styles.input}
             value={guestEmail}
-            onChangeText={(v) => {
-              setGuestEmail(v);
-              setOtpToken(null);
-            }}
+            onChangeText={setGuestEmail}
             autoCapitalize="none"
             keyboardType="email-address"
-            placeholder="Email Address for OTP"
+            placeholder="Email Address (Optional for receipts)"
           />
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            <TextInput
-              style={[styles.input, { flex: 1 }]}
-              value={guestPhone}
-              onChangeText={(v) => {
-                setGuestPhone(v);
-                if (!guestEmail.trim()) setOtpToken(null);
-              }}
-              placeholder="+919876543210"
-            />
-            <Pressable disabled={otpSending || otpCooldown > 0} onPress={requestOtp} style={styles.btnSec}>
-              <Text style={{ color: "#fff", fontWeight: "700" }}>
-                {otpSending ? "Sending..." : otpCooldown > 0 ? `Wait ${otpCooldown}s` : "Send OTP"}
-              </Text>
-            </Pressable>
-          </View>
-          {otpNotice && <Text style={{ fontSize: 12, color: "#047857" }}>{otpNotice}</Text>}
-          <View style={{ flexDirection: "row", gap: 8 }}>
-            <TextInput
-              style={[styles.input, { flex: 1 }]}
-              value={otpCode}
-              onChangeText={(v) => setOtpCode(v.replace(/\D/g, "").slice(0, 6))}
-              keyboardType="number-pad"
-              maxLength={6}
-              placeholder="6-digit OTP"
-            />
-            <Pressable disabled={otpVerifying || Boolean(otpToken)} onPress={verifyOtp} style={styles.btnSec}>
-              <Text style={{ color: "#fff", fontWeight: "700" }}>
-                {otpToken ? "Verified ✓" : otpVerifying ? "..." : "Verify"}
-              </Text>
-            </Pressable>
-          </View>
         </View>
       )}
 

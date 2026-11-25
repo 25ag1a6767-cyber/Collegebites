@@ -404,9 +404,9 @@ def _dispatch_user_notifications(
         if not created or not opt_in or not send_external or notif is None:
             return
 
-        from app.integrations.email_provider import resolve_email_otp_provider
+        from app.integrations.email_provider import resolve_email_provider
 
-        email_provider_name = resolve_email_otp_provider() or "smtp"
+        email_provider_name = resolve_email_provider() or "smtp"
         delivery_errors: dict[str, str] = {}
         user = db.get(User, order.customer_id)
         if user and user.email and (not pref or pref.email_enabled):

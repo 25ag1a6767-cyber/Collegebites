@@ -8,7 +8,6 @@ import { useAppStore } from "../../store/useAppStore";
 import type { FoodItem } from "../../types";
 import { enableBrowserPushNotifications } from "../../utils/notifications";
 import { openRazorpayCustomCheckout } from "../../utils/razorpay";
-import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 
@@ -149,8 +148,6 @@ export const ProfilePage: React.FC = () => {
   const [collegeId, setCollegeId] = useState("");
   const [department, setDepartment] = useState("");
   const [referralInput, setReferralInput] = useState("");
-  const [showEmailVerify, setShowEmailVerify] = useState(false);
-  const [showPhoneVerify, setShowPhoneVerify] = useState(false);
   const [curPw, setCurPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [busy, setBusy] = useState(false);
@@ -249,62 +246,13 @@ export const ProfilePage: React.FC = () => {
               <div>
                 <div className="mb-1 flex items-center justify-between text-xs font-bold text-slate-600">
                   <span>Email Address ({user.email})</span>
-                  {user.is_verified ? (
-                    <Badge tone="green">Verified</Badge>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setShowEmailVerify((v) => !v)}
-                      className="text-xs font-bold text-[#76010d] hover:underline"
-                    >
-                      {showEmailVerify ? "Hide Email OTP" : "Verify Email via OTP"}
-                    </button>
-                  )}
+                  <Badge tone="green">Active</Badge>
                 </div>
-                {showEmailVerify && !user.is_verified && (
-                  <OtpVerificationBox
-                    target={user.email}
-                    purpose="email_verify"
-                    verifyButtonLabel="Confirm Email OTP"
-                    customVerifyRequest={async (code) => {
-                      await api.post("/auth/email/verify", { target: user.email, code });
-                      setShowEmailVerify(false);
-                      qc.invalidateQueries({ queryKey: ["customer-profile"] });
-                      pushToast("Email verified!", "success");
-                    }}
-                  />
-                )}
               </div>
             )}
             <div>
               <label className="mb-1 block text-xs font-bold text-slate-600">Mobile Number</label>
-              <div className="flex gap-2">
-                <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+919876543210" />
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={busy || !phone.trim()}
-                  onClick={() => setShowPhoneVerify((v) => !v)}
-                >
-                  {showPhoneVerify ? "Close" : "Verify OTP"}
-                </Button>
-              </div>
-              {showPhoneVerify && phone.trim() && (
-                <div className="mt-2">
-                  <OtpVerificationBox
-                    target={phone.trim()}
-                    purpose="phone_verify"
-                    verifyButtonLabel="Confirm Phone OTP"
-                    customVerifyRequest={async (code) => {
-                      await api.post("/auth/phone/verify", { target: phone.trim(), code });
-                      setShowPhoneVerify(false);
-                      qc.invalidateQueries({ queryKey: ["customer-profile"] });
-                      pushToast("Mobile number verified!", "success");
-                    }}
-                  />
-                </div>
-              )}
+              <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+919876543210" />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>

@@ -4,8 +4,10 @@ from app.api.admin.routes import router as admin_router
 from app.api.ai_assistant.routes import router as ai_assistant_router
 from app.api.auth.routes import router as auth_router
 from app.api.backups.routes import router as backups_router
+from app.api.campus_intelligence.routes import router as campus_intelligence_router
 from app.api.canteens.routes import router as canteens_router
 from app.api.carts.routes import router as carts_router
+from app.api.command_center.routes import router as command_center_router
 from app.api.customers.routes import router as customers_router
 from app.api.events.routes import router as events_router
 from app.api.food_safety.routes import router as food_safety_router
@@ -72,3 +74,5 @@ api_router.include_router(production_router)
 api_router.include_router(reordering_router)
 api_router.include_router(forecasting_router)
 api_router.include_router(ai_assistant_router)
+api_router.include_router(campus_intelligence_router)
+api_router.include_router(command_center_router)

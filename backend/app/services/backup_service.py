@@ -31,7 +31,7 @@ CONFIRM_RESTORE_PHRASE = "CONFIRM PRODUCTION RESTORE"
 EXCLUDED_BACKUP_TABLES: set[str] = {
     "sessions",
     "refresh_tokens",
-    "otp_verifications",
+    "password_reset_tokens",
     "backup_records",
     "backup_settings",
     "recovery_logs",

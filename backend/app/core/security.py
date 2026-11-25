@@ -31,12 +31,14 @@ def hmac_sha256_hex(secret: str, value: str) -> str:
     return hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def generate_otp_code() -> str:
-    return f"{secrets.randbelow(1_000_000):06d}"
+def generate_password_reset_token() -> tuple[str, str]:
+    """Generate a high-entropy single-use password reset token and its HMAC-SHA256 storage hash."""
+    raw = secrets.token_urlsafe(32)
+    return raw, hmac_sha256_hex(settings.SECRET_KEY, f"pwd_reset:{raw}")
 
 
-def hash_otp(target: str, purpose: str, code: str) -> str:
-    return hmac_sha256_hex(settings.SECRET_KEY, f"{purpose}:{target}:{code}")
+def hash_password_reset_token(raw_token: str) -> str:
+    return hmac_sha256_hex(settings.SECRET_KEY, f"pwd_reset:{raw_token.strip()}")
 
 
 def create_access_token(

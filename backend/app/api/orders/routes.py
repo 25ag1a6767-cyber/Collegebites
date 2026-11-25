@@ -79,14 +79,14 @@ def my_orders(
 
 
 class GuestOrderLookupRequest(BaseModel):
-    guest_phone: str = Field(min_length=8, max_length=32)
-    otp_verification_token: str = Field(min_length=8)
+    order_number: str = Field(min_length=6, max_length=48)
+    guest_contact: str = Field(min_length=5, max_length=160)
 
 
 @router.post("/guest/lookup", response_model=list[OrderOut])
 def guest_order_lookup(payload: GuestOrderLookupRequest, db: Session = Depends(get_db)):
     return order_service.lookup_guest_orders(
-        db, guest_phone=payload.guest_phone, otp_verification_token=payload.otp_verification_token
+        db, order_number=payload.order_number, guest_contact=payload.guest_contact
     )
 
 
