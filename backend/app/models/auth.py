@@ -166,26 +166,16 @@ class RefreshToken(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
-class OTPVerification(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    __tablename__ = "otp_verifications"
+class PasswordResetToken(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "password_reset_tokens"
     __table_args__ = (
-        Index("ix_otp_target_purpose", "target", "purpose"),
-        Index("ix_otp_ip_created", "ip_address", "created_at"),
-        Index("ix_otp_user_created", "user_id", "created_at"),
+        Index("ix_pwd_reset_user_created", "user_id", "created_at"),
+        Index("ix_pwd_reset_expires", "expires_at"),
     )
 
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    target: Mapped[str] = mapped_column(String(160), nullable=False)  # normalized phone or email
-    purpose: Mapped[str] = mapped_column(String(48), nullable=False)  # register | login | guest_checkout | password_reset | phone_verify | email_verify
-    channel: Mapped[Optional[str]] = mapped_column(String(24))  # email | sms
-    provider: Mapped[Optional[str]] = mapped_column(String(48))  # smtp | resend | sendgrid | twilio | webhook
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String(64))
-    otp_hash: Mapped[str] = mapped_column(String(128), nullable=False)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
-    resend_available_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    consumed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     invalidated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    verification_token: Mapped[Optional[str]] = mapped_column(String(128), index=True)

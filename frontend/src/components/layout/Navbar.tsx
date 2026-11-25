@@ -176,9 +176,12 @@ const NavbarContent: React.FC = () => {
           )}
         </div>
 
-        <nav className="flex flex-wrap items-center gap-1.5">
+        <nav aria-label="Main navigation" className="flex flex-wrap items-center gap-1.5">
           <Link to="/" className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">
             Menu
+          </Link>
+          <Link to="/campus-hub" className="rounded-lg bg-[#fdf8f0] border border-[#76010d]/20 px-2.5 py-1.5 text-xs font-bold text-[#76010d] hover:bg-[#fdedce]">
+            Campus Live &amp; Voice
           </Link>
           <Link to="/orders" className="rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">
             Orders
@@ -247,6 +250,14 @@ const NavbarContent: React.FC = () => {
               className="inline-flex items-center gap-1 rounded-lg bg-indigo-50 px-2.5 py-1.5 text-xs font-semibold text-indigo-800 hover:bg-indigo-100"
             >
               <Bot className="h-3.5 w-3.5" /> AI Ops
+            </Link>
+          )}
+          {isStaff(["canteen_manager", "college_admin"]) && (
+            <Link
+              to="/command-center"
+              className="inline-flex items-center gap-1 rounded-lg bg-[#76010d] px-2.5 py-1.5 text-xs font-bold text-white hover:bg-[#5d010a]"
+            >
+              <Bot className="h-3.5 w-3.5" /> Command Center
             </Link>
           )}
           {isStaff(["canteen_manager", "college_admin"]) && (

@@ -33,7 +33,6 @@ from app.models.payment import OrderQRCode, Payment, PaymentTransaction, PickupT
 from app.models.promotion import Coupon, CouponRedemption, LoyaltyAccount, LoyaltyTransaction
 from app.schemas.order import CheckoutItemDirectIn, CheckoutRequest, OrderItemOut, OrderOut, PickupSlotOut
 from app.services.audit_service import record_audit_log
-from app.services.auth_service import validate_guest_otp_token
 from app.services.cart_service import evaluate_coupon_discount, get_active_cart
 from app.services.college_service import compute_canteen_live_status, get_college_config_snapshot, get_or_create_college_settings
 from app.services.menu_service import compute_schedule_availability_map
@@ -423,22 +422,11 @@ def checkout_order(
         if not table or table.canteen_id != canteen.id:
             raise HTTPException(status_code=400, detail="Invalid dining table")
 
-    # Validate guest / customer identity
+    # Validate guest / customer identity (direct guest checkout without OTP; walk-in cashier POS exempt)
     is_guest = user_id is None
-    matched_guest_otp_target: Optional[str] = None
-    if is_guest:
+    if is_guest and not cashier_user_id:
         if not payload.guest_name or not payload.guest_phone:
             raise HTTPException(status_code=400, detail="Guest name and mobile number are required")
-        # Walk-in POS / Kiosk orders don't require OTP; Guest web/mobile verifies mobile or email OTP
-        if college.guest_otp_required and not cashier_user_id and payload.order_channel != "kiosk":
-            if validate_guest_otp_token(db, payload.guest_phone, payload.guest_otp_verification_token, consume=False):
-                matched_guest_otp_target = payload.guest_phone
-            elif payload.guest_email and validate_guest_otp_token(
-                db, payload.guest_email, payload.guest_otp_verification_token, consume=False
-            ):
-                matched_guest_otp_target = payload.guest_email
-            if not matched_guest_otp_target:
-                raise HTTPException(status_code=400, detail="Guest OTP verification (email or mobile) is required before checkout")
 
     # Gather line items from cart or direct payload
     line_specs: list[CheckoutItemDirectIn] = list(payload.direct_items)
@@ -773,15 +761,6 @@ def checkout_order(
             )
         )
 
-        if matched_guest_otp_target:
-            if not validate_guest_otp_token(
-                db, matched_guest_otp_target, payload.guest_otp_verification_token, consume=True
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Guest OTP verification token has expired or was already used",
-                )
-
         if cart:
             cart.status = "converted"
 
@@ -1015,11 +994,10 @@ def get_order_authorized(
 
 
 def lookup_guest_orders(
-    db: Session, *, guest_phone: str, otp_verification_token: str
+    db: Session, *, order_number: str, guest_contact: str
 ) -> list[OrderOut]:
-    clean_target = guest_phone.strip()
-    if not validate_guest_otp_token(db, clean_target, otp_verification_token, consume=False):
-        raise HTTPException(status_code=403, detail="Valid guest OTP verification is required")
+    clean_num = order_number.strip().upper()
+    clean_target = guest_contact.strip()
     digits = "".join(ch for ch in clean_target if ch.isdigit())
     phone_candidates = {clean_target}
     if len(digits) == 10:
@@ -1031,17 +1009,14 @@ def lookup_guest_orders(
         if "@" in clean_target
         else Order.guest_phone.in_(phone_candidates)
     )
-    orders = db.scalars(
+    order = db.scalar(
         select(Order)
         .options(selectinload(Order.items).selectinload(OrderItem.customizations), selectinload(Order.status_history))
-        .where(Order.is_guest.is_(True), where_clause)
-        .order_by(Order.created_at.desc())
-        .limit(20)
-    ).all()
-    results: list[OrderOut] = []
-    for o in orders:
-        raw_tok, tok_hash = generate_guest_access_token()
-        o.guest_access_token_hash = tok_hash
-        results.append(serialize_order(db, o, raw_guest_token=raw_tok))
+        .where(Order.is_guest.is_(True), Order.order_number == clean_num, where_clause)
+    )
+    if not order:
+        raise HTTPException(status_code=404, detail="No matching guest order found for this order number and contact")
+    raw_tok, tok_hash = generate_guest_access_token()
+    order.guest_access_token_hash = tok_hash
     db.commit()
-    return results
+    return [serialize_order(db, order, raw_guest_token=raw_tok)]

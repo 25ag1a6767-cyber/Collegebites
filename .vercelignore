@@ -1,11 +1,17 @@
 .git
 .venv
+.pgdata
+.pg.log
+.pytest_cache
 backend/.venv
 backend/.env
 .env.local
 .env*.local
 backend/.pytest_cache
 backend/tests
+*.db
+*.db-*
+COLLEGEBITES_SMART_CAMPUS_FINAL_REPORT.pdf
 frontend/node_modules
 frontend/dist
 mobile

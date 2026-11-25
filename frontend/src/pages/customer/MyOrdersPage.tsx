@@ -8,7 +8,6 @@ import { useOfflineStore } from "../../store/useOfflineStore";
 import { fetchWithOfflineCache } from "../../utils/offlineSync";
 import type { Order } from "../../types";
 import { BrandEmptyState, BrandLoadingState } from "../../components/branding/BrandLogo";
-import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 export const MyOrdersPage: React.FC = () => {
@@ -149,30 +148,43 @@ export const MyOrdersPage: React.FC = () => {
         )}
 
         <div className="mt-4 border-t border-slate-100 pt-3 space-y-2">
-          <div className="text-[11px] font-bold uppercase text-slate-500">Lost your guest token? Recover orders via Live OTP</div>
-          <OtpVerificationBox
-            target={guestPhone}
-            onTargetChange={setGuestPhone}
-            targetPlaceholder="Guest Email or +919876543210"
-            purpose="guest_checkout"
-            verifyButtonLabel="Verify & Find Orders"
-            compact
-            onVerified={async (verToken) => {
-              try {
-                const list = await api.post<Order[]>("/orders/guest/lookup", {
-                  guest_phone: guestPhone.trim(),
-                  otp_verification_token: verToken,
-                });
-                list.data.forEach((o) => {
-                  if (o.guest_access_token) saveGuestOrderToken(o.order_number, o.guest_access_token);
-                });
-                setRecoveredOrders(list.data);
-                pushToast(`Found ${list.data.length} guest order(s)`, "success");
-              } catch (err) {
-                pushToast(getApiError(err), "error");
-              }
-            }}
-          />
+          <div className="text-[11px] font-bold uppercase text-slate-500">Recover a Guest Order (Order Number + Contact)</div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <Input
+              aria-label="Guest order number"
+              value={lookupOrderNum}
+              onChange={(e) => setLookupOrderNum(e.target.value)}
+              placeholder="Order # (e.g. CB-2026...)"
+            />
+            <Input
+              aria-label="Guest mobile or email"
+              value={guestPhone}
+              onChange={(e) => setGuestPhone(e.target.value)}
+              placeholder="Guest Mobile or Email"
+            />
+            <Button
+              type="button"
+              size="sm"
+              disabled={!lookupOrderNum.trim() || !guestPhone.trim()}
+              onClick={async () => {
+                try {
+                  const list = await api.post<Order[]>("/orders/guest/lookup", {
+                    order_number: lookupOrderNum.trim(),
+                    guest_contact: guestPhone.trim(),
+                  });
+                  list.data.forEach((o) => {
+                    if (o.guest_access_token) saveGuestOrderToken(o.order_number, o.guest_access_token);
+                  });
+                  setRecoveredOrders(list.data);
+                  pushToast(`Found ${list.data.length} matching guest order(s)`, "success");
+                } catch (err) {
+                  pushToast(getApiError(err), "error");
+                }
+              }}
+            >
+              Find Guest Order
+            </Button>
+          </div>
           {recoveredOrders.length > 0 && (
             <div className="flex flex-wrap gap-2 pt-1">
               {recoveredOrders.map((ro) => (

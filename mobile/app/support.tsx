@@ -1,8 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
-import { authApi } from "../src/api/auth.api";
 import { getMobileApiError, mobileApi } from "../src/api/client";
 import { profileApi } from "../src/api/profile.api";
 import { useMobileStore } from "../src/store/useMobileStore";
@@ -25,16 +24,8 @@ export default function SupportScreen() {
   const [description, setDescription] = useState("");
   const [guestName, setGuestName] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
-  const [guestOtp, setGuestOtp] = useState("");
-  const [guestOtpTok, setGuestOtpTok] = useState("");
-  const [otpCooldown, setOtpCooldown] = useState(0);
+  const [guestTicketNumber, setGuestTicketNumber] = useState("");
   const [guestTickets, setGuestTickets] = useState<any[]>([]);
-
-  useEffect(() => {
-    if (otpCooldown <= 0) return;
-    const id = setInterval(() => setOtpCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
-    return () => clearInterval(id);
-  }, [otpCooldown]);
   const [guestMessages, setGuestMessages] = useState<any[]>([]);
   const [statusMsg, setStatusMsg] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -53,13 +44,13 @@ export default function SupportScreen() {
     queryFn: async () => (await mobileApi.get(`/support/tickets/${selectedId}/messages`)).data,
   });
 
-  const loadGuestThread = async (ticketId: string, tokenOverride?: string) => {
-    const tok = tokenOverride || guestOtpTok;
-    if (!tok || !guestPhone.trim()) return;
+  const loadGuestThread = async (ticketId: string, ticketNumOverride?: string) => {
+    const tNum = ticketNumOverride || guestTicketNumber.trim();
+    if (!tNum || !guestPhone.trim()) return;
     try {
       const res = await mobileApi.post(`/support/tickets/${ticketId}/guest-thread`, {
+        ticket_number: tNum,
         guest_phone: guestPhone.trim(),
-        otp_verification_token: tok,
       });
       setSelectedId(ticketId);
       setGuestMessages(res.data.messages || []);
@@ -101,14 +92,16 @@ export default function SupportScreen() {
         await mobileApi.post(`/support/tickets/${selectedId}/messages`, { message: replyText.trim() });
         setReplyText("");
         refetchMessages();
-      } else if (guestOtpTok) {
+      } else if (guestPhone.trim()) {
+        const activeT = guestTickets.find((t) => t.id === selectedId);
+        const tNum = activeT?.ticket_number || guestTicketNumber.trim();
         await mobileApi.post(`/support/tickets/${selectedId}/guest-messages`, {
+          ticket_number: tNum,
           guest_phone: guestPhone.trim(),
-          otp_verification_token: guestOtpTok,
           message: replyText.trim(),
         });
         setReplyText("");
-        await loadGuestThread(selectedId);
+        await loadGuestThread(selectedId, tNum);
       }
     } catch (e: unknown) {
       setStatusMsg(getMobileApiError(e, "Could not send message"));
@@ -157,58 +150,29 @@ export default function SupportScreen() {
 
       {!user && (
         <View style={styles.card}>
-          <Text style={styles.secTitle}>Guest Ticket OTP Lookup</Text>
-          <View style={{ flexDirection: "row", gap: 6 }}>
-            <TextInput style={[styles.input, { flex: 1 }]} value={guestPhone} onChangeText={setGuestPhone} placeholder="Guest Phone" />
-            <Pressable
-              disabled={busy || otpCooldown > 0 || !guestPhone.trim()}
-              onPress={async () => {
-                setBusy(true);
-                try {
-                  const r = await authApi.requestOtp({ target: guestPhone.trim(), purpose: "guest_checkout" });
-                  setOtpCooldown(Number(r.resend_cooldown_seconds ?? 60));
-                  if (r.message) setStatusMsg(r.message);
-                } catch (e: unknown) {
-                  setStatusMsg(getMobileApiError(e));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              style={[styles.btn, { paddingHorizontal: 12 }]}
-            >
-              <Text style={styles.btnTxt}>{otpCooldown > 0 ? `Wait ${otpCooldown}s` : "Send OTP"}</Text>
-            </Pressable>
-          </View>
-          <View style={{ flexDirection: "row", gap: 6 }}>
-            <TextInput style={[styles.input, { flex: 1 }]} value={guestOtp} onChangeText={setGuestOtp} placeholder="6-digit OTP" maxLength={6} />
-            <Pressable
-              disabled={busy || guestOtp.trim().length < 6}
-              onPress={async () => {
-                setBusy(true);
-                try {
-                  const ver = await authApi.verifyOtp({
-                    target: guestPhone.trim(),
-                    purpose: "guest_checkout",
-                    code: guestOtp.trim(),
-                  });
-                  const tok = ver.verification_token;
-                  setGuestOtpTok(tok);
-                  const rows = await mobileApi.post("/support/tickets/guest/lookup", {
-                    guest_phone: guestPhone.trim(),
-                    otp_verification_token: tok,
-                  });
-                  setGuestTickets(rows.data || []);
-                } catch (e: unknown) {
-                  setStatusMsg(getMobileApiError(e));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              style={[styles.btn, { paddingHorizontal: 12, backgroundColor: "#0f172a" }]}
-            >
-              <Text style={styles.btnTxt}>Verify</Text>
-            </Pressable>
-          </View>
+          <Text style={styles.secTitle}>Guest Ticket Lookup</Text>
+          <TextInput style={styles.input} value={guestTicketNumber} onChangeText={setGuestTicketNumber} placeholder="Ticket # (e.g. TKT-...)" />
+          <TextInput style={styles.input} value={guestPhone} onChangeText={setGuestPhone} placeholder="Guest Mobile" />
+          <Pressable
+            disabled={busy || !guestTicketNumber.trim() || !guestPhone.trim()}
+            onPress={async () => {
+              setBusy(true);
+              try {
+                const rows = await mobileApi.post("/support/tickets/guest/lookup", {
+                  ticket_number: guestTicketNumber.trim(),
+                  guest_phone: guestPhone.trim(),
+                });
+                setGuestTickets(rows.data || []);
+              } catch (e: unknown) {
+                setStatusMsg(getMobileApiError(e));
+              } finally {
+                setBusy(false);
+              }
+            }}
+            style={[styles.btn, { backgroundColor: "#0f172a" }]}
+          >
+            <Text style={styles.btnTxt}>Load Ticket</Text>
+          </Pressable>
         </View>
       )}
 
@@ -218,7 +182,7 @@ export default function SupportScreen() {
           {(user ? tickets : guestTickets).map((t) => (
             <Pressable
               key={t.id}
-              onPress={() => (user ? setSelectedId(t.id) : void loadGuestThread(t.id))}
+              onPress={() => (user ? setSelectedId(t.id) : void loadGuestThread(t.id, t.ticket_number))}
               style={[styles.ticketRow, selectedId === t.id && { borderColor: "#76010d", backgroundColor: "#fdf8f0" }]}
             >
               <Text style={{ fontWeight: "800", fontSize: 13 }}>{t.ticket_number} • {t.subject}</Text>
@@ -236,7 +200,7 @@ export default function SupportScreen() {
                   <Text style={{ fontSize: 12 }}>{m.message}</Text>
                 </View>
               ))}
-              {(user || guestOtpTok) && (
+              {(user || Boolean(guestPhone.trim())) && (
                 <View style={{ flexDirection: "row", gap: 8 }}>
                   <TextInput style={[styles.input, { flex: 1 }]} value={replyText} onChangeText={setReplyText} placeholder="Write reply..." />
                   <Pressable disabled={busy} onPress={sendReply} style={[styles.btn, { paddingHorizontal: 14 }]}>

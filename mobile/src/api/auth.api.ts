@@ -15,28 +15,14 @@ export const authApi = {
     referral_code?: string | null;
   }) => (await mobileApi.post("/auth/register", payload)).data,
 
-  requestOtp: async (payload: {
-    target: string;
-    purpose: "register" | "guest_checkout" | "login" | "phone_verify" | "email_verify" | "password_reset";
-  }) => (await mobileApi.post("/auth/otp/request", payload)).data,
+  requestPasswordReset: async (payload: { identifier: string }) =>
+    (await mobileApi.post("/auth/password-reset/request", payload)).data,
 
-  verifyOtp: async (payload: {
-    target: string;
-    purpose: "register" | "guest_checkout" | "login" | "phone_verify" | "email_verify" | "password_reset";
-    code: string;
-  }) => (await mobileApi.post("/auth/otp/verify", payload)).data,
-
-  otpLogin: async (payload: { target: string; code: string; device_info?: string }) =>
-    (await mobileApi.post("/auth/otp/login", payload)).data,
-
-  confirmPasswordReset: async (payload: { target: string; code: string; new_password: string }) =>
+  confirmPasswordReset: async (payload: { token: string; new_password: string }) =>
     (await mobileApi.post("/auth/password-reset/confirm", payload)).data,
 
   changePassword: async (payload: { current_password: string; new_password: string }) =>
     (await mobileApi.post("/auth/change-password", payload)).data,
-
-  verifyPhone: async (payload: { target?: string; code: string }) =>
-    (await mobileApi.post("/auth/phone/verify", payload)).data,
 
   me: async () => (await mobileApi.get("/auth/me")).data,
 

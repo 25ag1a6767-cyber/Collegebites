@@ -119,7 +119,7 @@ def test_security_sqli_headers_and_concurrent_handover_and_tokens(client: TestCl
     assert statuses.count(409) == 3
 
 
-def test_section_34_full_end_to_end_acceptance_scenario(client: TestClient, otp_capture):
+def test_section_34_full_end_to_end_acceptance_scenario(client: TestClient):
     """Verifies all 27 steps of Section 34 Final Acceptance Criteria end-to-end."""
     kitchen = login_as(client, "kitchen@collegebites.edu", "Staff@12345")
     pickup = login_as(client, "pickup@collegebites.edu", "Staff@12345")
@@ -157,14 +157,7 @@ def test_section_34_full_end_to_end_acceptance_scenario(client: TestClient, otp_
         json={"canteen_id": canteen_id, "food_item_id": coffee["id"], "quantity": 2, "sugar_level": "Regular"},
     )
 
-    # 6-7. Guest verifies OTP & proceeds to checkout (backend validates prices, availability, capacity)
-    otp = client.post("/api/v1/auth/otp/request", json={"target": "+919876500001", "purpose": "guest_checkout"}).json()
-    assert "dev_otp" not in otp
-    ver = client.post(
-        "/api/v1/auth/otp/verify",
-        json={"target": "+919876500001", "purpose": "guest_checkout", "code": otp_capture.latest_code("+919876500001")},
-    ).json()
-
+    # 6-7. Guest proceeds directly to checkout (backend validates prices, availability, capacity; no OTP)
     checkout = client.post(
         "/api/v1/orders/checkout",
         headers=guest_headers,
@@ -174,7 +167,6 @@ def test_section_34_full_end_to_end_acceptance_scenario(client: TestClient, otp_
             "location_qr_code": "CB-MAIN-C2",
             "guest_name": "E2E Guest",
             "guest_phone": "+919876500001",
-            "guest_otp_verification_token": ver["verification_token"],
             "payment_method": "razorpay",
             "order_type": "pickup",
             "order_channel": "qr",

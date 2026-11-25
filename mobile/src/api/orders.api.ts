@@ -18,7 +18,6 @@ export const ordersApi = {
       guest_name?: string | null;
       guest_phone?: string | null;
       guest_email?: string | null;
-      guest_otp_verification_token?: string | null;
       notes?: string | null;
       accepted_policy: boolean;
     },
@@ -37,11 +36,11 @@ export const ordersApi = {
     return (await mobileApi.get(`/orders/${encodeURIComponent(orderIdOrNumber)}${suffix}`)).data;
   },
 
-  lookupGuestOrders: async (guestPhone: string, otpVerificationToken: string) =>
+  lookupGuestOrders: async (orderNumber: string, guestContact: string) =>
     (
       await mobileApi.post("/orders/guest/lookup", {
-        guest_phone: guestPhone,
-        otp_verification_token: otpVerificationToken,
+        order_number: orderNumber,
+        guest_contact: guestContact,
       })
     ).data,
 

@@ -102,7 +102,6 @@ class CheckoutRequest(BaseModel):
     guest_name: Optional[str] = Field(default=None, max_length=160)
     guest_phone: Optional[str] = Field(default=None, max_length=32)
     guest_email: Optional[str] = Field(default=None, max_length=160)
-    guest_otp_verification_token: Optional[str] = None
     notes: Optional[str] = Field(default=None, max_length=500)
     redeem_loyalty_points: int = Field(default=0, ge=0, le=100000)
     use_cart: bool = True

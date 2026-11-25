@@ -7,7 +7,6 @@ import { useAppStore } from "../../store/useAppStore";
 import { useOfflineStore } from "../../store/useOfflineStore";
 import type { Canteen, CartSummary, CollegeSettings, Order } from "../../types";
 import { BrandEmptyState, BrandLogo } from "../../components/branding/BrandLogo";
-import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { Badge, Button, Card, Input, InputPromptModal, Modal, Select, useToast } from "../../components/ui/Primitives";
 import { openRazorpayModal, getPublicRazorpayKeyId } from "../../utils/razorpay";
 
@@ -59,22 +58,10 @@ export const CheckoutPage: React.FC = () => {
   );
   const [acceptedPolicy, setAcceptedPolicy] = useState(false);
 
-  // Guest info & live OTP state
+  // Guest contact state (direct guest checkout without OTP)
   const [guestName, setGuestName] = useState("");
   const [guestEmail, setGuestEmail] = useState("");
   const [guestPhone, setGuestPhone] = useState("");
-  const [otpVerifiedToken, setOtpVerifiedToken] = useState<string | null>(null);
-
-  const { data: otpCaps } = useQuery<{
-    email_otp_enabled: boolean;
-    sms_otp_enabled: boolean;
-    otp_expiry_seconds?: number;
-    resend_cooldown_seconds?: number;
-  }>({
-    queryKey: ["otp-capabilities"],
-    enabled: !user,
-    queryFn: async () => (await api.get("/auth/otp/capabilities")).data,
-  });
 
   // Gateway Checkout Sheet / Note modal state
   const [pendingOrder, setPendingOrder] = useState<Order | null>(null);
@@ -108,8 +95,6 @@ export const CheckoutPage: React.FC = () => {
     }
   };
 
-  const guestOtpTarget = guestEmail.trim() || guestPhone.trim();
-
   const placeOrder = async () => {
     if (!activeCanteen || !cart || cart.items.length === 0) return;
     if (!isOnline || (typeof navigator !== "undefined" && navigator.onLine === false)) {
@@ -139,7 +124,6 @@ export const CheckoutPage: React.FC = () => {
           guest_name: !user ? guestName : null,
           guest_phone: !user && guestPhone.trim() ? guestPhone.trim() : null,
           guest_email: !user && guestEmail.trim() ? guestEmail.trim() : null,
-          guest_otp_verification_token: !user ? otpVerifiedToken : null,
           accepted_policy: acceptedPolicy,
         },
         { headers: { "X-Idempotency-Key": checkoutIdemKey } }
@@ -311,61 +295,40 @@ export const CheckoutPage: React.FC = () => {
             ))}
           </Card>
 
-          {/* Guest Details + Live OTP */}
+          {/* Guest Details */}
           {!user && (
             <Card className="p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="font-bold text-slate-900">Guest Ordering Details</h2>
-                <Badge tone="blue">
-                  {otpCaps && !otpCaps.sms_otp_enabled
-                    ? "Live Email OTP Verification"
-                    : "Live OTP Verification"}
-                </Badge>
+                <Badge tone="blue">Direct Guest Checkout</Badge>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
-                  <label className="mb-1 block text-xs font-bold text-slate-700">Your Name *</label>
-                  <Input value={guestName} onChange={(e) => setGuestName(e.target.value)} placeholder="Visitor / Student Name" />
+                  <label htmlFor="guest-name" className="mb-1 block text-xs font-bold text-slate-700">Your Name *</label>
+                  <Input id="guest-name" value={guestName} onChange={(e) => setGuestName(e.target.value)} placeholder="Visitor / Student Name" />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-bold text-slate-700">Mobile Number (Order Contact) *</label>
+                  <label htmlFor="guest-phone" className="mb-1 block text-xs font-bold text-slate-700">Mobile Number (Order Contact) *</label>
                   <Input
+                    id="guest-phone"
                     value={guestPhone}
-                    onChange={(e) => {
-                      setGuestPhone(e.target.value);
-                      if (!guestEmail.trim()) setOtpVerifiedToken(null);
-                    }}
+                    onChange={(e) => setGuestPhone(e.target.value)}
                     placeholder="+919876543210"
                   />
                 </div>
               </div>
               <div>
-                <label className="mb-1 block text-xs font-bold text-slate-700">
-                  Email Address for Verification OTP {otpCaps && !otpCaps.sms_otp_enabled ? "*" : "(Recommended)"}
+                <label htmlFor="guest-email" className="mb-1 block text-xs font-bold text-slate-700">
+                  Email Address for Order Receipts (Optional)
                 </label>
                 <Input
+                  id="guest-email"
                   type="email"
                   value={guestEmail}
-                  onChange={(e) => {
-                    setGuestEmail(e.target.value);
-                    setOtpVerifiedToken(null);
-                  }}
+                  onChange={(e) => setGuestEmail(e.target.value)}
                   placeholder="you@college.edu"
                 />
               </div>
-
-              {college?.guest_otp_required && (
-                <OtpVerificationBox
-                  target={guestOtpTarget}
-                  purpose="guest_checkout"
-                  verifiedToken={otpVerifiedToken}
-                  onVerified={(tok) => {
-                    setOtpVerifiedToken(tok);
-                    pushToast("Guest OTP verified!", "success");
-                  }}
-                  verifyButtonLabel="Verify for Checkout"
-                />
-              )}
             </Card>
           )}
 

@@ -60,20 +60,9 @@ def test_universal_customer_registration_login_refresh_logout(client: TestClient
     assert p_login2.status_code == 200, p_login2.text
 
 
-def test_otp_request_and_verification(client: TestClient, otp_capture):
-    req = client.post("/api/v1/auth/otp/request", json={"target": "+919988776655", "purpose": "guest_checkout"})
-    assert req.status_code == 200
-    assert "dev_otp" not in req.json()
-    otp = otp_capture.latest_code("+919988776655")
-    assert len(otp) == 6
-
-    bad = client.post("/api/v1/auth/otp/verify", json={"target": "+919988776655", "purpose": "guest_checkout", "code": "000000"})
-    assert bad.status_code in (400, 429)
-
-    ok = client.post("/api/v1/auth/otp/verify", json={"target": "+919988776655", "purpose": "guest_checkout", "code": otp})
-    assert ok.status_code == 200
-    assert ok.json()["verified"] is True
-    assert ok.json()["verification_token"].startswith("OTPVER.")
+def test_otp_routes_permanently_removed(client: TestClient):
+    assert client.post("/api/v1/auth/otp/request", json={"target": "+919988776655", "purpose": "guest_checkout"}).status_code in (404, 405)
+    assert client.post("/api/v1/auth/otp/verify", json={"target": "+919988776655", "purpose": "guest_checkout", "code": "000000"}).status_code in (404, 405)
 
 
 def test_rbac_enforced_on_admin_and_canteen_routes(client: TestClient):
@@ -92,7 +81,7 @@ def test_rbac_enforced_on_admin_and_canteen_routes(client: TestClient):
         r2 = client.get("/api/v1/admin/audit-logs", headers=actor["headers"])
         assert r2.status_code == 403
 
-    # College Admin can create a new canteen + counter + kitchen + holiday
+    # College Admin cannot create a 3rd counter (strict two-counter cafeteria policy)
     created = client.post(
         "/api/v1/admin/canteens",
         headers=admin["headers"],
@@ -105,8 +94,9 @@ def test_rbac_enforced_on_admin_and_canteen_routes(client: TestClient):
             "canteen_type": "food_court",
         },
     )
-    assert created.status_code == 201, created.text
-    canteen_id = created.json()["id"]
+    assert created.status_code == 400, created.text
+
+    canteen_id = next(c["id"] for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
 
     # Detail includes auto-created Counter 1 and Kitchen
     detail = client.get(f"/api/v1/canteens/{canteen_id}")
@@ -131,42 +121,32 @@ def test_rbac_enforced_on_admin_and_canteen_routes(client: TestClient):
     assert detail_after["crowd_level"] == "TEMPORARILY_UNAVAILABLE"
 
 
-def test_email_otp_delivery_and_prod_sms_guard(client: TestClient, monkeypatch):
+def test_email_password_reset_delivery_and_otp_removed(client: TestClient, monkeypatch):
     from app.core.config import settings
     from app.services import auth_service
 
     sent_emails = []
     monkeypatch.setattr(settings, "ENVIRONMENT", "production")
-    monkeypatch.setattr(settings, "OTP_PROVIDER", "smtp")
+    monkeypatch.setattr(settings, "EMAIL_PROVIDER", "smtp")
     monkeypatch.setattr(settings, "SMTP_HOST", "smtp.collegebites.edu")
-    monkeypatch.setattr(settings, "OTP_EMAIL_FROM", "noreply@collegebites.edu")
-    monkeypatch.setattr(settings, "OTP_SMS_ENABLED", False)
-    monkeypatch.setattr(settings, "SMS_PROVIDER", "none")
+    monkeypatch.setattr(settings, "SMTP_FROM_EMAIL", "noreply@collegebites.edu")
     monkeypatch.setattr(
         auth_service,
-        "deliver_otp_email",
-        lambda to_email, subject, body: sent_emails.append((to_email, subject)) or (True, "smtp"),
+        "send_password_reset_email",
+        lambda to_email, reset_url, expiry_minutes: sent_emails.append((to_email, reset_url)) or (True, "smtp"),
     )
 
-    email_res = client.post(
-        "/api/v1/auth/otp/request",
-        json={"target": "student@collegebites.edu", "purpose": "login"},
+    reset_res = client.post(
+        "/api/v1/auth/password-reset/request",
+        json={"identifier": "student@collegebites.edu"},
     )
-    assert email_res.status_code == 200, email_res.text
-    payload = email_res.json()
-    assert payload["delivery_channel"] == "email"
-    assert "dev_otp" not in payload
+    assert reset_res.status_code == 200, reset_res.text
+    payload = reset_res.json()
+    assert payload["email_delivery_configured"] is True
     assert len(sent_emails) == 1
     assert sent_emails[0][0] == "student@collegebites.edu"
+    assert "/reset-password?token=" in sent_emails[0][1]
 
-    # Phone OTP in production without SMS provider MUST fail explicitly with 400/503
-    sms_res = client.post(
-        "/api/v1/auth/otp/request",
-        json={"target": "+919988776611", "purpose": "guest_checkout"},
-    )
-    assert sms_res.status_code in (400, 503)
-
-    caps = client.get("/api/v1/auth/otp/capabilities")
-    assert caps.status_code == 200
-    assert caps.json()["sms_otp_enabled"] is False
-    assert "dev_echo_enabled" not in caps.json()
+    # Legacy OTP capabilities & request endpoints remain permanently removed
+    assert client.get("/api/v1/auth/otp/capabilities").status_code in (404, 405)
+    assert client.post("/api/v1/auth/otp/request", json={"target": "+919988776611", "purpose": "guest_checkout"}).status_code in (404, 405)

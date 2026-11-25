@@ -21,7 +21,6 @@ class CollegeSettingsOut(ORMModel):
     currency_symbol: str
     cancellation_policy_text: str
     kiosk_enabled: bool
-    guest_otp_required: bool
     razorpay_enabled: bool
     cash_at_counter_enabled: bool
     pay_at_pickup_enabled: bool
@@ -38,7 +37,6 @@ class CollegeSettingsUpdate(BaseModel):
     default_tax_rate_percent: Optional[Decimal] = Field(default=None, ge=0, le=50)
     cancellation_policy_text: Optional[str] = None
     kiosk_enabled: Optional[bool] = None
-    guest_otp_required: Optional[bool] = None
     razorpay_enabled: Optional[bool] = None
     cash_at_counter_enabled: Optional[bool] = None
     pay_at_pickup_enabled: Optional[bool] = None

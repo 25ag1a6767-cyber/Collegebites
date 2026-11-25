@@ -7,9 +7,6 @@ from pydantic import BaseModel, EmailStr, Field, model_validator
 from app.schemas.common import ORMModel
 
 
-OTP_PURPOSE_PATTERN = "^(register|login|guest_checkout|password_reset|phone_verify|email_verify)$"
-
-
 class RegisterCustomerRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=160)
     email: Optional[EmailStr] = None
@@ -19,7 +16,6 @@ class RegisterCustomerRequest(BaseModel):
     department: Optional[str] = Field(default=None, max_length=120)
     dietary_preference: Optional[str] = Field(default=None, max_length=32)
     referral_code: Optional[str] = Field(default=None, max_length=24)
-    otp_verification_token: Optional[str] = Field(default=None, max_length=256)
 
     @model_validator(mode="after")
     def validate_contact(self):
@@ -38,46 +34,24 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(min_length=16)
 
 
-class OTPRequest(BaseModel):
-    target: str = Field(min_length=5, max_length=160)
-    purpose: str = Field(default="guest_checkout", pattern=OTP_PURPOSE_PATTERN)
-
-
-class OTPVerifyRequest(BaseModel):
-    target: str = Field(min_length=5, max_length=160)
-    purpose: str = Field(default="guest_checkout", pattern=OTP_PURPOSE_PATTERN)
-    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
-
-
-class OTPLoginRequest(BaseModel):
-    target: str = Field(min_length=5, max_length=160)
-    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
-    device_info: Optional[str] = Field(default=None, max_length=255)
-
-
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
 
 
-class PasswordResetConfirmRequest(BaseModel):
-    target: str = Field(min_length=5, max_length=160)
-    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
-    new_password: str = Field(min_length=8, max_length=128)
+class PasswordResetRequest(BaseModel):
+    identifier: str = Field(min_length=3, max_length=160)
 
 
-class OTPRequestResponse(BaseModel):
+class PasswordResetRequestResponse(BaseModel):
     message: str
-    expires_in_seconds: int
-    resend_cooldown_seconds: int = 60
-    delivery_channel: str
-    masked_destination: str
+    email_delivery_configured: bool
+    expires_in_minutes: int
 
 
-class OTPVerifyResponse(BaseModel):
-    verified: bool
-    verification_token: str
-    expires_at: datetime
+class PasswordResetConfirmRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class UserOut(ORMModel):

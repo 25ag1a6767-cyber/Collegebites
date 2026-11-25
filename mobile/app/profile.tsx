@@ -48,17 +48,9 @@ export default function ProfileScreen() {
   const { user, setAuth, logout } = useMobileStore();
 
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [loginMethod, setLoginMethod] = useState<"password" | "otp">("password");
   const [identifier, setIdentifier] = useState("");
-  const [otpCode, setOtpCode] = useState("");
-  const [otpCooldown, setOtpCooldown] = useState(0);
+  const [resetToken, setResetToken] = useState("");
   const [resetMode, setResetMode] = useState(false);
-
-  useEffect(() => {
-    if (otpCooldown <= 0) return;
-    const id = setInterval(() => setOtpCooldown((c) => (c > 0 ? c - 1 : 0)), 1000);
-    return () => clearInterval(id);
-  }, [otpCooldown]);
   const [newPassword, setNewPassword] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -192,24 +184,6 @@ export default function ProfileScreen() {
       await registerExpoPushToken();
     } catch (e: unknown) {
       setMsg(getMobileApiError(e, "Login failed"));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const onOtpLogin = async () => {
-    setMsg("");
-    setBusy(true);
-    try {
-      const res = await authApi.otpLogin({
-        target: identifier.trim(),
-        code: otpCode.trim(),
-        device_info: "CollegeBites Mobile App",
-      });
-      await setAuth(res.access_token, res.refresh_token, res.user);
-      await registerExpoPushToken();
-    } catch (e: unknown) {
-      setMsg(getMobileApiError(e, "OTP login failed"));
     } finally {
       setBusy(false);
     }
@@ -720,49 +694,35 @@ export default function ProfileScreen() {
           </View>
           <View style={styles.tabRow}>
             <Pressable
-              onPress={() => {
-                setLoginMethod("password");
-                setResetMode(false);
-              }}
-              style={[styles.tabBtn, loginMethod === "password" && !resetMode && styles.tabBtnActive]}
+              onPress={() => setResetMode(false)}
+              style={[styles.tabBtn, !resetMode && styles.tabBtnActive]}
             >
-              <Text style={[styles.tabTxt, loginMethod === "password" && !resetMode && { color: "#fff" }]}>Password</Text>
+              <Text style={[styles.tabTxt, !resetMode && { color: "#fff" }]}>Password Sign In</Text>
             </Pressable>
             <Pressable
-              onPress={() => {
-                setLoginMethod("otp");
-                setResetMode(false);
-              }}
-              style={[styles.tabBtn, loginMethod === "otp" && !resetMode && styles.tabBtnActive]}
+              onPress={() => setResetMode(true)}
+              style={[styles.tabBtn, resetMode && styles.tabBtnActive]}
             >
-              <Text style={[styles.tabTxt, loginMethod === "otp" && !resetMode && { color: "#fff" }]}>OTP Login</Text>
+              <Text style={[styles.tabTxt, resetMode && { color: "#fff" }]}>Reset Password</Text>
             </Pressable>
           </View>
 
           {resetMode ? (
             <>
-              <TextInput
-                style={styles.input}
-                value={identifier}
-                onChangeText={setIdentifier}
-                placeholder="Email or Phone"
-                autoCapitalize="none"
-              />
               <View style={{ flexDirection: "row", gap: 6 }}>
                 <TextInput
                   style={[styles.input, { flex: 1 }]}
-                  value={otpCode}
-                  onChangeText={setOtpCode}
-                  placeholder="Reset OTP"
-                  maxLength={6}
+                  value={identifier}
+                  onChangeText={setIdentifier}
+                  placeholder="Registered Email or Phone"
+                  autoCapitalize="none"
                 />
                 <Pressable
-                  disabled={busy || otpCooldown > 0 || !identifier.trim()}
+                  disabled={busy || !identifier.trim()}
                   onPress={async () => {
                     setBusy(true);
                     try {
-                      const r = await authApi.requestOtp({ target: identifier.trim(), purpose: "password_reset" });
-                      setOtpCooldown(Number(r.resend_cooldown_seconds ?? 60));
+                      const r = await authApi.requestPasswordReset({ identifier: identifier.trim() });
                       if (r.message) setMsg(r.message);
                     } catch (e: unknown) {
                       setMsg(getMobileApiError(e));
@@ -772,11 +732,16 @@ export default function ProfileScreen() {
                   }}
                   style={[styles.btn, { paddingHorizontal: 12 }]}
                 >
-                  <Text style={{ color: "#fff", fontWeight: "700" }}>
-                    {otpCooldown > 0 ? `Wait ${otpCooldown}s` : "Send OTP"}
-                  </Text>
+                  <Text style={{ color: "#fff", fontWeight: "700" }}>Send Link</Text>
                 </Pressable>
               </View>
+              <TextInput
+                style={styles.input}
+                value={resetToken}
+                onChangeText={setResetToken}
+                placeholder="Paste reset token from email"
+                autoCapitalize="none"
+              />
               <TextInput
                 style={styles.input}
                 secureTextEntry
@@ -786,16 +751,17 @@ export default function ProfileScreen() {
               />
               {Boolean(msg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{msg}</Text>}
               <Pressable
-                disabled={busy || otpCode.trim().length < 6 || newPassword.length < 8}
+                disabled={busy || resetToken.trim().length < 16 || newPassword.length < 8}
                 onPress={async () => {
                   setBusy(true);
                   try {
                     await authApi.confirmPasswordReset({
-                      target: identifier.trim(),
-                      code: otpCode.trim(),
+                      token: resetToken.trim(),
                       new_password: newPassword,
                     });
                     setResetMode(false);
+                    setResetToken("");
+                    setNewPassword("");
                     setMsg("Password updated! Please sign in.");
                   } catch (e: unknown) {
                     setMsg(getMobileApiError(e));
@@ -806,49 +772,6 @@ export default function ProfileScreen() {
                 style={styles.btn}
               >
                 <Text style={{ color: "#fff", fontWeight: "800" }}>Reset Password</Text>
-              </Pressable>
-            </>
-          ) : loginMethod === "otp" ? (
-            <>
-              <TextInput
-                style={styles.input}
-                value={identifier}
-                onChangeText={setIdentifier}
-                placeholder="Email or Phone"
-                autoCapitalize="none"
-              />
-              <View style={{ flexDirection: "row", gap: 6 }}>
-                <TextInput
-                  style={[styles.input, { flex: 1 }]}
-                  value={otpCode}
-                  onChangeText={setOtpCode}
-                  placeholder="6-digit OTP"
-                  maxLength={6}
-                />
-                <Pressable
-                  disabled={busy || otpCooldown > 0 || !identifier.trim()}
-                  onPress={async () => {
-                    setBusy(true);
-                    try {
-                      const r = await authApi.requestOtp({ target: identifier.trim(), purpose: "login" });
-                      setOtpCooldown(Number(r.resend_cooldown_seconds ?? 60));
-                      if (r.message) setMsg(r.message);
-                    } catch (e: unknown) {
-                      setMsg(getMobileApiError(e));
-                    } finally {
-                      setBusy(false);
-                    }
-                  }}
-                  style={[styles.btn, { paddingHorizontal: 12 }]}
-                >
-                  <Text style={{ color: "#fff", fontWeight: "700" }}>
-                    {otpCooldown > 0 ? `Wait ${otpCooldown}s` : "Send OTP"}
-                  </Text>
-                </Pressable>
-              </View>
-              {Boolean(msg) && <Text style={{ color: "#dc2626", fontSize: 12 }}>{msg}</Text>}
-              <Pressable disabled={busy} onPress={onOtpLogin} style={styles.btn}>
-                <Text style={{ color: "#fff", fontWeight: "800" }}>{busy ? "Signing in..." : "Verify OTP & Sign In"}</Text>
               </Pressable>
             </>
           ) : (

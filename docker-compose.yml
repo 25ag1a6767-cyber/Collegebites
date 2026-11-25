@@ -52,10 +52,7 @@ services:
       SECRET_KEY: change-me-in-production-min-64-chars-secret-key-collegebites-docker
       QR_SIGNING_SECRET: change-me-in-production-min-64-chars-qr-secret-collegebites-docker
       RAZORPAY_TEST_MODE: "true"
-      OTP_EXPIRY_SECONDS: "300"
-      OTP_RESEND_COOLDOWN_SECONDS: "60"
-      OTP_MAX_ATTEMPTS: "5"
-      OTP_SMS_ENABLED: "false"
+      PASSWORD_RESET_TOKEN_EXPIRY_MINUTES: "30"
     ports:
       - "8000:8000"
     command: >

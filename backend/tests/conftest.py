@@ -26,80 +26,21 @@ os.environ["SMTP_USERNAME"] = ""
 os.environ["SMTP_PASSWORD"] = ""
 os.environ["RESEND_API_KEY"] = ""
 os.environ["SENDGRID_API_KEY"] = ""
-os.environ["OTP_PROVIDER"] = ""
-os.environ["OTP_SMS_ENABLED"] = "false"
+os.environ["EMAIL_PROVIDER"] = "none"
 os.environ["SMS_PROVIDER"] = "none"
 os.environ["TWILIO_ACCOUNT_SID"] = ""
 os.environ["TWILIO_AUTH_TOKEN"] = ""
 os.environ["TWILIO_FROM_NUMBER"] = ""
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 
-from app.core.config import settings  # noqa: E402
 from app.core.database import get_db  # noqa: E402
 from app.core.redis_client import get_redis_manager  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
-from app.services import auth_service  # noqa: E402
 from app.services.seed_service import seed_initial_college_data  # noqa: E402
 
 test_engine = create_engine(TEST_DB_URL, pool_pre_ping=True)
 TestingSessionLocal = sessionmaker(bind=test_engine, autocommit=False, autoflush=False, expire_on_commit=False)
-
-
-@dataclass
-class OTPOutbox:
-    """Server-side outbound OTP capture for integration tests (never exposed in HTTP responses)."""
-
-    messages: list[dict[str, str]] = field(default_factory=list)
-
-    def record(self, target: str, code: str, channel: str, purpose: str) -> None:
-        self.messages.append(
-            {
-                "target": target.strip().lower(),
-                "digits": "".join(ch for ch in target if ch.isdigit()),
-                "code": code,
-                "channel": channel,
-                "purpose": purpose,
-            }
-        )
-
-    def latest_code(self, target: str) -> str:
-        norm = target.strip().lower()
-        digits = "".join(ch for ch in target if ch.isdigit())
-        for item in reversed(self.messages):
-            if item["target"] == norm:
-                return item["code"]
-            if digits and item["digits"] and (item["digits"] == digits or item["digits"].endswith(digits[-10:])):
-                return item["code"]
-        raise AssertionError(f"No outbound OTP captured for target={target!r}")
-
-
-@pytest.fixture()
-def otp_capture(monkeypatch: pytest.MonkeyPatch) -> OTPOutbox:
-    """Opt-in server-side OTP provider sandbox for legacy integration suites."""
-    outbox = OTPOutbox()
-    monkeypatch.setattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 0)
-    monkeypatch.setattr(settings, "OTP_RATE_LIMIT_PER_DEST_15M", 50)
-    monkeypatch.setattr(settings, "OTP_RATE_LIMIT_PER_IP_15M", 200)
-    monkeypatch.setattr(settings, "OTP_RATE_LIMIT_PER_USER_15M", 50)
-    monkeypatch.setattr(auth_service, "resolve_email_otp_provider", lambda: "smtp")
-    monkeypatch.setattr(auth_service, "resolve_sms_otp_provider", lambda: "twilio")
-
-    def _fake_email(to_email: str, subject: str, body: str):
-        m = re.search(r"\b(\d{6})\b", body)
-        assert m, f"Expected 6-digit OTP in email body: {body!r}"
-        outbox.record(to_email, m.group(1), "email", subject)
-        return True, "smtp"
-
-    def _fake_sms(to_phone: str, message: str):
-        m = re.search(r"\b(\d{6})\b", message)
-        assert m, f"Expected 6-digit OTP in SMS body: {message!r}"
-        outbox.record(to_phone, m.group(1), "sms", "sms")
-        return True, "twilio"
-
-    monkeypatch.setattr(auth_service, "deliver_otp_email", _fake_email)
-    monkeypatch.setattr(auth_service, "deliver_otp_sms", _fake_sms)
-    return outbox
 
 
 @pytest.fixture(scope="session", autouse=True)

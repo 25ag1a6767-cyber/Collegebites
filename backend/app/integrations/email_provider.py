@@ -53,9 +53,9 @@ def _build_branded_html_email(subject: str, body_text: str, logo_cid: str | None
 </html>"""
 
 
-def resolve_email_otp_provider() -> Optional[str]:
+def resolve_email_provider() -> Optional[str]:
     """Return the active configured transactional email provider (`smtp` | `resend` | `sendgrid`) or None."""
-    explicit = (settings.OTP_PROVIDER or "").strip().lower()
+    explicit = (settings.EMAIL_PROVIDER or "").strip().lower()
     if explicit:
         if explicit == "resend":
             return "resend" if settings.RESEND_API_KEY.strip() else None
@@ -176,28 +176,22 @@ def _dispatch_via_sendgrid(to_email: str, subject: str, body_text: str) -> tuple
         return False, f"sendgrid_error:{type(exc).__name__}"
 
 
-def deliver_otp_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
-    """
-    Deliver a live OTP email strictly via an active transactional email provider.
-    Never logs plaintext OTPs and never fakes success when no provider is configured.
-    """
-    if not to_email:
-        return False, "missing_recipient"
-    provider = resolve_email_otp_provider()
-    if not provider:
-        return False, "otp_email_provider_not_configured"
-    if provider == "resend":
-        return _dispatch_via_resend(to_email, subject, body_text)
-    if provider == "sendgrid":
-        return _dispatch_via_sendgrid(to_email, subject, body_text)
-    return _dispatch_via_smtp(to_email, subject, body_text)
+def send_password_reset_email(to_email: str, reset_url: str, expiry_minutes: int) -> tuple[bool, str]:
+    """Deliver a secure single-use non-OTP password reset link via the configured transactional email provider."""
+    subject = "CollegeBites — Password Reset Request"
+    body_text = (
+        "A password reset was requested for your CollegeBites account.\n\n"
+        f"Reset link (valid for {expiry_minutes} minutes, single use):\n{reset_url}\n\n"
+        "If you did not request this reset, you can safely ignore this email — your password will remain unchanged."
+    )
+    return send_email(to_email, subject, body_text)
 
 
 def send_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
-    """Send non-OTP transactional notifications via configured email provider (never logs message body)."""
+    """Send transactional notifications & account recovery links via configured email provider."""
     if not to_email:
         return False, "missing_recipient"
-    provider = resolve_email_otp_provider()
+    provider = resolve_email_provider()
     if provider == "resend":
         ok, detail = _dispatch_via_resend(to_email, subject, body_text)
         return (True, "sent") if ok else (False, detail)
@@ -209,6 +203,6 @@ def send_email(to_email: str, subject: str, body_text: str) -> tuple[bool, str]:
         return (True, "sent") if ok else (False, detail)
 
     if settings.is_production:
-        logger.error("No email provider configured in production; cannot deliver notification (%s)", subject)
+        logger.error("No email provider configured in production; cannot deliver email (%s)", subject)
         return False, "email_provider_not_configured"
     return False, "email_provider_not_configured"

@@ -13,7 +13,7 @@ from app.services.order_service import release_expired_slot_reservations
 from tests.conftest import TestingSessionLocal, login_as
 
 
-def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient, otp_capture):
+def test_auth_password_sessions_and_self_deactivate(client: TestClient):
     # Register a new universal customer with phone & email
     reg = client.post(
         "/api/v1/auth/register",
@@ -29,27 +29,14 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
     assert reg.status_code == 201, reg.text
     first_refresh = reg.json()["refresh_token"]
 
-    # OTP login flow
-    otp_login_req = client.post(
-        "/api/v1/auth/otp/request",
-        json={"target": "+919876511122", "purpose": "login"},
+    # Direct password login flow (OTP permanently removed)
+    pw_login_res = client.post(
+        "/api/v1/auth/login",
+        json={"identifier": "+919876511122", "password": "InitialPass123", "device_info": "Mobile iOS"},
     )
-    assert otp_login_req.status_code == 200
-    assert "dev_otp" not in otp_login_req.json()
-    otp_login_res = client.post(
-        "/api/v1/auth/otp/login",
-        json={"target": "+919876511122", "code": otp_capture.latest_code("+919876511122"), "device_info": "Mobile iOS"},
-    )
-    assert otp_login_res.status_code == 200, otp_login_res.text
-    access = otp_login_res.json()["access_token"]
+    assert pw_login_res.status_code == 200, pw_login_res.text
+    access = pw_login_res.json()["access_token"]
     hdrs = {"Authorization": f"Bearer {access}"}
-
-    # Phone verification OTP flow
-    pv_req = client.post("/api/v1/auth/otp/request", json={"target": "+919876511122", "purpose": "phone_verify"})
-    assert pv_req.status_code == 200
-    pv_res = client.post("/api/v1/auth/phone/verify", headers=hdrs, json={"code": otp_capture.latest_code("+919876511122")})
-    assert pv_res.status_code == 200, pv_res.text
-    assert pv_res.json()["is_verified"] is True
 
     # Change password
     cp = client.post(
@@ -73,22 +60,15 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
         == 200
     )
 
-    # Password reset via OTP
-    pr_req = client.post("/api/v1/auth/otp/request", json={"target": "+919876511122", "purpose": "password_reset"})
-    assert pr_req.status_code == 200
-    pr_confirm = client.post(
-        "/api/v1/auth/password-reset/confirm",
-        json={"target": "+919876511122", "code": otp_capture.latest_code("+919876511122"), "new_password": "ResetPass789"},
-    )
-    assert pr_confirm.status_code == 200, pr_confirm.text
+    # Multi-device session management using current password
     tablet_login = client.post(
         "/api/v1/auth/login",
-        json={"identifier": "kiran.rao@aceec.ac.in", "password": "ResetPass789", "device_info": "Tablet Safari"},
+        json={"identifier": "kiran.rao@aceec.ac.in", "password": "ChangedPass456", "device_info": "Tablet Safari"},
     )
     assert tablet_login.status_code == 200
     reset_login = client.post(
         "/api/v1/auth/login",
-        json={"identifier": "kiran.rao@aceec.ac.in", "password": "ResetPass789", "device_info": "Desktop Chrome"},
+        json={"identifier": "kiran.rao@aceec.ac.in", "password": "ChangedPass456", "device_info": "Desktop Chrome"},
     )
     assert reset_login.status_code == 200
     latest_hdrs = {"Authorization": f"Bearer {reset_login.json()['access_token']}"}
@@ -97,9 +77,9 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
     sessions = client.get("/api/v1/auth/sessions", headers=latest_hdrs)
     assert sessions.status_code == 200
     sess_list = sessions.json()
-    assert len(sess_list) == 2
+    assert len(sess_list) >= 2
     assert any(s["is_current"] for s in sess_list)
-    other = next(s for s in sess_list if not s["is_current"])
+    other = next(s for s in sess_list if s["device_info"] == "Tablet Safari")
     rev = client.delete(f"/api/v1/auth/sessions/{other['id']}", headers=latest_hdrs)
     assert rev.status_code == 200
     assert client.post("/api/v1/auth/refresh", json={"refresh_token": tablet_login.json()["refresh_token"]}).status_code == 401
@@ -108,7 +88,7 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
     # Re-login to test self-deactivation
     re_login = client.post(
         "/api/v1/auth/login",
-        json={"identifier": "kiran.rao@aceec.ac.in", "password": "ResetPass789"},
+        json={"identifier": "kiran.rao@aceec.ac.in", "password": "ChangedPass456"},
     )
     assert re_login.status_code == 200
     re_hdrs = {"Authorization": f"Bearer {re_login.json()['access_token']}"}
@@ -117,7 +97,7 @@ def test_auth_otp_login_password_sessions_and_self_deactivate(client: TestClient
     assert (
         client.post(
             "/api/v1/auth/login",
-            json={"identifier": "kiran.rao@aceec.ac.in", "password": "ResetPass789"},
+            json={"identifier": "kiran.rao@aceec.ac.in", "password": "ChangedPass456"},
         ).status_code
         == 403
     )
@@ -135,21 +115,23 @@ def test_rbac_canteen_isolation_ssrf_printing_holidays_and_schedules(client: Tes
     canteens = client.get("/api/v1/canteens").json()
     main = next(c for c in canteens if c["code"] == "MAIN")
 
-    # Create secondary canteen + kitchen stations + pickup locations
-    nbk = client.post(
-        "/api/v1/admin/canteens",
-        headers=admin["headers"],
-        json={
-            "name": "Night Bakery",
-            "slug": "night-bakery",
-            "code": "NBK",
-            "token_prefix": "N",
-            "location": "West Block",
-            "canteen_type": "bakery",
-        },
+    # Use existing 2nd counter (Snacks & Bakery Counter) — creating a 3rd counter is blocked by policy
+    assert (
+        client.post(
+            "/api/v1/admin/canteens",
+            headers=admin["headers"],
+            json={
+                "name": "Night Bakery",
+                "slug": "night-bakery",
+                "code": "NBK",
+                "token_prefix": "N",
+                "location": "West Block",
+                "canteen_type": "bakery",
+            },
+        ).status_code
+        == 400
     )
-    assert nbk.status_code == 201, nbk.text
-    nbk_id = nbk.json()["id"]
+    nbk_id = next(c["id"] for c in canteens if c["code"] == "SNK")
     nbk_detail = client.get(f"/api/v1/canteens/{nbk_id}").json()
     nbk_counter_id = nbk_detail["counters"][0]["id"]
     nbk_kitchen_id = nbk_detail["kitchens"][0]["id"]
@@ -306,7 +288,7 @@ def test_rbac_canteen_isolation_ssrf_printing_holidays_and_schedules(client: Tes
         headers=cashier["headers"],
         json={"canteen_id": main["id"], "payment_method": "upi_pos", "items": [{"food_item_id": coffee["id"], "quantity": 1}]},
     )
-    assert pos_ord.status_code == 201
+    assert pos_ord.status_code == 201, pos_ord.text
     ono = pos_ord.json()["order_number"]
     assert (
         client.post(
@@ -325,7 +307,7 @@ def test_rbac_canteen_isolation_ssrf_printing_holidays_and_schedules(client: Tes
         assert ssrf.status_code == 400
 
 
-def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(client: TestClient, otp_capture):
+def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(client: TestClient):
     admin = login_as(client, "admin@collegebites.edu", "Admin@12345")
     student = login_as(client, "student@collegebites.edu", "Student@12345")
     cashier = login_as(client, "cashier@collegebites.edu", "Staff@12345")
@@ -431,21 +413,14 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     ord_after_exp = client.get(f"/api/v1/orders/{pend_ord_no}", headers=friend_hdrs).json()
     assert ord_after_exp["status"] == "PAYMENT_FAILED"
 
-    # Guest checkout -> Razorpay fail -> Retry with Razorpay -> Verify -> Guest OTP lookup -> Staff QR revoke
+    # Guest checkout (direct without OTP) -> Razorpay fail -> Retry with Razorpay -> Verify -> Guest lookup -> Staff QR revoke
     g_phone = "+919800012345"
-    g_otp_req = client.post("/api/v1/auth/otp/request", json={"target": g_phone, "purpose": "guest_checkout"}).json()
-    assert "dev_otp" not in g_otp_req
-    g_otp_ver = client.post(
-        "/api/v1/auth/otp/verify",
-        json={"target": g_phone, "purpose": "guest_checkout", "code": otp_capture.latest_code(g_phone)},
-    ).json()
     g_co = client.post(
         "/api/v1/orders/checkout",
         json={
             "canteen_id": cid,
             "guest_name": "Retry Guest",
             "guest_phone": g_phone,
-            "guest_otp_verification_token": g_otp_ver["verification_token"],
             "payment_method": "razorpay",
             "use_cart": False,
             "direct_items": [{"food_item_id": biryani["id"], "quantity": 1}],
@@ -484,15 +459,10 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     old_qr = confirmed.json()["qr_token_raw"]
     assert old_qr is not None
 
-    # Guest OTP order lookup
-    g_lookup_otp = client.post("/api/v1/auth/otp/request", json={"target": g_phone, "purpose": "guest_checkout"}).json()
-    g_lookup_ver = client.post(
-        "/api/v1/auth/otp/verify",
-        json={"target": g_phone, "purpose": "guest_checkout", "code": otp_capture.latest_code(g_phone)},
-    ).json()
+    # Guest order lookup (order_number + guest_contact, no OTP)
     looked_up = client.post(
         "/api/v1/orders/guest/lookup",
-        json={"guest_phone": g_phone, "otp_verification_token": g_lookup_ver["verification_token"]},
+        json={"order_number": g_co["order_number"], "guest_contact": g_phone},
     )
     assert looked_up.status_code == 200
     assert any(o["order_number"] == g_co["order_number"] for o in looked_up.json())
@@ -534,7 +504,7 @@ def test_loyalty_slot_rollback_guest_lookup_retry_qr_revoke_and_notifications(cl
     assert new_chk["order_number"] == g_co["order_number"]
 
 
-def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: TestClient, otp_capture):
+def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: TestClient):
     admin = login_as(client, "admin@collegebites.edu", "Admin@12345")
     inv_mgr = login_as(client, "inventory@collegebites.edu", "Staff@12345")
     cashier = login_as(client, "cashier@collegebites.edu", "Staff@12345")
@@ -542,14 +512,10 @@ def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: 
     mgr = login_as(client, "manager@collegebites.edu", "Staff@12345")
     student = login_as(client, "student@collegebites.edu", "Student@12345")
 
-    main = next(c for c in client.get("/api/v1/canteens").json() if c["code"] == "MAIN")
+    canteens = client.get("/api/v1/canteens").json()
+    main = next(c for c in canteens if c["code"] == "MAIN")
     mid = main["id"]
-    nbk = client.post(
-        "/api/v1/admin/canteens",
-        headers=admin["headers"],
-        json={"name": "Transfer Hub", "slug": "transfer-hub", "code": "THB", "token_prefix": "T", "location": "South Wing"},
-    ).json()
-    thb_id = nbk["id"]
+    thb_id = next(c["id"] for c in canteens if c["code"] == "SNK")
 
     # Create ingredient with EXPIRED initial batch (50g)
     today_col = today_college()
@@ -708,15 +674,13 @@ def test_inventory_fefo_transfers_staff_leave_support_guest_and_ws_auth(client: 
     )
     assert tkt.status_code == 201
     tkt_id = tkt.json()["id"]
-    t_otp = client.post("/api/v1/auth/otp/request", json={"target": sup_phone, "purpose": "guest_checkout"}).json()
-    t_ver = client.post("/api/v1/auth/otp/verify", json={"target": sup_phone, "purpose": "guest_checkout", "code": otp_capture.latest_code(sup_phone)}).json()
-    tok = t_ver["verification_token"]
+    tkt_no = tkt.json()["ticket_number"]
 
-    tl = client.post("/api/v1/support/tickets/guest/lookup", json={"guest_phone": sup_phone, "otp_verification_token": tok})
+    tl = client.post("/api/v1/support/tickets/guest/lookup", json={"ticket_number": tkt_no, "guest_phone": sup_phone})
     assert tl.status_code == 200 and any(x["id"] == tkt_id for x in tl.json())
-    th = client.post(f"/api/v1/support/tickets/{tkt_id}/guest-thread", json={"guest_phone": sup_phone, "otp_verification_token": tok})
+    th = client.post(f"/api/v1/support/tickets/{tkt_id}/guest-thread", json={"ticket_number": tkt_no, "guest_phone": sup_phone})
     assert th.status_code == 200
-    gm = client.post(f"/api/v1/support/tickets/{tkt_id}/guest-messages", json={"guest_phone": sup_phone, "otp_verification_token": tok, "message": "Found my token, thanks!"})
+    gm = client.post(f"/api/v1/support/tickets/{tkt_id}/guest-messages", json={"ticket_number": tkt_no, "guest_phone": sup_phone, "message": "Found my token, thanks!"})
     assert gm.status_code == 200
 
     # WebSocket security checks

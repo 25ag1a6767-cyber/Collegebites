@@ -117,7 +117,8 @@ def compute_schedule_availability_map(
 
     links_by_item: dict[UUID, list[MenuAvailability]] = {}
     for l in links:
-        links_by_item.setdefault(l.food_item_id, []).append(l)
+        if l.menu_schedule_id in scheds:
+            links_by_item.setdefault(l.food_item_id, []).append(l)
 
     out: dict[UUID, bool] = {}
     for fid in food_item_ids:

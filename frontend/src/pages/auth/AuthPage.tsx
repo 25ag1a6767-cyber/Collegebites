@@ -1,10 +1,9 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ShieldCheck, Sparkles } from "lucide-react";
 import { api, getApiError } from "../../api/client";
 import { useAppStore } from "../../store/useAppStore";
 import { BrandLogo } from "../../components/branding/BrandLogo";
-import { OtpVerificationBox } from "../../components/auth/OtpVerificationBox";
 import { Badge, Button, Card, Input, useToast } from "../../components/ui/Primitives";
 
 const DEMO_USERS = import.meta.env.DEV
@@ -14,29 +13,38 @@ const DEMO_USERS = import.meta.env.DEV
       { label: "Cashier POS", id: "cashier@collegebites.edu", pw: "Staff@12345", dest: "/cashier" },
       { label: "Pickup Scanner", id: "pickup@collegebites.edu", pw: "Staff@12345", dest: "/pickup" },
       { label: "Inventory Manager", id: "inventory@collegebites.edu", pw: "Staff@12345", dest: "/inventory" },
-      { label: "Canteen Manager", id: "manager@collegebites.edu", pw: "Staff@12345", dest: "/admin" },
-      { label: "College Admin", id: "admin@collegebites.edu", pw: "Admin@12345", dest: "/admin" },
+      { label: "Canteen Manager", id: "manager@collegebites.edu", pw: "Staff@12345", dest: "/command-center" },
+      { label: "College Admin", id: "admin@collegebites.edu", pw: "Admin@12345", dest: "/command-center" },
     ]
   : [];
 
-export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ initialMode = "login" }) => {
-  const [mode, setMode] = useState<"login" | "register">(initialMode);
-  const [loginMethod, setLoginMethod] = useState<"password" | "otp">("password");
+export const AuthPage: React.FC<{ initialMode?: "login" | "register" | "reset" }> = ({ initialMode = "login" }) => {
+  const [searchParams] = useSearchParams();
+  const urlToken = searchParams.get("token") || "";
+  const [mode, setMode] = useState<"login" | "register">(initialMode === "register" ? "register" : "login");
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
-  const [otpCode, setOtpCode] = useState("");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [collegeId, setCollegeId] = useState("");
   const [department, setDepartment] = useState("");
   const [referralCode, setReferralCode] = useState("");
-  const [regOtpToken, setRegOtpToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [resetOpen, setResetOpen] = useState(false);
-  const [resetTarget, setResetTarget] = useState("");
-  const [resetCode, setResetCode] = useState("");
+
+  // Secure non-OTP password recovery state (signed email reset link / token)
+  const [resetOpen, setResetOpen] = useState(initialMode === "reset" || Boolean(urlToken));
+  const [resetIdentifier, setResetIdentifier] = useState("");
+  const [resetToken, setResetToken] = useState(urlToken);
   const [resetNewPw, setResetNewPw] = useState("");
+  const [resetInfoMsg, setResetInfoMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (urlToken) {
+      setResetToken(urlToken);
+      setResetOpen(true);
+    }
+  }, [urlToken]);
 
   const navigate = useNavigate();
   const { setAuth } = useAppStore();
@@ -48,7 +56,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
     else if (roles.includes("cashier")) navigate("/cashier");
     else if (roles.includes("pickup_staff")) navigate("/pickup");
     else if (roles.includes("inventory_manager")) navigate("/inventory");
-    else if (roles.some((r) => ["super_admin", "college_admin", "canteen_manager"].includes(r))) navigate("/admin");
+    else if (roles.some((r) => ["super_admin", "college_admin", "canteen_manager"].includes(r))) navigate("/command-center");
     else navigate("/");
   };
 
@@ -69,24 +77,6 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (mode === "login") {
-      if (loginMethod === "otp") {
-        if (otpCode.trim().length !== 6) {
-          pushToast("Enter your 6-digit verification code first", "error");
-          return;
-        }
-        setLoading(true);
-        try {
-          const res = await api.post("/auth/otp/login", { target: identifier.trim(), code: otpCode.trim() });
-          setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
-          pushToast(`Welcome back, ${res.data.user.full_name}!`, "success");
-          routeAfterAuth(res.data.user.roles || []);
-        } catch (err) {
-          pushToast(getApiError(err, "OTP login failed"), "error");
-        } finally {
-          setLoading(false);
-        }
-        return;
-      }
       await doLogin(identifier, password);
       return;
     }
@@ -100,7 +90,6 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
         college_id_number: collegeId || null,
         department: department || null,
         referral_code: referralCode.trim() || null,
-        otp_verification_token: regOtpToken || null,
       });
       setAuth(res.data.access_token, res.data.refresh_token, res.data.user);
       pushToast("Account created! Happy ordering.", "success");
@@ -122,7 +111,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
               <h1 className="text-xl font-extrabold text-slate-900">
                 {mode === "login" ? "Sign in to CollegeBites" : "Create Universal Account"}
               </h1>
-              <p className="text-xs text-slate-500">One account for students, faculty, visitors & staff</p>
+              <p className="text-xs text-slate-500">Secure password authentication for students, faculty & staff</p>
             </div>
           </div>
 
@@ -147,156 +136,127 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
             {mode === "register" && (
               <>
                 <div>
-                  <label className="mb-1 block text-xs font-bold text-slate-700">Full Name *</label>
-                  <Input required value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Aarav Sharma" />
+                  <label htmlFor="auth-fullname" className="mb-1 block text-xs font-bold text-slate-700">Full Name *</label>
+                  <Input id="auth-fullname" required value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Aarav Sharma" />
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="mb-1 block text-xs font-bold text-slate-700">Email</label>
-                    <Input
-                      type="email"
-                      value={email}
-                      onChange={(e) => {
-                        setEmail(e.target.value);
-                        setRegOtpToken(null);
-                      }}
-                      placeholder="you@college.edu"
-                    />
+                    <label htmlFor="auth-email" className="mb-1 block text-xs font-bold text-slate-700">Email</label>
+                    <Input id="auth-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@college.edu" />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs font-bold text-slate-700">Mobile Number</label>
-                    <Input
-                      value={phone}
-                      onChange={(e) => {
-                        setPhone(e.target.value);
-                        if (!email.trim()) setRegOtpToken(null);
-                      }}
-                      placeholder="+919876543210"
-                    />
+                    <label htmlFor="auth-phone" className="mb-1 block text-xs font-bold text-slate-700">Mobile Number</label>
+                    <Input id="auth-phone" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+919876543210" />
                   </div>
                 </div>
-                {(email.trim() || phone.trim()) && (
-                  <OtpVerificationBox
-                    target={email.trim() || phone.trim()}
-                    purpose="register"
-                    verifiedToken={regOtpToken}
-                    onVerified={(tok) => {
-                      setRegOtpToken(tok);
-                      pushToast("Email/contact verified for registration!", "success");
-                    }}
-                    verifyButtonLabel="Verify Email / Phone"
-                  />
-                )}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="mb-1 block text-xs font-bold text-slate-700">Roll / ID (Optional)</label>
-                    <Input value={collegeId} onChange={(e) => setCollegeId(e.target.value)} placeholder="25AG1A6767" />
+                    <label htmlFor="auth-roll" className="mb-1 block text-xs font-bold text-slate-700">Roll / ID (Optional)</label>
+                    <Input id="auth-roll" value={collegeId} onChange={(e) => setCollegeId(e.target.value)} placeholder="25AG1A6767" />
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs font-bold text-slate-700">Department (Optional)</label>
-                    <Input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="CSE" />
+                    <label htmlFor="auth-dept" className="mb-1 block text-xs font-bold text-slate-700">Department (Optional)</label>
+                    <Input id="auth-dept" value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="CSE" />
                   </div>
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-bold text-slate-700">Referral Code (Optional)</label>
-                  <Input value={referralCode} onChange={(e) => setReferralCode(e.target.value)} placeholder="Friend's referral code" />
+                  <label htmlFor="auth-ref" className="mb-1 block text-xs font-bold text-slate-700">Referral Code (Optional)</label>
+                  <Input id="auth-ref" value={referralCode} onChange={(e) => setReferralCode(e.target.value)} placeholder="Friend's referral code" />
                 </div>
               </>
             )}
 
             {mode === "login" && (
-              <>
-                <div className="flex gap-2 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => setLoginMethod("password")}
-                    className={`rounded-lg px-3 py-1 font-bold ${loginMethod === "password" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}
-                  >
-                    Password
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setLoginMethod("otp")}
-                    className={`rounded-lg px-3 py-1 font-bold ${loginMethod === "otp" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}
-                  >
-                    Mobile / Email OTP
-                  </button>
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-bold text-slate-700">Email or Mobile Number</label>
-                  <Input
-                    required
-                    value={identifier}
-                    onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder="you@college.edu"
-                  />
-                </div>
-              </>
+              <div>
+                <label htmlFor="auth-identifier" className="mb-1 block text-xs font-bold text-slate-700">Email or Mobile Number</label>
+                <Input
+                  id="auth-identifier"
+                  required
+                  value={identifier}
+                  onChange={(e) => setIdentifier(e.target.value)}
+                  placeholder="you@college.edu"
+                />
+              </div>
             )}
 
-            {(mode === "register" || loginMethod === "password") ? (
-              <div>
-                <div className="mb-1 flex items-center justify-between">
-                  <label className="text-xs font-bold text-slate-700">Password</label>
-                  {mode === "login" && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setResetTarget(identifier);
-                        setResetCode("");
-                        setResetOpen(true);
-                      }}
-                      className="text-xs font-bold text-[#76010d] hover:underline"
-                    >
-                      Forgot Password?
-                    </button>
-                  )}
-                </div>
-                <Input
-                  type="password"
-                  required
-                  minLength={mode === "register" ? 8 : 1}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                />
+            <div>
+              <div className="mb-1 flex items-center justify-between">
+                <label htmlFor="auth-password" className="text-xs font-bold text-slate-700">Password</label>
+                {mode === "login" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetIdentifier(identifier);
+                      setResetInfoMsg(null);
+                      setResetOpen((v) => !v);
+                    }}
+                    className="text-xs font-bold text-[#76010d] hover:underline"
+                  >
+                    Forgot Password?
+                  </button>
+                )}
               </div>
-            ) : (
-              <div className="space-y-2">
-                <OtpVerificationBox
-                  target={identifier}
-                  purpose="login"
-                  hideVerifyButton
-                  codeValue={otpCode}
-                  onCodeChange={setOtpCode}
-                />
-              </div>
-            )}
+              <Input
+                id="auth-password"
+                type="password"
+                required
+                minLength={mode === "register" ? 8 : 1}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+              />
+            </div>
 
             <Button type="submit" variant="primary" className="w-full" disabled={loading}>
-              {loading ? "Please wait..." : mode === "login" ? (loginMethod === "otp" ? "Verify & Sign In" : "Sign In") : "Create Account"}
+              {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Create Account"}
             </Button>
           </form>
 
           {resetOpen && (
             <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 space-y-2.5 text-xs">
               <div className="flex items-center justify-between font-bold text-slate-900">
-                <span>Reset Password via Live OTP</span>
+                <span>Password Recovery (Secure Reset Link)</span>
                 <button type="button" onClick={() => setResetOpen(false)} className="text-slate-400 hover:text-slate-700">
                   Close
                 </button>
               </div>
-              <OtpVerificationBox
-                target={resetTarget}
-                onTargetChange={setResetTarget}
-                targetPlaceholder="Registered Email or Mobile"
-                purpose="password_reset"
-                hideVerifyButton
-                codeValue={resetCode}
-                onCodeChange={setResetCode}
-                compact
+              <div className="flex gap-2">
+                <Input
+                  aria-label="Account email or mobile for password reset"
+                  value={resetIdentifier}
+                  onChange={(e) => setResetIdentifier(e.target.value)}
+                  placeholder="Registered email or mobile"
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={loading || resetIdentifier.trim().length < 3}
+                  onClick={async () => {
+                    setLoading(true);
+                    try {
+                      const res = await api.post("/auth/password-reset/request", { identifier: resetIdentifier.trim() });
+                      setResetInfoMsg(res.data.message);
+                      pushToast("Password reset request processed.", "info");
+                    } catch (err) {
+                      pushToast(getApiError(err), "error");
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                >
+                  Send Link
+                </Button>
+              </div>
+              {resetInfoMsg && <div className="rounded-lg bg-white border border-slate-200 p-2 text-[11px] text-slate-700">{resetInfoMsg}</div>}
+              <Input
+                aria-label="Password reset token"
+                value={resetToken}
+                onChange={(e) => setResetToken(e.target.value)}
+                placeholder="Paste reset token from email link"
               />
               <Input
+                aria-label="New password"
                 type="password"
                 value={resetNewPw}
                 onChange={(e) => setResetNewPw(e.target.value)}
@@ -306,17 +266,18 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
                 type="button"
                 size="sm"
                 className="w-full"
-                disabled={loading || resetCode.trim().length < 6 || resetNewPw.length < 8}
+                disabled={loading || resetToken.trim().length < 16 || resetNewPw.length < 8}
                 onClick={async () => {
                   setLoading(true);
                   try {
                     await api.post("/auth/password-reset/confirm", {
-                      target: resetTarget.trim(),
-                      code: resetCode.trim(),
+                      token: resetToken.trim(),
                       new_password: resetNewPw,
                     });
                     pushToast("Password updated! Sign in with your new password.", "success");
                     setResetOpen(false);
+                    setResetToken("");
+                    setResetNewPw("");
                   } catch (err) {
                     pushToast(getApiError(err), "error");
                   } finally {
@@ -330,7 +291,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
           )}
 
           <div className="mt-5 rounded-xl border border-[#76010d]/20 bg-[#fdf8f0] p-3 text-xs text-[#380106]">
-            <strong>Visiting campus?</strong> You can also skip login and order directly as a <strong>Guest</strong> at checkout with quick email or mobile OTP verification.
+            <strong>Visiting campus?</strong> You can skip login and order directly as a <strong>Guest</strong> at checkout with Razorpay payment and your signed QR pickup token.
           </div>
         </Card>
 
@@ -342,7 +303,7 @@ export const AuthPage: React.FC<{ initialMode?: "login" | "register" }> = ({ ini
               <h2 className="text-lg font-extrabold">Role Workspaces (Seeded Dev Accounts)</h2>
             </div>
             <p className="text-xs text-[#fdedce]/80 mb-5">
-              One-click sign-in for local testing across customer, kitchen, cashier POS, pickup verification, inventory & administration roles.
+              One-click sign-in for local testing across customer, kitchen, cashier POS, pickup verification, inventory & Command Center roles.
             </p>
             <div className="space-y-2.5">
               {DEMO_USERS.map((d) => (

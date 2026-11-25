@@ -25,7 +25,6 @@ from app.models.engagement import Rating, Review, SupportMessage, SupportTicket
 from app.models.menu import FoodItem
 from app.models.order import Order
 from app.services.audit_service import record_audit_log
-from app.services.auth_service import validate_guest_otp_token
 
 router = APIRouter(prefix="/support", tags=["Reviews & Support (No Refunds)"])
 
@@ -69,13 +68,13 @@ class ReviewVisibilityIn(BaseModel):
 
 
 class GuestTicketLookupIn(BaseModel):
+    ticket_number: str = Field(min_length=4, max_length=48)
     guest_phone: str = Field(min_length=7, max_length=24)
-    otp_verification_token: str = Field(min_length=8)
 
 
 class GuestTicketMessageIn(BaseModel):
+    ticket_number: str = Field(min_length=4, max_length=48)
     guest_phone: str = Field(min_length=7, max_length=24)
-    otp_verification_token: str = Field(min_length=8)
     message: str = Field(min_length=1, max_length=2000)
 
 
@@ -274,15 +273,16 @@ def lookup_guest_tickets(
     db: Session = Depends(get_db),
 ):
     clean_phone = payload.guest_phone.strip()
-    if not validate_guest_otp_token(db, clean_phone, payload.otp_verification_token, consume=False):
-        raise HTTPException(status_code=403, detail="Valid guest OTP verification is required")
+    clean_num = payload.ticket_number.strip().upper()
     candidates = _guest_contact_candidates(clean_phone)
     rows = db.scalars(
         select(SupportTicket)
-        .where(SupportTicket.guest_phone.in_(candidates))
+        .where(SupportTicket.ticket_number == clean_num, SupportTicket.guest_phone.in_(candidates))
         .order_by(SupportTicket.created_at.desc())
-        .limit(50)
+        .limit(10)
     ).all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No matching guest ticket found for this ticket number and mobile")
     return [_serialize_ticket(t) for t in rows]
 
 
@@ -293,11 +293,10 @@ def get_guest_ticket_thread(
     db: Session = Depends(get_db),
 ):
     clean_phone = payload.guest_phone.strip()
-    if not validate_guest_otp_token(db, clean_phone, payload.otp_verification_token, consume=False):
-        raise HTTPException(status_code=403, detail="Valid guest OTP verification is required")
+    clean_num = payload.ticket_number.strip().upper()
     candidates = _guest_contact_candidates(clean_phone)
     ticket = db.get(SupportTicket, ticket_id)
-    if not ticket or (ticket.guest_phone or "").strip() not in candidates:
+    if not ticket or ticket.ticket_number != clean_num or (ticket.guest_phone or "").strip() not in candidates:
         raise HTTPException(status_code=404, detail="Guest ticket not found")
     msgs = list(
         db.scalars(
@@ -316,11 +315,10 @@ def add_guest_ticket_message(
     db: Session = Depends(get_db),
 ):
     clean_phone = payload.guest_phone.strip()
-    if not validate_guest_otp_token(db, clean_phone, payload.otp_verification_token, consume=False):
-        raise HTTPException(status_code=403, detail="Valid guest OTP verification is required")
+    clean_num = payload.ticket_number.strip().upper()
     candidates = _guest_contact_candidates(clean_phone)
     ticket = db.get(SupportTicket, ticket_id)
-    if not ticket or (ticket.guest_phone or "").strip() not in candidates:
+    if not ticket or ticket.ticket_number != clean_num or (ticket.guest_phone or "").strip() not in candidates:
         raise HTTPException(status_code=404, detail="Guest ticket not found")
     msg = SupportMessage(
         ticket_id=ticket.id,

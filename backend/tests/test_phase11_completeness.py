@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.integrations.expo_push_provider import EXPO_PUSH_URL, send_expo_push
 from app.integrations.razorpay_client import razorpay_gateway
 from app.integrations.sms_provider import send_sms_or_whatsapp
-from app.models.auth import OTPVerification
+from app.models.auth import PasswordResetToken, User
 from app.models.college import Canteen
 from app.models.inventory import InventoryItem
 from app.models.menu import Ingredient
@@ -62,18 +62,18 @@ def test_celery_maintenance_tasks(clean_db_and_seed, monkeypatch):
 
     monkeypatch.setattr(tasks, "SessionLocal", lambda: _test_session_ctx())
 
-    # Expired OTP cleanup
+    # Expired password-reset token cleanup (OTP permanently removed)
+    any_user = db_session.scalar(select(User))
     db_session.add(
-        OTPVerification(
-            target="+919999988888",
-            purpose="guest_checkout",
-            otp_hash="deadbeef",
+        PasswordResetToken(
+            user_id=any_user.id,
+            token_hash="deadbeef" * 8,
             expires_at=datetime.now(timezone.utc) - timedelta(hours=2),
         )
     )
     db_session.commit()
     res = tasks.cleanup_expired_auth_artifacts_task()
-    assert res["deleted_otps"] >= 1
+    assert res["deleted_password_reset_tokens"] >= 1
 
     # Low stock alert scan creates notification once
     canteen = db_session.scalar(select(Canteen))

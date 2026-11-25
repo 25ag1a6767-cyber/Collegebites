@@ -31,7 +31,7 @@ def test_qr_location_resolve_revoke_and_replace(client: TestClient):
     assert client.get(f"/api/v1/qr/locations/resolve/{new_code}").status_code == 410
 
 
-def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: TestClient, otp_capture):
+def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: TestClient):
     main = next(c for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
     cid = main["id"]
     items = client.get(f"/api/v1/menus/canteens/{cid}/items").json()
@@ -79,29 +79,7 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
     rc = client.post("/api/v1/carts/coupon", headers=guest_headers, json={"canteen_id": cid, "coupon_code": "CAMPUS10"})
     assert rc.status_code in (400, 404, 405)
 
-    # Guest checkout requires OTP first
-    no_otp = client.post(
-        "/api/v1/orders/checkout",
-        headers=guest_headers,
-        json={
-            "canteen_id": cid,
-            "guest_name": "Guest Tester",
-            "guest_phone": "+919900112233",
-            "payment_method": "razorpay",
-            "idempotency_key": "idem-guest-1",
-            "accepted_policy": True,
-        },
-    )
-    assert no_otp.status_code == 400
-
-    # Verify Guest OTP and checkout
-    otp_req = client.post("/api/v1/auth/otp/request", json={"target": "+919900112233", "purpose": "guest_checkout"}).json()
-    assert "dev_otp" not in otp_req
-    otp_ver = client.post(
-        "/api/v1/auth/otp/verify",
-        json={"target": "+919900112233", "purpose": "guest_checkout", "code": otp_capture.latest_code("+919900112233")},
-    ).json()
-
+    # Direct guest checkout without OTP (OTP verification permanently removed)
     co = client.post(
         "/api/v1/orders/checkout",
         headers=guest_headers,
@@ -109,7 +87,6 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
             "canteen_id": cid,
             "guest_name": "Guest Tester",
             "guest_phone": "+919900112233",
-            "guest_otp_verification_token": otp_ver["verification_token"],
             "payment_method": "razorpay",
             "idempotency_key": "idem-guest-1",
             "location_qr_code": "CB-MAIN-CANTEEN",
@@ -137,7 +114,6 @@ def test_cart_backend_pricing_no_coupons_and_guest_checkout_idempotency(client: 
             "canteen_id": cid,
             "guest_name": "Guest Tester",
             "guest_phone": "+919900112233",
-            "guest_otp_verification_token": otp_ver["verification_token"],
             "payment_method": "razorpay",
             "idempotency_key": "idem-guest-1",
             "accepted_policy": True,

@@ -54,6 +54,12 @@ const FoodSafetyPage = lazy(() =>
 const AIAssistantPage = lazy(() =>
   import("./pages/assistant/AIAssistantPage").then((m) => ({ default: m.AIAssistantPage }))
 );
+const CampusIntelligencePage = lazy(() =>
+  import("./pages/customer/CampusIntelligencePage").then((m) => ({ default: m.CampusIntelligencePage }))
+);
+const CommandCenterPage = lazy(() =>
+  import("./pages/command-center/CommandCenterPage").then((m) => ({ default: m.CommandCenterPage }))
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -114,13 +120,15 @@ export function App() {
           <div className="min-h-screen flex flex-col overflow-x-hidden bg-[#fdf8f0]/40 text-slate-900 pb-20 md:pb-0">
             <Navbar />
             <OfflineBanner />
-            <div className="flex-1">
+            <main id="main-content" className="flex-1">
               <Suspense fallback={<BrandLoadingState message="Loading CollegeBites workspace..." />}>
                 <Routes>
                   <Route path="/" element={<HomePage />} />
                   <Route path="/canteen/:canteenSlug" element={<HomePage />} />
+                  <Route path="/campus-hub" element={<CampusIntelligencePage />} />
                   <Route path="/login" element={<AuthPage initialMode="login" />} />
                   <Route path="/register" element={<AuthPage initialMode="register" />} />
+                  <Route path="/reset-password" element={<AuthPage initialMode="reset" />} />
                   <Route path="/scan" element={<ScanQRPage />} />
                   <Route path="/scan/:code" element={<ScanQRPage />} />
                   <Route path="/checkout" element={<CheckoutPage />} />
@@ -267,11 +275,29 @@ export function App() {
                       </RequireRole>
                     }
                   />
+                  <Route
+                    path="/command-center"
+                    element={
+                      <RequireRole
+                        allowed={[
+                          "canteen_manager",
+                          "college_admin",
+                          "kitchen_staff",
+                          "inventory_manager",
+                          "pickup_staff",
+                          "cashier",
+                          "food_safety_inspector",
+                        ]}
+                      >
+                        <CommandCenterPage />
+                      </RequireRole>
+                    }
+                  />
                   <Route path="/kiosk" element={<KioskPage />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Suspense>
-            </div>
+            </main>
             <BrandFooter />
             <MobileAppNav />
           </div>

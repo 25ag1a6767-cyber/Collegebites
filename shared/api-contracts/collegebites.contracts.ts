@@ -32,7 +32,6 @@ export interface CollegeSettingsDto {
   currency_symbol: string;
   cancellation_policy_text: string;
   kiosk_enabled: boolean;
-  guest_otp_required: boolean;
   razorpay_enabled: boolean;
   cash_at_counter_enabled: boolean;
   pay_at_pickup_enabled: boolean;
@@ -120,9 +119,8 @@ export const COLLEGEBITES_API_PATHS = {
   canteens: "/canteens",
   login: "/auth/login",
   register: "/auth/register",
-  otpRequest: "/auth/otp/request",
-  otpVerify: "/auth/otp/verify",
-  otpLogin: "/auth/otp/login",
+  passwordResetRequest: "/auth/password-reset/request",
+  passwordResetConfirm: "/auth/password-reset/confirm",
   me: "/auth/me",
   logout: "/auth/logout",
   cart: "/carts",
@@ -132,4 +130,6 @@ export const COLLEGEBITES_API_PATHS = {
   razorpaySync: "/payments/razorpay/sync",
   notificationsMy: "/notifications/my",
   profile: "/customers/profile",
+  campusIntelligence: "/campus-intelligence",
+  commandCenter: "/command-center",
 } as const;

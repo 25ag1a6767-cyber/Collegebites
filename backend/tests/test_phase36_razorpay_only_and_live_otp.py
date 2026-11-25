@@ -44,7 +44,6 @@ from sqlalchemy import create_engine, inspect, select, text
 
 from app.core.config import settings
 from app.integrations.razorpay_client import razorpay_gateway
-from app.models.auth import OTPVerification
 from app.models.college import Canteen, Counter
 from app.models.order import Order, OrderItem
 from app.models.payment import (
@@ -661,326 +660,47 @@ def test_03_razorpay_delayed_sync_order_paid_webhook_and_production_guards(clien
     assert prod_wh.status_code == 400
 
 
-def test_04_live_otp_unconfigured_honesty_and_real_tcp_smtp_end_to_end(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-):
-    """Verify unconfigured 503 honesty, real TCP loopback SMTP delivery, zero plaintext storage/logs, cooldown, and prior invalidation."""
-    # 1. Verify production-safe defaults
-    assert settings.OTP_EXPIRY_SECONDS == 300
-    assert settings.OTP_RESEND_COOLDOWN_SECONDS == 60
-    assert settings.OTP_MAX_ATTEMPTS == 5
-    assert settings.OTP_SMS_ENABLED is False
-
-    caps0 = client.get("/api/v1/auth/otp/capabilities")
-    assert caps0.status_code == 200
-    assert caps0.json()["email_otp_enabled"] is False
-    assert caps0.json()["sms_otp_enabled"] is False
-    assert caps0.json()["otp_expiry_seconds"] == 300
-    assert caps0.json()["resend_cooldown_seconds"] == 60
-    assert caps0.json()["max_attempts"] == 5
-    assert "dev_echo_enabled" not in caps0.json()
-
-    # 2. Unconfigured Email & disabled SMS MUST return 503 (never claim sent, never return dev_otp)
-    unconf_email = client.post("/api/v1/auth/otp/request", json={"target": "visitor@collegebites.edu", "purpose": "register"})
-    assert unconf_email.status_code == 503
-    assert "dev_otp" not in unconf_email.json()
-
-    disabled_sms = client.post("/api/v1/auth/otp/request", json={"target": "+919876543210", "purpose": "guest_checkout"})
-    assert disabled_sms.status_code == 503
-
-    # 3. Real TCP Loopback SMTP Server end-to-end delivery
-    smtp_srv = LoopbackSMTPServer().start()
-    try:
-        monkeypatch.setattr(settings, "OTP_PROVIDER", "smtp")
-        monkeypatch.setattr(settings, "SMTP_HOST", smtp_srv.host)
-        monkeypatch.setattr(settings, "SMTP_PORT", smtp_srv.port)
-        monkeypatch.setattr(settings, "SMTP_SECURE", False)
-        monkeypatch.setattr(settings, "OTP_EMAIL_FROM", "noreply@collegebites.edu")
-
-        caplog.set_level(logging.DEBUG)
-        target_email = "live.otp.student@collegebites.edu"
-        req1 = client.post("/api/v1/auth/otp/request", json={"target": target_email, "purpose": "register"})
-        assert req1.status_code == 200, req1.text
-        body1 = req1.json()
-        assert body1["masked_destination"]
-        assert body1["delivery_channel"] == "email"
-        assert body1["expires_in_seconds"] == 300
-        assert body1["resend_cooldown_seconds"] == 60
-        assert "dev_otp" not in body1
-
-        code1 = smtp_srv.latest_otp()
-        assert re.fullmatch(r"\d{6}", code1)
-        # Plaintext OTP must NEVER appear in response JSON or application logs
-        assert code1 not in req1.text
-        assert code1 not in caplog.text
-
-        # DB stores ONLY HMAC-SHA256 hash, never plaintext
-        with TestingSessionLocal() as db:
-            rec1 = db.scalar(
-                select(OTPVerification)
-                .where(OTPVerification.target == target_email, OTPVerification.purpose == "register")
-                .order_by(OTPVerification.created_at.desc())
-            )
-            assert rec1 is not None
-            assert len(rec1.otp_hash) == 64
-            assert rec1.otp_hash != code1
-            assert code1 not in rec1.otp_hash
-            assert rec1.channel == "email"
-            assert rec1.provider == "smtp"
-            assert rec1.max_attempts == 5
-            assert rec1.resend_available_at is not None
-
-        # 4. Immediate resend within 60s cooldown returns 429 + Retry-After header
-        cooldown_hit = client.post("/api/v1/auth/otp/request", json={"target": target_email, "purpose": "register"})
-        assert cooldown_hit.status_code == 429
-        assert int(cooldown_hit.headers.get("Retry-After", "0")) >= 1
-
-        # 5. Once cooldown passes, requesting a new OTP invalidates the previous unverified OTP
-        with TestingSessionLocal() as db:
-            rec1_db = db.scalar(
-                select(OTPVerification)
-                .where(OTPVerification.target == target_email, OTPVerification.purpose == "register")
-                .order_by(OTPVerification.created_at.desc())
-            )
-            rec1_id = rec1_db.id
-            rec1_db.resend_available_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-            db.commit()
-
-        req2 = client.post("/api/v1/auth/otp/request", json={"target": target_email, "purpose": "register"})
-        assert req2.status_code == 200, req2.text
-        code2 = smtp_srv.latest_otp()
-
-        with TestingSessionLocal() as db:
-            old_rec = db.get(OTPVerification, rec1_id)
-            assert old_rec.invalidated_at is not None
-
-        if code2 != code1:
-            old_try = client.post(
-                "/api/v1/auth/otp/verify",
-                json={"target": target_email, "purpose": "register", "code": code1},
-            )
-            assert old_try.status_code == 400
-
-        ver2 = client.post(
-            "/api/v1/auth/otp/verify",
-            json={"target": target_email, "purpose": "register", "code": code2},
-        )
-        assert ver2.status_code == 200, ver2.text
-        assert ver2.json()["verified"] is True
-        assert ver2.json()["verification_token"].startswith("OTPVER.")
-    finally:
-        smtp_srv.close()
-
-    # 6. Closed/unreachable SMTP port honestly returns 503
-    monkeypatch.setattr(settings, "OTP_RESEND_COOLDOWN_SECONDS", 0)
-    dead_res = client.post("/api/v1/auth/otp/request", json={"target": "unreachable@collegebites.edu", "purpose": "register"})
-    assert dead_res.status_code == 503
+def test_04_legacy_otp_endpoints_permanently_removed(client: TestClient):
+    """Phase 38 supersede check: all legacy OTP verification routes were permanently removed."""
+    for method, path in (
+        ("GET", "/api/v1/auth/otp/capabilities"),
+        ("POST", "/api/v1/auth/otp/request"),
+        ("POST", "/api/v1/auth/otp/verify"),
+        ("POST", "/api/v1/auth/otp/login"),
+        ("POST", "/api/v1/auth/phone/verify"),
+        ("POST", "/api/v1/auth/email/verify"),
+    ):
+        assert client.request(method, path, json={}).status_code in (404, 405)
 
 
-def test_05_live_otp_lockout_expiry_single_use_replay_isolation_and_provider_sandboxes(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, otp_capture
-):
-    """Verify max-attempt lockout, expiry, single-use replay blocking, cross-purpose/target isolation, QR payment independence, and Resend/Twilio sandboxes."""
-    # 1. Wrong OTP attempts -> lockout after 5 attempts
-    lock_target = "lockout.user@collegebites.edu"
-    assert client.post("/api/v1/auth/otp/request", json={"target": lock_target, "purpose": "register"}).status_code == 200
-    real_lock_code = otp_capture.latest_code(lock_target)
-    wrong_code = "999999" if real_lock_code != "999999" else "888888"
-
-    for attempt in range(1, 5):
-        r = client.post("/api/v1/auth/otp/verify", json={"target": lock_target, "purpose": "register", "code": wrong_code})
-        assert r.status_code == 400
-        assert "remaining" in r.json()["detail"].lower()
-
-    r5 = client.post("/api/v1/auth/otp/verify", json={"target": lock_target, "purpose": "register", "code": wrong_code})
-    assert r5.status_code == 429
-
-    # Even the real code must fail after max attempts lockout invalidated the record
-    after_lock = client.post("/api/v1/auth/otp/verify", json={"target": lock_target, "purpose": "register", "code": real_lock_code})
-    assert after_lock.status_code in (400, 429)
-
-    # 2. Expired OTP rejected
-    exp_target = "expired.user@collegebites.edu"
-    assert client.post("/api/v1/auth/otp/request", json={"target": exp_target, "purpose": "register"}).status_code == 200
-    exp_code = otp_capture.latest_code(exp_target)
-    with TestingSessionLocal() as db:
-        rec = db.scalar(select(OTPVerification).where(OTPVerification.target == exp_target))
-        rec.expires_at = datetime.now(timezone.utc) - timedelta(seconds=5)
-        db.commit()
-    exp_res = client.post("/api/v1/auth/otp/verify", json={"target": exp_target, "purpose": "register", "code": exp_code})
-    assert exp_res.status_code == 400
-    assert "expired" in exp_res.json()["detail"].lower()
-
-    # 3. Single-use OTP login prevents replay
-    assert client.post("/api/v1/auth/otp/request", json={"target": "student@collegebites.edu", "purpose": "login"}).status_code == 200
-    login_code = otp_capture.latest_code("student@collegebites.edu")
-    login1 = client.post("/api/v1/auth/otp/login", json={"target": "student@collegebites.edu", "code": login_code})
-    assert login1.status_code == 200
-    login_replay = client.post("/api/v1/auth/otp/login", json={"target": "student@collegebites.edu", "code": login_code})
-    assert login_replay.status_code == 400
-
-    # 4. Authenticated email verification (`POST /api/v1/auth/email/verify`)
-    student_hdrs = {"Authorization": f"Bearer {login1.json()['access_token']}"}
-    assert client.post(
-        "/api/v1/auth/otp/request",
-        headers=student_hdrs,
-        json={"target": "student@collegebites.edu", "purpose": "email_verify"},
-    ).status_code == 200
-    ev_code = otp_capture.latest_code("student@collegebites.edu")
-    ev_ok = client.post(
-        "/api/v1/auth/email/verify",
-        headers=student_hdrs,
-        json={"target": "student@collegebites.edu", "code": ev_code},
-    )
-    assert ev_ok.status_code == 200
-    assert ev_ok.json()["is_verified"] is True
-    # Replay must fail
-    assert client.post(
-        "/api/v1/auth/email/verify",
-        headers=student_hdrs,
-        json={"target": "student@collegebites.edu", "code": ev_code},
-    ).status_code == 400
-
-    # 5. Cross-purpose, cross-target, single-use consumption on Guest Checkout + OTP never substitutes for payment at pickup
+def test_05_unpaid_guest_checkout_still_blocked_at_pickup_without_otp(client: TestClient):
+    """Guest checkout works directly without OTP, while unpaid orders remain strictly blocked at pickup."""
     main = next(c for c in client.get("/api/v1/canteens").json() if c["slug"] == "main-canteen")
     coffee = next(i for i in client.get(f"/api/v1/menus/canteens/{main['id']}/items").json() if "Coffee" in i["name"])
     pickup = login_as(client, "pickup@collegebites.edu", "Staff@12345")
 
-    assert client.post("/api/v1/auth/otp/request", json={"target": "guest.one@collegebites.edu", "purpose": "register"}).status_code == 200
-    reg_tok = client.post(
-        "/api/v1/auth/otp/verify",
-        json={"target": "guest.one@collegebites.edu", "purpose": "register", "code": otp_capture.latest_code("guest.one@collegebites.edu")},
-    ).json()["verification_token"]
-
-    # Cross-purpose token (`register` used for `guest_checkout`) MUST fail
-    cross_purpose = client.post(
+    guest_co = client.post(
         "/api/v1/orders/checkout",
         json={
             "canteen_id": main["id"],
             "guest_name": "Guest One",
-            "guest_phone": "guest.one@collegebites.edu",
-            "guest_otp_verification_token": reg_tok,
+            "guest_phone": "+919811223344",
             "payment_method": "razorpay",
+            "idempotency_key": "guest-no-otp-pickup-guard-1",
             "use_cart": False,
             "direct_items": [{"food_item_id": coffee["id"], "quantity": 1}],
             "accepted_policy": True,
         },
     )
-    assert cross_purpose.status_code == 400
-
-    # Valid guest_checkout OTP token
-    assert client.post("/api/v1/auth/otp/request", json={"target": "guest.one@collegebites.edu", "purpose": "guest_checkout"}).status_code == 200
-    guest_tok = client.post(
-        "/api/v1/auth/otp/verify",
-        json={"target": "guest.one@collegebites.edu", "purpose": "guest_checkout", "code": otp_capture.latest_code("guest.one@collegebites.edu")},
-    ).json()["verification_token"]
-
-    # Cross-target token (`guest.one` token used for `guest.two`) MUST fail
-    cross_target = client.post(
-        "/api/v1/orders/checkout",
-        json={
-            "canteen_id": main["id"],
-            "guest_name": "Guest Two",
-            "guest_phone": "guest.two@collegebites.edu",
-            "guest_otp_verification_token": guest_tok,
-            "payment_method": "razorpay",
-            "use_cart": False,
-            "direct_items": [{"food_item_id": coffee["id"], "quantity": 1}],
-            "accepted_policy": True,
-        },
-    )
-    assert cross_target.status_code == 400
-
-    # First checkout with matching guest email succeeds and consumes the verification token
-    guest_co1 = client.post(
-        "/api/v1/orders/checkout",
-        json={
-            "canteen_id": main["id"],
-            "guest_name": "Guest One",
-            "guest_phone": "guest.one@collegebites.edu",
-            "guest_otp_verification_token": guest_tok,
-            "payment_method": "razorpay",
-            "idempotency_key": "guest-single-use-1",
-            "use_cart": False,
-            "direct_items": [{"food_item_id": coffee["id"], "quantity": 1}],
-            "accepted_policy": True,
-        },
-    )
-    assert guest_co1.status_code == 201, guest_co1.text
-
-    # Even though Guest OTP succeeded, unpaid order MUST be blocked at pickup handover!
+    assert guest_co.status_code == 201, guest_co.text
     assert (
         client.post(
             "/api/v1/pickup/handover",
             headers=pickup["headers"],
-            json={"order_id": guest_co1.json()["id"], "verification_method": "manual_token"},
+            json={"order_id": guest_co.json()["id"], "verification_method": "manual_token"},
         ).status_code
         == 409
     )
-
-    # Replaying the consumed `guest_tok` on a NEW order (distinct idempotency_key) MUST be rejected
-    guest_co2_replay = client.post(
-        "/api/v1/orders/checkout",
-        json={
-            "canteen_id": main["id"],
-            "guest_name": "Guest One",
-            "guest_phone": "guest.one@collegebites.edu",
-            "guest_otp_verification_token": guest_tok,
-            "payment_method": "razorpay",
-            "idempotency_key": "guest-single-use-2",
-            "use_cart": False,
-            "direct_items": [{"food_item_id": coffee["id"], "quantity": 1}],
-            "accepted_policy": True,
-        },
-    )
-    assert guest_co2_replay.status_code == 400
-
-    # 6. Rate limiting per destination (15m window)
-    monkeypatch.setattr(settings, "OTP_RATE_LIMIT_PER_DEST_15M", 2)
-    rl_target = "ratelimit.check@collegebites.edu"
-    assert client.post("/api/v1/auth/otp/request", json={"target": rl_target, "purpose": "register"}).status_code == 200
-    assert client.post("/api/v1/auth/otp/request", json={"target": rl_target, "purpose": "register"}).status_code == 200
-    assert client.post("/api/v1/auth/otp/request", json={"target": rl_target, "purpose": "register"}).status_code == 429
-
-    # 7. Real provider HTTP transport sandboxes (`resend` + `twilio`) using respx
-    from app.integrations import email_provider, sms_provider
-    from app.services import auth_service as auth_svc
-
-    monkeypatch.setattr(auth_svc, "resolve_email_otp_provider", email_provider.resolve_email_otp_provider)
-    monkeypatch.setattr(auth_svc, "resolve_sms_otp_provider", sms_provider.resolve_sms_otp_provider)
-    monkeypatch.setattr(auth_svc, "deliver_otp_email", email_provider.deliver_otp_email)
-    monkeypatch.setattr(auth_svc, "deliver_otp_sms", sms_provider.deliver_otp_sms)
-    monkeypatch.setattr(settings, "OTP_RATE_LIMIT_PER_DEST_15M", 20)
-    monkeypatch.setattr(settings, "OTP_PROVIDER", "resend")
-    monkeypatch.setattr(settings, "RESEND_API_KEY", "re_sandbox_key_123")
-    monkeypatch.setattr(settings, "OTP_EMAIL_FROM", "noreply@collegebites.edu")
-    monkeypatch.setattr(settings, "OTP_SMS_ENABLED", True)
-    monkeypatch.setattr(settings, "SMS_PROVIDER", "twilio")
-    monkeypatch.setattr(settings, "TWILIO_ACCOUNT_SID", "AC_test_sandbox")
-    monkeypatch.setattr(settings, "TWILIO_AUTH_TOKEN", "tok_test_sandbox")
-    monkeypatch.setattr(settings, "TWILIO_FROM_NUMBER", "+15005550006")
-
-    with respx.mock:
-        resend_ok = respx.post("https://api.resend.com/emails").mock(
-            return_value=httpx.Response(200, json={"id": "email_01"})
-        )
-        r_res = client.post("/api/v1/auth/otp/request", json={"target": "resend.user@collegebites.edu", "purpose": "register"})
-        assert r_res.status_code == 200
-        assert resend_ok.called
-
-        resend_fail = respx.post("https://api.resend.com/emails").mock(
-            return_value=httpx.Response(502, json={"message": "Upstream gateway error"})
-        )
-        r_fail = client.post("/api/v1/auth/otp/request", json={"target": "resend.fail@collegebites.edu", "purpose": "register"})
-        assert r_fail.status_code == 503
-        assert resend_fail.called
-
-        twilio_url = "https://api.twilio.com/2010-04-01/Accounts/AC_test_sandbox/Messages.json"
-        twilio_ok = respx.post(twilio_url).mock(return_value=httpx.Response(201, json={"sid": "SM_01"}))
-        r_sms = client.post("/api/v1/auth/otp/request", json={"target": "+919811223344", "purpose": "guest_checkout"})
-        assert r_sms.status_code == 200
-        assert r_sms.json()["delivery_channel"] == "sms"
-        assert twilio_ok.called
 
 
 def test_06_alembic_migration_f6a7b8c9d0e1_preserves_history_and_upgrades_cleanly(tmp_path: Path):

@@ -74,7 +74,6 @@ def update_profile(
             if dup:
                 raise HTTPException(status_code=409, detail="Mobile number already registered to another user")
             user.phone = clean_phone
-            user.is_verified = False
     for field in ("college_id_number", "department", "dietary_preference", "default_canteen_id", "notification_opt_in"):
         val = getattr(payload, field)
         if val is not None:
