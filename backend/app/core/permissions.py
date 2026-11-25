@@ -374,6 +374,7 @@ def load_user_roles_and_permissions(db: Session, user_id: UUID) -> tuple[set[str
 
 
 def get_optional_principal(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> Optional[AuthenticatedPrincipal]:
@@ -381,7 +382,13 @@ def get_optional_principal(
         return None
     token = credentials.credentials
     try:
-        payload = decode_token(token)
+        state = request.scope.setdefault("state", {})
+        if state.get("jwt_raw") == token and isinstance(state.get("jwt_payload"), dict):
+            payload = state["jwt_payload"]
+        else:
+            payload = decode_token(token)
+            state["jwt_raw"] = token
+            state["jwt_payload"] = payload
     except jwt.PyJWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired access token") from exc
 

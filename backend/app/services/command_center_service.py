@@ -8,9 +8,10 @@ from typing import Any, Optional
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
+from app.core.cache import NS_COMMAND_CENTER, cache_manager, invalidate_command_center
 from app.core.permissions import ROLE_CANTEEN_MANAGER, ROLE_COLLEGE_ADMIN, ROLE_SUPER_ADMIN
 from app.core.time_utils import today_college
 from app.models.auth import StaffProfile, User
@@ -92,52 +93,93 @@ def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
 
 
 def get_unified_operational_intelligence(db: Session, *, canteen_id: Optional[UUID] = None) -> dict[str, Any]:
+    cache_ns = f"{NS_COMMAND_CENTER}:{canteen_id}" if canteen_id else NS_COMMAND_CENTER
+    hit, cached = cache_manager.get_json(cache_ns, "unified", l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
     now = datetime.now(timezone.utc)
     since_24h = now - timedelta(hours=24)
 
-    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7)
+    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7, include_history=False)
     counters = [c for c in crowd["counters"] if not canteen_id or c["canteen_id"] == str(canteen_id)]
     seating = campus_intelligence_service.list_seating_availability(db, canteen_id=canteen_id)
 
-    ord_base = select(Order).where(Order.created_at >= since_24h)
+    # SQL aggregates instead of hydrating all 24h Order / InventoryItem / FoodItem / Payment ORM rows
+    ord_stmt = select(
+        func.count(Order.id),
+        func.coalesce(func.sum(case((Order.status == "COMPLETED", 1), else_=0)), 0),
+        func.coalesce(func.sum(case((Order.status.in_(("CANCELLED", "REJECTED")), 1), else_=0)), 0),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Order.status.in_(("PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING")),
+                            Order.delayed_minutes > 0,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ),
+        func.count(func.distinct(Order.customer_id)),
+        func.coalesce(func.sum(case((Order.is_guest.is_(True), 1), else_=0)), 0),
+    ).where(Order.created_at >= since_24h)
     if canteen_id:
-        ord_base = ord_base.where(Order.canteen_id == canteen_id)
-    recent_orders = list(db.scalars(ord_base).all())
-    total_24h = len(recent_orders)
-    completed_24h = sum(1 for o in recent_orders if o.status == "COMPLETED")
-    cancelled_24h = sum(1 for o in recent_orders if o.status in ("CANCELLED", "REJECTED"))
-    delayed_active = sum(
-        1
-        for o in recent_orders
-        if o.status in ("PAYMENT_CONFIRMED", "PLACED", "ACCEPTED", "PREPARING") and int(o.delayed_minutes or 0) > 0
-    )
-    active_customers_24h = len({o.customer_id for o in recent_orders if o.customer_id})
-    guest_orders_24h = sum(1 for o in recent_orders if o.is_guest)
+        ord_stmt = ord_stmt.where(Order.canteen_id == canteen_id)
+    ord_agg = db.execute(ord_stmt).one()
+    total_24h = int(ord_agg[0] or 0)
+    completed_24h = int(ord_agg[1] or 0)
+    cancelled_24h = int(ord_agg[2] or 0)
+    delayed_active = int(ord_agg[3] or 0)
+    active_customers_24h = int(ord_agg[4] or 0)
+    guest_orders_24h = int(ord_agg[5] or 0)
 
-    # Inventory health
-    inv_stmt = select(InventoryItem).where(InventoryItem.is_archived.is_(False))
+    inv_stmt = select(
+        func.count(InventoryItem.id),
+        func.coalesce(func.sum(case((InventoryItem.current_quantity <= InventoryItem.reorder_level, 1), else_=0)), 0),
+        func.coalesce(func.sum(case((InventoryItem.current_quantity <= 0, 1), else_=0)), 0),
+    ).where(InventoryItem.is_archived.is_(False))
     if canteen_id:
         inv_stmt = inv_stmt.where(InventoryItem.canteen_id == canteen_id)
-    inv_rows = list(db.scalars(inv_stmt).all())
-    low_stock_count = sum(1 for i in inv_rows if i.current_quantity <= i.reorder_level)
-    out_of_stock_count = sum(1 for i in inv_rows if i.current_quantity <= 0)
+    inv_agg = db.execute(inv_stmt).one()
+    inv_tracked_count = int(inv_agg[0] or 0)
+    low_stock_count = int(inv_agg[1] or 0)
+    out_of_stock_count = int(inv_agg[2] or 0)
 
-    # Menu availability
-    food_stmt = select(FoodItem).where(FoodItem.is_active.is_(True))
+    food_stmt = select(
+        func.count(FoodItem.id),
+        func.coalesce(
+            func.sum(
+                case(
+                    (and_(FoodItem.is_available.is_(True), FoodItem.insufficient_ingredients.is_(False)), 1),
+                    else_=0,
+                )
+            ),
+            0,
+        ),
+    ).where(FoodItem.is_active.is_(True))
     if canteen_id:
         food_stmt = food_stmt.where(FoodItem.canteen_id == canteen_id)
-    foods = list(db.scalars(food_stmt).all())
-    menu_avail_count = sum(1 for f in foods if f.is_available and not f.insufficient_ingredients)
-    menu_unavail_count = len(foods) - menu_avail_count
+    food_agg = db.execute(food_stmt).one()
+    total_active_foods = int(food_agg[0] or 0)
+    menu_avail_count = int(food_agg[1] or 0)
+    menu_unavail_count = total_active_foods - menu_avail_count
 
-    # Razorpay payment health (24h)
-    pay_stmt = select(Payment).join(Order, Order.id == Payment.order_id).where(Payment.created_at >= since_24h)
+    pay_stmt = select(
+        func.coalesce(func.sum(case((Payment.status == "CONFIRMED", 1), else_=0)), 0),
+        func.coalesce(func.sum(case((Payment.status == "FAILED", 1), else_=0)), 0),
+        func.coalesce(func.sum(case((Payment.status == "PENDING", 1), else_=0)), 0),
+    ).join(Order, Order.id == Payment.order_id).where(Payment.created_at >= since_24h)
     if canteen_id:
         pay_stmt = pay_stmt.where(Order.canteen_id == canteen_id)
-    pays = list(db.scalars(pay_stmt).all())
-    pay_confirmed = sum(1 for p in pays if p.status == "CONFIRMED")
-    pay_failed = sum(1 for p in pays if p.status == "FAILED")
-    pay_pending = sum(1 for p in pays if p.status == "PENDING")
+    pay_agg = db.execute(pay_stmt).one()
+    pay_confirmed = int(pay_agg[0] or 0)
+    pay_failed = int(pay_agg[1] or 0)
+    pay_pending = int(pay_agg[2] or 0)
 
     open_discrepancies = int(
         db.scalar(
@@ -231,7 +273,7 @@ def get_unified_operational_intelligence(db: Session, *, canteen_id: Optional[UU
     elif critical_alerts:
         health_status = "degraded"
 
-    return {
+    result = {
         "operational_health": health_status,
         "counters": counters,
         "orders_24h": {
@@ -243,12 +285,12 @@ def get_unified_operational_intelligence(db: Session, *, canteen_id: Optional[UU
             "guest_orders": guest_orders_24h,
         },
         "inventory": {
-            "tracked_items": len(inv_rows),
+            "tracked_items": inv_tracked_count,
             "low_stock_count": low_stock_count,
             "out_of_stock_count": out_of_stock_count,
         },
         "menu_availability": {
-            "total_active": len(foods),
+            "total_active": total_active_foods,
             "available_now": menu_avail_count,
             "unavailable_now": menu_unavail_count,
         },
@@ -272,6 +314,8 @@ def get_unified_operational_intelligence(db: Session, *, canteen_id: Optional[UU
         "authoritative_source": "collegebites_primary_database",
         "last_updated_at": now.isoformat(),
     }
+    cache_manager.set_json(cache_ns, "unified", result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 def create_operational_incident(
@@ -332,6 +376,7 @@ def create_operational_incident(
     )
     db.commit()
     db.refresh(inc)
+    invalidate_command_center(canteen_id)
     return _serialize_incident(inc)
 
 
@@ -361,8 +406,14 @@ def list_operational_incidents(
     status_filter: Optional[str] = None,
     category: Optional[str] = None,
     limit: int = 50,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
-    stmt = select(OperationalIncident).order_by(OperationalIncident.created_at.desc()).limit(max(1, min(limit, 200)))
+    stmt = (
+        select(OperationalIncident)
+        .order_by(OperationalIncident.created_at.desc())
+        .offset(max(0, offset))
+        .limit(max(1, min(limit, 200)))
+    )
     if canteen_id:
         stmt = stmt.where((OperationalIncident.canteen_id == canteen_id) | (OperationalIncident.canteen_id.is_(None)))
     if status_filter:
@@ -406,6 +457,7 @@ def update_operational_incident(
     )
     db.commit()
     db.refresh(inc)
+    invalidate_command_center(inc.canteen_id)
     return _serialize_incident(inc)
 
 
@@ -747,8 +799,15 @@ def _serialize_rca(r: RootCauseInvestigation) -> dict[str, Any]:
     }
 
 
-def list_investigations(db: Session, *, canteen_id: Optional[UUID] = None, limit: int = 30) -> list[dict[str, Any]]:
-    stmt = select(RootCauseInvestigation).order_by(RootCauseInvestigation.created_at.desc()).limit(max(1, min(limit, 100)))
+def list_investigations(
+    db: Session, *, canteen_id: Optional[UUID] = None, limit: int = 30, offset: int = 0
+) -> list[dict[str, Any]]:
+    stmt = (
+        select(RootCauseInvestigation)
+        .order_by(RootCauseInvestigation.created_at.desc())
+        .offset(max(0, offset))
+        .limit(max(1, min(limit, 100)))
+    )
     if canteen_id:
         stmt = stmt.where((RootCauseInvestigation.canteen_id == canteen_id) | (RootCauseInvestigation.canteen_id.is_(None)))
     return [_serialize_rca(r) for r in db.scalars(stmt).all()]
@@ -775,25 +834,39 @@ def review_investigation(db: Session, investigation_id: UUID, *, status: str, ac
 
 
 def get_predictive_incident_prevention(db: Session, *, canteen_id: Optional[UUID] = None) -> dict[str, Any]:
+    cache_ns = f"{NS_COMMAND_CENTER}:{canteen_id}" if canteen_id else NS_COMMAND_CENTER
+    hit, cached = cache_manager.get_json(cache_ns, "incident_prev", l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
     now = datetime.now(timezone.utc)
     since_24h = now - timedelta(hours=24)
     since_30d = now - timedelta(days=30)
 
-    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7)
+    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7, include_history=True)
     counters = [c for c in crowd["counters"] if not canteen_id or c["canteen_id"] == str(canteen_id)]
     max_workload = max((c["workload_percent"] for c in counters), default=0)
 
-    inv_q = select(InventoryItem).where(InventoryItem.is_archived.is_(False))
+    inv_q = select(
+        func.count(InventoryItem.id),
+        func.coalesce(func.sum(case((InventoryItem.current_quantity <= InventoryItem.reorder_level, 1), else_=0)), 0),
+    ).where(InventoryItem.is_archived.is_(False))
     if canteen_id:
         inv_q = inv_q.where(InventoryItem.canteen_id == canteen_id)
-    invs = list(db.scalars(inv_q).all())
-    low_inv = [i for i in invs if i.current_quantity <= i.reorder_level]
+    inv_total, inv_low = db.execute(inv_q).one()
+    inv_total = int(inv_total or 0)
+    inv_low = int(inv_low or 0)
 
-    pay_q = select(Payment).join(Order, Order.id == Payment.order_id).where(Payment.created_at >= since_24h)
+    pay_q = select(
+        func.count(Payment.id),
+        func.coalesce(func.sum(case((Payment.status == "FAILED", 1), else_=0)), 0),
+    ).join(Order, Order.id == Payment.order_id).where(Payment.created_at >= since_24h)
     if canteen_id:
         pay_q = pay_q.where(Order.canteen_id == canteen_id)
-    pays = list(db.scalars(pay_q).all())
-    pay_fail_rate = round((sum(1 for p in pays if p.status == "FAILED") / len(pays)) * 100, 1) if pays else None
+    pay_total, pay_failed = db.execute(pay_q).one()
+    pay_total = int(pay_total or 0)
+    pay_failed = int(pay_failed or 0)
+    pay_fail_rate = round((pay_failed / pay_total) * 100, 1) if pay_total else None
 
     temp_violations_7d = int(
         db.scalar(
@@ -833,15 +906,15 @@ def get_predictive_incident_prevention(db: Session, *, canteen_id: Optional[UUID
     )
 
     # Stockout risk
-    if invs:
-        s_ratio = round((len(low_inv) / len(invs)) * 100)
+    if inv_total:
+        s_ratio = round((inv_low / inv_total) * 100)
         risks.append(
             {
                 "category": "inventory_stockout",
-                "risk_level": "high" if s_ratio >= 30 or len(low_inv) >= 5 else ("medium" if len(low_inv) >= 1 else "low"),
+                "risk_level": "high" if s_ratio >= 30 or inv_low >= 5 else ("medium" if inv_low >= 1 else "low"),
                 "risk_score": min(100, s_ratio),
                 "confidence": "high",
-                "evidence": f"{len(low_inv)} of {len(invs)} tracked ingredients are at/below reorder threshold.",
+                "evidence": f"{inv_low} of {inv_total} tracked ingredients are at/below reorder threshold.",
                 "suggested_preventive_actions": [
                     "Review draft Purchase Orders in Automated Reordering.",
                     "Verify menu items linked to low-stock ingredients.",
@@ -856,8 +929,8 @@ def get_predictive_incident_prevention(db: Session, *, canteen_id: Optional[UUID
                 "category": "payment_failures",
                 "risk_level": "high" if pay_fail_rate >= 20 else ("medium" if pay_fail_rate >= 8 else "low"),
                 "risk_score": min(100, round(pay_fail_rate)),
-                "confidence": "medium" if len(pays) >= 5 else "low",
-                "evidence": f"{pay_fail_rate}% Razorpay failure rate across {len(pays)} payment attempt(s) in last 24h.",
+                "confidence": "medium" if pay_total >= 5 else "low",
+                "evidence": f"{pay_fail_rate}% Razorpay failure rate across {pay_total} payment attempt(s) in last 24h.",
                 "suggested_preventive_actions": [
                     "Check Razorpay webhook logs and run sync on stale PENDING orders.",
                 ],
@@ -891,7 +964,7 @@ def get_predictive_incident_prevention(db: Session, *, canteen_id: Optional[UUID
         }
     )
 
-    return {
+    result = {
         "risk_assessments": risks,
         "historical_incidents_30d": hist_incidents_30d,
         "disclaimer": (
@@ -900,6 +973,8 @@ def get_predictive_incident_prevention(db: Session, *, canteen_id: Optional[UUID
         ),
         "last_updated_at": now.isoformat(),
     }
+    cache_manager.set_json(cache_ns, "incident_prev", result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 # =============================================================================
@@ -908,9 +983,14 @@ def get_predictive_incident_prevention(db: Session, *, canteen_id: Optional[UUID
 
 
 def get_intelligent_resource_allocation(db: Session, *, canteen_id: Optional[UUID] = None) -> dict[str, Any]:
+    cache_ns = f"{NS_COMMAND_CENTER}:{canteen_id}" if canteen_id else NS_COMMAND_CENTER
+    hit, cached = cache_manager.get_json(cache_ns, "resource_alloc", l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
     now = datetime.now(timezone.utc)
     today_d = today_college()
-    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7)
+    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7, include_history=False)
     counters = [c for c in crowd["counters"] if not canteen_id or c["canteen_id"] == str(canteen_id)]
 
     # Actual staff records
@@ -1008,7 +1088,7 @@ def get_intelligent_resource_allocation(db: Session, *, canteen_id: Optional[UUI
             }
         )
 
-    return {
+    result = {
         "two_counter_structure_preserved": True,
         "counters_allocation": counter_staff_view,
         "station_utilization": [
@@ -1021,6 +1101,8 @@ def get_intelligent_resource_allocation(db: Session, *, canteen_id: Optional[UUI
         ),
         "last_updated_at": now.isoformat(),
     }
+    cache_manager.set_json(cache_ns, "resource_alloc", result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 # =============================================================================
@@ -1261,21 +1343,35 @@ def process_nl_admin_command(
 
 
 def get_live_cafeteria_map(db: Session, *, hours: int = 24) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
     lookback_h = max(1, min(int(hours or 24), 168))
+    cache_key = f"cafeteria_map:h={lookback_h}"
+    hit, cached = cache_manager.get_json(NS_COMMAND_CENTER, cache_key, l1_ttl=3.0)
+    if hit and isinstance(cached, dict):
+        return cached
+
+    now = datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_h)
 
-    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7)
+    crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7, include_history=False)
     seating = campus_intelligence_service.list_seating_availability(db)
     kitchens = list(db.scalars(select(Kitchen).where(Kitchen.is_active.is_(True))).all())
     open_incidents = list_operational_incidents(db, status_filter="open", limit=30)
 
-    # Historical order volume per counter in window
+    # Single batched SQL aggregate for historical order volume per counter in window
     hist_map = {
         str(cid): int(cnt or 0)
         for cid, cnt in db.execute(
             select(Order.canteen_id, func.count(Order.id))
             .where(Order.created_at >= since, Order.status.notin_(("PAYMENT_FAILED", "CANCELLED")))
+            .group_by(Order.canteen_id)
+        ).all()
+    }
+    # Single batched SQL aggregate for kitchen active orders (eliminates N+1 per kitchen)
+    kitchen_prep_by_canteen = {
+        cid: int(cnt or 0)
+        for cid, cnt in db.execute(
+            select(Order.canteen_id, func.count(Order.id))
+            .where(Order.status.in_(("ACCEPTED", "PREPARING")))
             .group_by(Order.canteen_id)
         ).all()
     }
@@ -1304,14 +1400,7 @@ def get_live_cafeteria_map(db: Session, *, hours: int = 24) -> dict[str, Any]:
         )
 
     for k in kitchens:
-        k_prep = int(
-            db.scalar(
-                select(func.count(Order.id)).where(
-                    Order.canteen_id == k.canteen_id, Order.status.in_(("ACCEPTED", "PREPARING"))
-                )
-            )
-            or 0
-        )
+        k_prep = kitchen_prep_by_canteen.get(k.canteen_id, 0)
         k_pct = min(100, round((k_prep / max(1, int(k.max_active_orders or 35))) * 100))
         sections.append(
             {
@@ -1361,7 +1450,7 @@ def get_live_cafeteria_map(db: Session, *, hours: int = 24) -> dict[str, Any]:
             }
         )
 
-    return {
+    result = {
         "layout_source": "configured_cafeteria_entities",
         "two_counter_cafeteria": True,
         "historical_window_hours": lookback_h,
@@ -1373,6 +1462,8 @@ def get_live_cafeteria_map(db: Session, *, hours: int = 24) -> dict[str, Any]:
         ),
         "last_updated_at": now.isoformat(),
     }
+    cache_manager.set_json(NS_COMMAND_CENTER, cache_key, result, ttl_seconds=15, l1_ttl=3.0)
+    return result
 
 
 # =============================================================================
@@ -1525,10 +1616,13 @@ def generate_operational_report(
     return {"id": str(rec.id), "generation_source": rec.generation_source, **payload}
 
 
-def list_operational_reports(db: Session, *, limit: int = 30) -> list[dict[str, Any]]:
+def list_operational_reports(db: Session, *, limit: int = 30, offset: int = 0) -> list[dict[str, Any]]:
     rows = list(
         db.scalars(
-            select(OperationalReportRecord).order_by(OperationalReportRecord.created_at.desc()).limit(max(1, min(limit, 100)))
+            select(OperationalReportRecord)
+            .order_by(OperationalReportRecord.created_at.desc())
+            .offset(max(0, offset))
+            .limit(max(1, min(limit, 100)))
         ).all()
     )
     return [

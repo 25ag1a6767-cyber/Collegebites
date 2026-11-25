@@ -2,11 +2,12 @@ from datetime import date
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.http_cache import apply_etag_and_check_304, set_private_no_store
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_CASHIER,
@@ -91,8 +92,17 @@ class VoiceQueryIn(BaseModel):
 
 # --- Feature 1: Live Cafeteria Crowd Intelligence ---
 @router.get("/crowd/live")
-def get_live_crowd(days: int = Query(default=7, ge=1, le=60), db: Session = Depends(get_db)):
-    return campus_intelligence_service.get_live_crowd_intelligence(db, days=days)
+def get_live_crowd(
+    request: Request,
+    response: Response,
+    days: int = Query(default=7, ge=1, le=60),
+    db: Session = Depends(get_db),
+):
+    data = campus_intelligence_service.get_live_crowd_intelligence(db, days=days)
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=15, swr=30)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/crowd/snapshot")
@@ -107,10 +117,19 @@ def capture_crowd_snapshot(
 @router.get("/pickup-predictions/{canteen_id}")
 def get_pickup_prediction(
     canteen_id: UUID,
+    request: Request,
+    response: Response,
     order_id: Optional[UUID] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    return campus_intelligence_service.get_smart_pickup_prediction(db, canteen_id, order_id=order_id)
+    data = campus_intelligence_service.get_smart_pickup_prediction(db, canteen_id, order_id=order_id)
+    if order_id is not None:
+        set_private_no_store(response)
+        return data
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=15, swr=30)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 # --- Feature 3: Virtual Queue Overview & Priority ---
@@ -181,11 +200,12 @@ def verify_order_tray(
 def list_tray_verification_history(
     canteen_id: Optional[UUID] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*OPS_VIEW_ROLES)),
     db: Session = Depends(get_db),
 ):
     eff_cid = scoped_canteen_for_principal(principal, canteen_id) if not principal.has_role(ROLE_SUPER_ADMIN, ROLE_COLLEGE_ADMIN) else canteen_id
-    return campus_intelligence_service.list_tray_verifications(db, canteen_id=eff_cid, limit=limit)
+    return campus_intelligence_service.list_tray_verifications(db, canteen_id=eff_cid, limit=limit, offset=offset)
 
 
 # --- Feature 5: Class Timetable-Based Food Demand Prediction ---
@@ -214,10 +234,14 @@ async def import_timetable(
 def get_timetables(
     canteen_id: Optional[UUID] = Query(default=None),
     day_of_week: Optional[int] = Query(default=None, ge=0, le=6),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     principal: AuthenticatedPrincipal = Depends(require_roles(*OPS_VIEW_ROLES)),
     db: Session = Depends(get_db),
 ):
-    return campus_intelligence_service.list_timetable_slots(db, canteen_id=canteen_id, day_of_week=day_of_week)
+    return campus_intelligence_service.list_timetable_slots(
+        db, canteen_id=canteen_id, day_of_week=day_of_week, limit=limit, offset=offset
+    )
 
 
 @router.delete("/timetables/{slot_id}")
@@ -245,10 +269,16 @@ def get_timetable_demand_prediction(
 @router.get("/menu-availability/{canteen_id}")
 def get_menu_availability(
     canteen_id: UUID,
+    request: Request,
+    response: Response,
     include_history: bool = Query(default=True),
     db: Session = Depends(get_db),
 ):
-    return campus_intelligence_service.get_intelligent_menu_availability(db, canteen_id, include_history=include_history)
+    data = campus_intelligence_service.get_intelligent_menu_availability(db, canteen_id, include_history=include_history)
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=15, swr=30)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/menu-availability/{food_item_id}/override")
@@ -296,8 +326,17 @@ def get_order_journey(
 
 # --- Feature 8: Smart Seating Availability Intelligence ---
 @router.get("/seating")
-def get_seating(canteen_id: Optional[UUID] = Query(default=None), db: Session = Depends(get_db)):
-    return campus_intelligence_service.list_seating_availability(db, canteen_id=canteen_id)
+def get_seating(
+    request: Request,
+    response: Response,
+    canteen_id: Optional[UUID] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    data = campus_intelligence_service.list_seating_availability(db, canteen_id=canteen_id)
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=15, swr=30)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/seating/zones")

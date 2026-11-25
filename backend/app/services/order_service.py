@@ -325,6 +325,13 @@ def serialize_order(db: Session, order: Order, *, raw_guest_token: Optional[str]
 
 
 def list_pickup_slots(db: Session, canteen_id: UUID) -> list[PickupSlotOut]:
+    from app.core.cache import NS_QUEUE, cache_manager
+
+    cache_ns = f"{NS_QUEUE}:{canteen_id}"
+    hit, cached = cache_manager.get_json(cache_ns, "pickup_slots", l1_ttl=2.0)
+    if hit and isinstance(cached, list):
+        return [PickupSlotOut.model_validate(x) for x in cached]
+
     today = today_college()
     slots = db.scalars(
         select(PickupSlot)
@@ -340,6 +347,13 @@ def list_pickup_slots(db: Session, canteen_id: UUID) -> list[PickupSlotOut]:
         out = PickupSlotOut.model_validate(s)
         out.available_count = max(0, s.capacity - s.reserved_count)
         results.append(out)
+    cache_manager.set_json(
+        cache_ns,
+        "pickup_slots",
+        [r.model_dump(mode="json") for r in results],
+        ttl_seconds=10,
+        l1_ttl=2.0,
+    )
     return results
 
 

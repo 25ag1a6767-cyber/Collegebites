@@ -40,9 +40,9 @@ api.interceptors.response.use(
       (!error.response || error.response.status >= 502)
     ) {
       const retryCount = Number(original._getRetryCount || 0);
-      if (retryCount < 2) {
+      if (retryCount < 1) {
         original._getRetryCount = retryCount + 1;
-        const delayMs = 350 * Math.pow(2, retryCount);
+        const delayMs = 450;
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         return api(original);
       }

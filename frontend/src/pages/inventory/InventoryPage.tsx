@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -25,9 +25,20 @@ import type { Canteen } from "../../types";
 import { BrandLogo } from "../../components/branding/BrandLogo";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../components/ui/RealtimeStatusBadge";
-import { FoodWasteTab } from "./components/FoodWasteTab";
-import { VendorProcurementTab } from "./components/VendorProcurementTab";
-import { TraceabilityReorderingTab } from "./components/TraceabilityReorderingTab";
+
+const FoodWasteTab = lazy(() =>
+  import("./components/FoodWasteTab").then((m) => ({ default: m.FoodWasteTab }))
+);
+const VendorProcurementTab = lazy(() =>
+  import("./components/VendorProcurementTab").then((m) => ({ default: m.VendorProcurementTab }))
+);
+const TraceabilityReorderingTab = lazy(() =>
+  import("./components/TraceabilityReorderingTab").then((m) => ({ default: m.TraceabilityReorderingTab }))
+);
+
+const InvTabFallback = () => (
+  <Card className="p-6 text-center text-xs text-slate-500">Loading inventory module...</Card>
+);
 
 type SectionTab = "all" | "items" | "menu" | "stock" | "waste" | "pricing" | "suppliers" | "traceability_reorder" | "recipes" | "audit";
 
@@ -45,6 +56,7 @@ export const InventoryPage: React.FC = () => {
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
@@ -61,32 +73,37 @@ export const InventoryPage: React.FC = () => {
   const [stockFilter, setStockFilter] = useState("all");
   const [showArchived, setShowArchived] = useState(false);
 
+  const isBlockVisible = (key: SectionTab) => section === "all" || section === key;
+
   const { status: invSyncStatus, lastSyncedAt: invLastSyncedAt } = useRealtimeSync({
     enabled: Boolean(activeId),
     ssePath: activeId ? `/realtime/staff/orders/stream?canteen_id=${activeId}` : undefined,
     wsPath: activeId ? `/ws/kitchen/${activeId}` : undefined,
-    queryKeys: [
-      ["inv-dashboard"],
-      ["inv-items"],
-      ["inv-alerts"],
-      ["inv-movements"],
-      ["inv-audit-logs"],
-      ["inv-wastage"],
-      ["inv-adjustments"],
-      ["inv-menu"],
-    ],
+    queryKeys: [["inv-dashboard"], ["inv-alerts"]],
   });
 
   const { data: dashboard, refetch: refetchDashboard, isError: dashError } = useQuery<any>({
     queryKey: ["inv-dashboard", activeId],
     enabled: Boolean(activeId),
+    staleTime: 15_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/dashboard`)).data,
-    refetchInterval: invSyncStatus === "live" ? 30000 : 10000,
+    refetchInterval: invSyncStatus === "live" ? 60000 : 20000,
+    refetchIntervalInBackground: false,
   });
 
   const { data: items = [], refetch: refetchItems } = useQuery<any[]>({
     queryKey: ["inv-items", activeId, debouncedSearch, catFilter, stockFilter, showArchived],
-    enabled: Boolean(activeId),
+    enabled: Boolean(
+      activeId &&
+        (isBlockVisible("items") ||
+          isBlockVisible("stock") ||
+          isBlockVisible("pricing") ||
+          isBlockVisible("suppliers") ||
+          isBlockVisible("recipes") ||
+          isBlockVisible("waste") ||
+          section === "traceability_reorder")
+    ),
+    staleTime: 20_000,
     queryFn: async () => {
       const qs = new URLSearchParams();
       if (debouncedSearch.trim()) qs.set("search", debouncedSearch.trim());
@@ -100,65 +117,82 @@ export const InventoryPage: React.FC = () => {
   const { data: alerts, refetch: refetchAlerts } = useQuery<any>({
     queryKey: ["inv-alerts", activeId],
     enabled: Boolean(activeId),
+    staleTime: 20_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/alerts`)).data,
   });
 
   const { data: suppliers = [], refetch: refetchSuppliers } = useQuery<any[]>({
     queryKey: ["inv-suppliers"],
+    enabled: Boolean(
+      isBlockVisible("items") || isBlockVisible("suppliers") || section === "traceability_reorder"
+    ),
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/inventory/suppliers")).data,
   });
 
   const { data: pos = [], refetch: refetchPos } = useQuery<any[]>({
     queryKey: ["inv-pos", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && isBlockVisible("suppliers")),
+    staleTime: 30_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/purchase-orders`)).data,
   });
 
   const { data: menuItems = [], refetch: refetchMenu } = useQuery<any[]>({
     queryKey: ["inv-menu", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(
+      activeId &&
+        (isBlockVisible("menu") || isBlockVisible("pricing") || isBlockVisible("recipes") || isBlockVisible("waste"))
+    ),
+    staleTime: 30_000,
     queryFn: async () => (await api.get(`/menus/canteens/${activeId}/items?include_inactive=true`)).data,
   });
 
   const { data: foodCategories = [], refetch: refetchFoodCategories } = useQuery<any[]>({
     queryKey: ["inv-food-categories", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && isBlockVisible("menu")),
+    staleTime: 60_000,
     queryFn: async () => (await api.get(`/menus/canteens/${activeId}/categories?include_inactive=true`)).data,
   });
 
   const { data: movements = [], refetch: refetchMovements } = useQuery<any[]>({
     queryKey: ["inv-movements", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && isBlockVisible("stock")),
+    staleTime: 20_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/movements?limit=35`)).data,
   });
 
   const { data: priceChanges = [], refetch: refetchPrices } = useQuery<any[]>({
     queryKey: ["inv-price-changes", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && isBlockVisible("pricing")),
+    staleTime: 30_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/price-changes`)).data,
   });
 
   const { data: auditLogs = [], refetch: refetchAudit } = useQuery<any[]>({
     queryKey: ["inv-audit-logs", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && isBlockVisible("audit")),
+    staleTime: 30_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/audit-logs?limit=50`)).data,
   });
 
   const { data: wastageRecords = [], refetch: refetchWastage } = useQuery<any[]>({
     queryKey: ["inv-wastage", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && (isBlockVisible("audit") || isBlockVisible("waste"))),
+    staleTime: 30_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/wastage?limit=40`)).data,
   });
 
   const { data: kitchenStations = [] } = useQuery<any[]>({
     queryKey: ["inv-kitchen-stations", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && isBlockVisible("menu")),
+    staleTime: 60_000,
     queryFn: async () => (await api.get(`/kitchen/canteens/${activeId}/stations`)).data,
   });
 
   const { data: adjustmentRecords = [], refetch: refetchAdjustments } = useQuery<any[]>({
     queryKey: ["inv-adjustments", activeId],
-    enabled: Boolean(activeId),
+    enabled: Boolean(activeId && (isBlockVisible("audit") || isBlockVisible("stock"))),
+    staleTime: 30_000,
     queryFn: async () => (await api.get(`/inventory/canteens/${activeId}/adjustments?limit=40`)).data,
   });
 
@@ -309,7 +343,7 @@ export const InventoryPage: React.FC = () => {
 
   const activeRecipeFoodId = recipeFoodId || menuItems[0]?.id || "";
   useEffect(() => {
-    if (!activeRecipeFoodId) return;
+    if (!activeRecipeFoodId || !(section === "all" || section === "recipes")) return;
     let cancelled = false;
     api
       .get(`/inventory/recipes/${activeRecipeFoodId}`)
@@ -326,7 +360,7 @@ export const InventoryPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [activeRecipeFoodId]);
+  }, [activeRecipeFoodId, section]);
 
   const categories = useMemo(() => {
     const s = new Set<string>(["Dry Goods", "Dairy", "Vegetables", "Spices", "Beverages", "Packaging", "General"]);
@@ -468,7 +502,9 @@ export const InventoryPage: React.FC = () => {
 
       {/* 3.1 Inventory Manager Dashboard KPIs (Real DB Records Only) */}
       {section === "traceability_reorder" && (
-        <TraceabilityReorderingTab activeCanteenId={activeId} suppliers={suppliers} items={items} />
+        <Suspense fallback={<InvTabFallback />}>
+          <TraceabilityReorderingTab activeCanteenId={activeId} suppliers={suppliers} items={items} />
+        </Suspense>
       )}
       {dashError ? (
         <Card className="p-4 border-red-200 bg-red-50 text-xs text-red-800">
@@ -1212,12 +1248,14 @@ export const InventoryPage: React.FC = () => {
 
       {/* Suppliers, Purchase Orders, Goods Receiving (GRN) & Vendor Payments */}
       {showBlock("suppliers") && activeId && (
-        <VendorProcurementTab
-          activeCanteenId={activeId}
-          activeItems={activeItems}
-          canApprovePo={canApproveSellingPrice}
-          onChanged={refreshAll}
-        />
+        <Suspense fallback={<InvTabFallback />}>
+          <VendorProcurementTab
+            activeCanteenId={activeId}
+            activeItems={activeItems}
+            canApprovePo={canApproveSellingPrice}
+            onChanged={refreshAll}
+          />
+        </Suspense>
       )}
 
       {/* Dish Recipes & Field-Level Audit History */}
@@ -1408,12 +1446,14 @@ export const InventoryPage: React.FC = () => {
 
       {/* Food Waste Management Dashboard, Prep Logs, Consumption Variance & Insights */}
       {showBlock("waste") && activeId && (
-        <FoodWasteTab
-          activeCanteenId={activeId}
-          inventoryItems={items}
-          menuItems={menuItems}
-          onChanged={refreshAll}
-        />
+        <Suspense fallback={<InvTabFallback />}>
+          <FoodWasteTab
+            activeCanteenId={activeId}
+            inventoryItems={items}
+            menuItems={menuItems}
+            onChanged={refreshAll}
+          />
+        </Suspense>
       )}
 
       {/* Customer-Facing Menu Management (Add Items, Categories, Images & Availability; Selling Prices Approval-Gated) */}

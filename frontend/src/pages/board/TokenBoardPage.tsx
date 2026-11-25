@@ -60,6 +60,7 @@ export const TokenBoardPage: React.FC = () => {
 
   const { data: canteens = [] } = useQuery<Canteen[]>({
     queryKey: ["canteens"],
+    staleTime: 60_000,
     queryFn: async () => (await api.get("/canteens")).data,
   });
 
@@ -92,9 +93,7 @@ export const TokenBoardPage: React.FC = () => {
     enabled: Boolean(activeScope),
     queryFn: async () => {
       try {
-        const res = await api.get<DigitalBoardResponse>(boardEndpoint, {
-          headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
-        });
+        const res = await api.get<DigitalBoardResponse>(boardEndpoint);
         const live = res.data;
         if (live?.version && live.version !== lastCachedVerRef.current) {
           lastCachedVerRef.current = live.version;
@@ -109,16 +108,16 @@ export const TokenBoardPage: React.FC = () => {
         throw err;
       }
     },
-    staleTime: 0,
+    staleTime: 1500,
     retry: false,
-    // Keep instant <1s updates via SSE push when live (with 5s safety sync), and 1s polling fallback if SSE drops
+    // Instant push updates via SSE when live (15s safety reconciliation); 5s Edge-cached fallback if SSE drops.
     refetchInterval: () =>
       typeof navigator !== "undefined" && navigator.onLine === false
         ? false
         : syncStatus === "live"
-        ? 5000
-        : 1000,
-    refetchIntervalInBackground: true,
+        ? 15000
+        : 5000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
   });
@@ -207,7 +206,7 @@ export const TokenBoardPage: React.FC = () => {
               </span>
               <RealtimeStatusBadge status={displaySyncStatus} lastSyncedAt={effectiveSyncedAt} darkSurface />
               <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-0.5 text-[10px] font-bold text-emerald-300">
-                {syncStatus === "live" ? "Live Push + 5s Safety Sync" : syncStatus === "offline" ? "Offline Cache" : "Fallback Sync: 1s"}
+                {syncStatus === "live" ? "Live Push + 15s Safety Sync" : syncStatus === "offline" ? "Offline Cache" : "Fallback Sync: 5s"}
               </span>
             </div>
             <h1 className="text-2xl md:text-4xl font-black tracking-tight">

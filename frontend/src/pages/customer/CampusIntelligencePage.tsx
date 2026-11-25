@@ -40,7 +40,9 @@ export const CampusIntelligencePage: React.FC = () => {
 
   const { data: crowd, isLoading: crowdLoading, refetch: refetchCrowd } = useQuery<any>({
     queryKey: ["campus-crowd-live"],
-    refetchInterval: 20_000,
+    staleTime: 15_000,
+    refetchInterval: 45_000,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get("/campus-intelligence/crowd/live?days=7")).data,
   });
 
@@ -52,20 +54,26 @@ export const CampusIntelligencePage: React.FC = () => {
   const { data: pickupPred } = useQuery<any>({
     queryKey: ["campus-pickup-pred", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    refetchInterval: 20_000,
+    staleTime: 15_000,
+    refetchInterval: 45_000,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get(`/campus-intelligence/pickup-predictions/${activeCanteenId}`)).data,
   });
 
   const { data: seating } = useQuery<any>({
     queryKey: ["campus-seating"],
-    refetchInterval: 30_000,
+    staleTime: 20_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get("/campus-intelligence/seating")).data,
   });
 
   const { data: menuAvail } = useQuery<any>({
     queryKey: ["campus-menu-avail", activeCanteenId],
     enabled: Boolean(activeCanteenId),
-    refetchInterval: 30_000,
+    staleTime: 20_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
     queryFn: async () => (await api.get(`/campus-intelligence/menu-availability/${activeCanteenId}?include_history=false`)).data,
   });
 

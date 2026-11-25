@@ -4,12 +4,23 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ClipboardList, Flame, PackageCheck, Play, Search, ShieldCheck } from "lucide-react";
 import { api, getApiError } from "../../../api/client";
 import { useDebouncedValue } from "../../../hooks/useDebouncedValue";
-import { useRealtimeSync } from "../../../hooks/useRealtimeSync";
 import { useAppStore } from "../../../store/useAppStore";
 import { Badge, Button, Card, ConfirmModal, Input, Modal, Select, useToast } from "../../../components/ui/Primitives";
 import { RealtimeStatusBadge } from "../../../components/ui/RealtimeStatusBadge";
 
-export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCanteenId }) => {
+interface OrdersUsersTabProps {
+  activeCanteenId: string;
+  syncStatus?: React.ComponentProps<typeof RealtimeStatusBadge>["status"];
+  lastSyncedAt?: Date | null;
+  triggerSync?: () => void;
+}
+
+export const OrdersUsersTab: React.FC<OrdersUsersTabProps> = ({
+  activeCanteenId,
+  syncStatus = "live",
+  lastSyncedAt = null,
+  triggerSync,
+}) => {
   const { pushToast } = useToast();
   const qc = useQueryClient();
   const { user } = useAppStore();
@@ -27,37 +38,10 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
 
   const isCollegeAdmin = Boolean(user?.roles?.some((r) => r === "super_admin" || r === "college_admin"));
-  const effectiveStreamCanteen =
-    !isCollegeAdmin && user?.assigned_canteen_id
-      ? user.assigned_canteen_id
-      : scopeCanteenOnly && activeCanteenId
-      ? activeCanteenId
-      : "";
-  const streamParams = new URLSearchParams();
-  if (effectiveStreamCanteen) streamParams.set("canteen_id", effectiveStreamCanteen);
-  if (statusFilter) streamParams.set("status", statusFilter);
-  if (debouncedOrderSearch.trim()) streamParams.set("q", debouncedOrderSearch.trim());
-  const streamSuffix = streamParams.toString() ? `?${streamParams.toString()}` : "";
-
-  const { status: syncStatus, lastSyncedAt, triggerSync } = useRealtimeSync<{ orders?: any[] }>({
-    enabled: true,
-    ssePath: `/realtime/staff/orders/stream${streamSuffix}`,
-    wsPath: effectiveStreamCanteen ? `/ws/kitchen/${effectiveStreamCanteen}` : "/ws/board/all",
-    queryKeys: [["admin-all-orders"], ["admin-report"], ["admin-queue"]],
-    onSnapshot: (snap) => {
-      if (snap?.orders) {
-        qc.setQueryData(
-          ["admin-all-orders", activeCanteenId, statusFilter, debouncedOrderSearch, scopeCanteenOnly],
-          snap.orders
-        );
-      }
-      qc.invalidateQueries({ queryKey: ["admin-report"] });
-      qc.invalidateQueries({ queryKey: ["admin-queue"] });
-    },
-  });
 
   const { data: orders = [], refetch: refetchOrders } = useQuery<any[]>({
     queryKey: ["admin-all-orders", activeCanteenId, statusFilter, debouncedOrderSearch, scopeCanteenOnly],
+    staleTime: 10_000,
     queryFn: async () => {
       const params = new URLSearchParams();
       if (scopeCanteenOnly && activeCanteenId) params.set("canteen_id", activeCanteenId);
@@ -66,7 +50,7 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
       params.set("limit", "100");
       return (await api.get(`/admin/orders?${params.toString()}`)).data;
     },
-    refetchInterval: syncStatus === "live" ? 30000 : 5000,
+    refetchInterval: syncStatus === "live" ? 30000 : 12000,
     refetchIntervalInBackground: false,
   });
 
@@ -88,7 +72,9 @@ export const OrdersUsersTab: React.FC<{ activeCanteenId: string }> = ({ activeCa
         pushToast(`Order ${order.order_number} updated`, "success");
       }
       refetchOrders();
-      triggerSync();
+      qc.invalidateQueries({ queryKey: ["admin-report"] });
+      qc.invalidateQueries({ queryKey: ["admin-queue"] });
+      triggerSync?.();
     } catch (err) {
       pushToast(getApiError(err, "Order update failed"), "error");
     } finally {

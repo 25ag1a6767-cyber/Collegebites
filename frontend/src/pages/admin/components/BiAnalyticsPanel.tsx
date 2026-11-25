@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { memo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Area,
@@ -19,6 +19,7 @@ import {
 } from "recharts";
 import { Download, Printer, Search } from "lucide-react";
 import { api } from "../../../api/client";
+import { useDebouncedValue } from "../../../hooks/useDebouncedValue";
 import { Badge, Button, Card, Input } from "../../../components/ui/Primitives";
 
 const PIE_COLORS = ["#76010d", "#b45309", "#0f766e", "#1d4ed8", "#7c3aed", "#be123c"];
@@ -46,7 +47,7 @@ interface BiAnalyticsPanelProps {
   downloadBlob: (url: string, filename: string) => void;
 }
 
-export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
+export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = memo(({
   report,
   isCollegeAdmin,
   scopeReportToCanteen,
@@ -71,6 +72,7 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
   const [chartPeriod, setChartPeriod] = useState<"daily" | "weekly" | "monthly">("daily");
   const [detailTab, setDetailTab] = useState<"orders" | "items" | "inventory">("orders");
   const [detailSearch, setDetailSearch] = useState("");
+  const debouncedDetailSearch = useDebouncedValue(detailSearch, 300);
   const [itemSortDir, setItemSortDir] = useState<"desc" | "asc">("desc");
   const [lowOnly, setLowOnly] = useState(false);
   const [page, setPage] = useState(1);
@@ -78,12 +80,13 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
   const detailParams = new URLSearchParams(reportQueryCanteen.startsWith("?") ? reportQueryCanteen.slice(1) : reportQueryCanteen);
   detailParams.set("page", String(page));
   detailParams.set("page_size", "10");
-  if (detailSearch.trim()) detailParams.set("q", detailSearch.trim());
+  if (debouncedDetailSearch.trim()) detailParams.set("q", debouncedDetailSearch.trim());
   if (detailTab === "items") detailParams.set("sort", itemSortDir);
   if (detailTab === "inventory" && lowOnly) detailParams.set("low_only", "true");
 
   const { data: detailData } = useQuery<any>({
     queryKey: ["bi-details", detailTab, detailParams.toString()],
+    staleTime: 15_000,
     queryFn: async () => (await api.get(`/reports/details/${detailTab}?${detailParams.toString()}`)).data,
   });
 
@@ -428,8 +431,8 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip />
                 <Legend />
-                <Area type="monotone" dataKey="revenue" name="Revenue (₹)" stroke="#76010d" fill="#76010d" fillOpacity={0.18} />
-                <Area type="monotone" dataKey="orders" name="Orders" stroke="#0f766e" fill="#0f766e" fillOpacity={0.12} />
+                <Area isAnimationActive={false} type="monotone" dataKey="revenue" name="Revenue (₹)" stroke="#76010d" fill="#76010d" fillOpacity={0.18} />
+                <Area isAnimationActive={false} type="monotone" dataKey="orders" name="Orders" stroke="#0f766e" fill="#0f766e" fillOpacity={0.12} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -445,8 +448,8 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip />
                 <Legend />
-                <Bar dataKey="orders" name="Paid Orders" fill="#76010d" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="completed_orders" name="Completed" fill="#059669" radius={[4, 4, 0, 0]} />
+                <Bar isAnimationActive={false} dataKey="orders" name="Paid Orders" fill="#76010d" radius={[4, 4, 0, 0]} />
+                <Bar isAnimationActive={false} dataKey="completed_orders" name="Completed" fill="#059669" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -466,6 +469,7 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
+                    isAnimationActive={false}
                     data={report.sales.category_sales}
                     dataKey="revenue"
                     nameKey="category"
@@ -495,9 +499,9 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line type="monotone" dataKey="consumed_qty" name="Consumed" stroke="#76010d" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="restocked_qty" name="Restocked" stroke="#059669" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="wastage_qty" name="Wasted" stroke="#d97706" strokeWidth={2} dot={false} />
+                <Line isAnimationActive={false} type="monotone" dataKey="consumed_qty" name="Consumed" stroke="#76010d" strokeWidth={2} dot={false} />
+                <Line isAnimationActive={false} type="monotone" dataKey="restocked_qty" name="Restocked" stroke="#059669" strokeWidth={2} dot={false} />
+                <Line isAnimationActive={false} type="monotone" dataKey="wastage_qty" name="Wasted" stroke="#d97706" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -850,4 +854,5 @@ export const BiAnalyticsPanel: React.FC<BiAnalyticsPanelProps> = ({
       </Card>
     </div>
   );
-};
+});
+BiAnalyticsPanel.displayName = "BiAnalyticsPanel";

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -10,6 +11,11 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
+try:
+    import orjson  # noqa: F401
+    from fastapi.responses import ORJSONResponse as _DefaultJSONResponse
+except Exception:  # pragma: no cover
+    _DefaultJSONResponse = JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
@@ -128,11 +134,14 @@ def create_app() -> FastAPI:
         version="1.0.0",
         description="Complete Smart College Canteen Management, Food Ordering, Payment, QR Token & Operations Platform",
         lifespan=lifespan,
+        default_response_class=_DefaultJSONResponse,
     )
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    # Vercel Edge automatically applies Brotli/GZip compression; skip duplicate Python CPU compression on Vercel.
+    if not os.environ.get("VERCEL"):
+        app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.add_middleware(PureASGIRateLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestObservabilityMiddleware)

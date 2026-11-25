@@ -4,11 +4,12 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import event, func, or_, select
+from sqlalchemy import and_, event, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.cache import NS_ANNOUNCEMENTS, cache_manager, invalidate_announcements
 from app.core.config import settings
-from app.core.security import mask_mobile
+from app.core.security import mask_mobile, sha256_hex
 from app.integrations.email_provider import send_email
 from app.integrations.expo_push_provider import send_expo_push
 from app.integrations.sms_provider import send_sms_or_whatsapp
@@ -874,8 +875,7 @@ def serialize_notification_for_user(n: Notification, user_id: UUID) -> dict[str,
     return _serialize_notification(n, viewer_user_id=user_id)
 
 
-def _query_visible_notifications(
-    db: Session,
+def _build_visible_notifications_stmt(
     user_id: UUID,
     roles: set[str],
     assigned_canteen_id: Optional[UUID] = None,
@@ -885,12 +885,17 @@ def _query_visible_notifications(
     category: Optional[str] = None,
     event_type: Optional[str] = None,
     delivery_status: Optional[str] = None,
-    is_read: Optional[bool] = None,
-) -> list[Notification]:
+):
     eff_roles = _effective_notification_roles(roles)
     conds = [Notification.user_id == user_id]
     if eff_roles:
-        conds.append(Notification.role_target.in_(list(eff_roles)))
+        role_cond = and_(Notification.user_id.is_(None), Notification.role_target.in_(list(eff_roles)))
+        if assigned_canteen_id is not None:
+            role_cond = and_(
+                role_cond,
+                or_(Notification.canteen_id == assigned_canteen_id, Notification.canteen_id.is_(None)),
+            )
+        conds.append(role_cond)
     stmt = select(Notification).where(or_(*conds), Notification.channel == "in_app")
     if priority:
         stmt = stmt.where(Notification.priority == priority)
@@ -903,16 +908,94 @@ def _query_visible_notifications(
     if q and q.strip():
         pat = f"%{q.strip()}%"
         stmt = stmt.where(or_(Notification.title.ilike(pat), Notification.message.ilike(pat), Notification.event_type.ilike(pat)))
+    return stmt
 
-    rows = db.scalars(stmt.order_by(Notification.created_at.desc())).all()
-    filtered: list[Notification] = []
-    for n in rows:
-        if n.user_id is None and n.role_target and assigned_canteen_id and n.canteen_id and n.canteen_id != assigned_canteen_id:
-            continue
-        if is_read is not None and is_notification_read_for_user(n, user_id) != is_read:
-            continue
-        filtered.append(n)
-    return filtered
+
+def _query_visible_notifications(
+    db: Session,
+    user_id: UUID,
+    roles: set[str],
+    assigned_canteen_id: Optional[UUID] = None,
+    *,
+    q: Optional[str] = None,
+    priority: Optional[str] = None,
+    category: Optional[str] = None,
+    event_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    max_rows: Optional[int] = None,
+) -> list[Notification]:
+    stmt = _build_visible_notifications_stmt(
+        user_id,
+        roles,
+        assigned_canteen_id=assigned_canteen_id,
+        q=q,
+        priority=priority,
+        category=category,
+        event_type=event_type,
+        delivery_status=delivery_status,
+    ).order_by(Notification.created_at.desc())
+    if is_read is None and max_rows is not None:
+        stmt = stmt.limit(max_rows)
+    elif max_rows is not None:
+        stmt = stmt.limit(max(max_rows * 3, 300))
+
+    rows = db.scalars(stmt).all()
+    if is_read is None:
+        return list(rows)
+    return [n for n in rows if is_notification_read_for_user(n, user_id) == is_read]
+
+
+def compute_notifications_watermark(
+    db: Session,
+    user_id: UUID,
+    roles: set[str],
+    assigned_canteen_id: Optional[UUID] = None,
+) -> str:
+    """Lightweight column-only watermark for SSE streams without full ORM hydration."""
+    eff_roles = _effective_notification_roles(roles)
+    conds = [Notification.user_id == user_id]
+    if eff_roles:
+        role_cond = and_(Notification.user_id.is_(None), Notification.role_target.in_(list(eff_roles)))
+        if assigned_canteen_id is not None:
+            role_cond = and_(
+                role_cond,
+                or_(Notification.canteen_id == assigned_canteen_id, Notification.canteen_id.is_(None)),
+            )
+        conds.append(role_cond)
+    rows = db.execute(
+        select(
+            Notification.user_id,
+            Notification.is_read,
+            Notification.metadata_json,
+            Notification.created_at,
+            Notification.updated_at,
+        )
+        .where(or_(*conds), Notification.channel == "in_app")
+        .order_by(Notification.created_at.desc())
+        .limit(200)
+    ).all()
+    uid_str = str(user_id)
+    unread_cnt = 0
+    latest_created = ""
+    latest_updated = ""
+    for row_uid, row_read, meta, c_at, u_at in rows:
+        if row_uid is not None:
+            is_r = bool(row_read)
+        else:
+            is_r = bool(row_read) or (uid_str in ((meta or {}).get("read_by_user_ids") or ()))
+        if not is_r:
+            unread_cnt += 1
+        if c_at:
+            iso = c_at.isoformat()
+            if iso > latest_created:
+                latest_created = iso
+        if u_at:
+            iso_u = u_at.isoformat()
+            if iso_u > latest_updated:
+                latest_updated = iso_u
+    raw = "|".join([uid_str, str(len(rows)), str(unread_cnt), latest_created, latest_updated])
+    return sha256_hex(raw)[:16]
 
 
 def list_my_notifications(
@@ -930,6 +1013,26 @@ def list_my_notifications(
     limit: int = 100,
     offset: int = 0,
 ) -> list[Notification]:
+    eff_limit = max(1, min(limit, 200))
+    eff_offset = max(0, offset)
+    if is_read is None:
+        stmt = (
+            _build_visible_notifications_stmt(
+                user_id,
+                roles,
+                assigned_canteen_id=assigned_canteen_id,
+                q=q,
+                priority=priority,
+                category=category,
+                event_type=event_type,
+                delivery_status=delivery_status,
+            )
+            .order_by(Notification.created_at.desc())
+            .offset(eff_offset)
+            .limit(eff_limit)
+        )
+        return list(db.scalars(stmt).all())
+
     filtered = _query_visible_notifications(
         db,
         user_id,
@@ -941,8 +1044,9 @@ def list_my_notifications(
         event_type=event_type,
         delivery_status=delivery_status,
         is_read=is_read,
+        max_rows=eff_offset + eff_limit,
     )
-    return filtered[offset : offset + max(1, min(limit, 200))]
+    return filtered[eff_offset : eff_offset + eff_limit]
 
 
 def get_unread_count(
@@ -951,10 +1055,36 @@ def get_unread_count(
     roles: set[str],
     assigned_canteen_id: Optional[UUID] = None,
 ) -> int:
-    rows = _query_visible_notifications(
-        db, user_id, roles, assigned_canteen_id=assigned_canteen_id, is_read=False
+    # Fast SQL COUNT for user-direct notifications
+    direct_unread = int(
+        db.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.user_id == user_id,
+                Notification.channel == "in_app",
+                Notification.is_read.is_(False),
+            )
+        )
+        or 0
     )
-    return len(rows)
+    eff_roles = _effective_notification_roles(roles)
+    if not eff_roles:
+        return direct_unread
+    role_stmt = select(Notification.is_read, Notification.metadata_json).where(
+        Notification.user_id.is_(None),
+        Notification.channel == "in_app",
+        Notification.role_target.in_(list(eff_roles)),
+        Notification.is_read.is_(False),
+    )
+    if assigned_canteen_id is not None:
+        role_stmt = role_stmt.where(
+            or_(Notification.canteen_id == assigned_canteen_id, Notification.canteen_id.is_(None))
+        )
+    uid_str = str(user_id)
+    role_unread = 0
+    for is_r, meta in db.execute(role_stmt.order_by(Notification.created_at.desc()).limit(300)).all():
+        if not is_r and uid_str not in ((meta or {}).get("read_by_user_ids") or ()):
+            role_unread += 1
+    return direct_unread + role_unread
 
 
 def get_notification_history(
@@ -1252,18 +1382,42 @@ def update_preferences(db: Session, user_id: UUID, data: dict) -> NotificationPr
     return pref
 
 
-def list_active_announcements(db: Session, canteen_id: Optional[UUID] = None) -> list[Announcement]:
+def list_active_announcements(db: Session, canteen_id: Optional[UUID] = None) -> list[dict[str, Any]]:
+    cache_key = f"active:{canteen_id or 'all'}"
+    hit, cached = cache_manager.get_json(NS_ANNOUNCEMENTS, cache_key, l1_ttl=5.0)
+    if hit and isinstance(cached, list):
+        return cached
     now = datetime.now(timezone.utc)
-    stmt = select(Announcement).where(Announcement.is_active.is_(True)).order_by(Announcement.created_at.desc())
+    stmt = (
+        select(Announcement)
+        .where(
+            Announcement.is_active.is_(True),
+            or_(Announcement.starts_at.is_(None), Announcement.starts_at <= now),
+            or_(Announcement.ends_at.is_(None), Announcement.ends_at > now),
+        )
+        .order_by(Announcement.created_at.desc())
+        .limit(50)
+    )
     if canteen_id:
         stmt = stmt.where(or_(Announcement.canteen_id == canteen_id, Announcement.canteen_id.is_(None)))
     rows = db.scalars(stmt).all()
-    out = []
-    for a in rows:
-        st = a.starts_at.replace(tzinfo=timezone.utc) if (a.starts_at and a.starts_at.tzinfo is None) else a.starts_at
-        en = a.ends_at.replace(tzinfo=timezone.utc) if (a.ends_at and a.ends_at.tzinfo is None) else a.ends_at
-        if (not st or st <= now) and (not en or en > now):
-            out.append(a)
+    out = [
+        {
+            "id": str(a.id),
+            "canteen_id": str(a.canteen_id) if a.canteen_id else None,
+            "title": a.title,
+            "body": a.body,
+            "severity": a.severity,
+            "starts_at": a.starts_at.isoformat() if a.starts_at else None,
+            "ends_at": a.ends_at.isoformat() if a.ends_at else None,
+            "is_active": a.is_active,
+            "created_by_user_id": str(a.created_by_user_id) if a.created_by_user_id else None,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "updated_at": a.updated_at.isoformat() if a.updated_at else None,
+        }
+        for a in rows
+    ]
+    cache_manager.set_json(NS_ANNOUNCEMENTS, cache_key, out, ttl_seconds=60, l1_ttl=5.0)
     return out
 
 
@@ -1294,4 +1448,5 @@ def create_announcement(db: Session, data: dict, actor_user_id: UUID) -> Announc
     )
     db.commit()
     db.refresh(ann)
+    invalidate_announcements()
     return ann

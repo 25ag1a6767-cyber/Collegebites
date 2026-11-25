@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.http_cache import apply_etag_and_check_304
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_CASHIER,
@@ -39,13 +40,17 @@ router = APIRouter(prefix="/payments", tags=["Payments (Razorpay Only • No Ref
 
 
 @router.get("/razorpay/config")
-def razorpay_config():
+def razorpay_config(request: Request, response: Response):
     """Return non-sensitive Razorpay client configuration (never exposes secret or webhook keys)."""
-    return {
+    data = {
         "key_id": razorpay_gateway.public_key_id,
         "configured": razorpay_gateway.is_configured,
         "live_api_enabled": razorpay_gateway.use_live_api,
     }
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=3600, swr=86400, max_age=300)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/razorpay/verify", response_model=OrderOut)

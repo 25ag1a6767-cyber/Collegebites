@@ -108,7 +108,35 @@ def list_favourites(
         .where(FoodItem.id.in_(uuids), FoodItem.is_active.is_(True))
     ).all()
     by_id = {r.id: r for r in rows}
-    return [menu_service.serialize_food_item(db, by_id[uid]) for uid in uuids if uid in by_id]
+    ordered = [by_id[uid] for uid in uuids if uid in by_id]
+    if not ordered:
+        return []
+    from app.models.college import KitchenStation
+    from app.models.menu import Allergen, FoodAddon, FoodCategory
+
+    cat_ids = list({i.category_id for i in ordered})
+    addon_ids = list({lnk.addon_id for i in ordered for lnk in i.addon_links})
+    allergen_ids = list({alnk.allergen_id for i in ordered for alnk in i.allergen_links})
+    station_ids = list({i.station_id for i in ordered if i.station_id})
+    cat_map = {c.id: c for c in db.scalars(select(FoodCategory).where(FoodCategory.id.in_(cat_ids))).all()} if cat_ids else {}
+    addon_map = {a.id: a for a in db.scalars(select(FoodAddon).where(FoodAddon.id.in_(addon_ids))).all()} if addon_ids else {}
+    alg_map = {a.id: a for a in db.scalars(select(Allergen).where(Allergen.id.in_(allergen_ids))).all()} if allergen_ids else {}
+    station_map = {s.id: s for s in db.scalars(select(KitchenStation).where(KitchenStation.id.in_(station_ids))).all()} if station_ids else {}
+    sched_map = menu_service.compute_schedule_availability_map(
+        db, [i.id for i in ordered], food_items_map={i.id: i for i in ordered}
+    )
+    return [
+        menu_service.serialize_food_item(
+            db,
+            item,
+            category_map=cat_map,
+            addon_map=addon_map,
+            allergen_map=alg_map,
+            schedule_active_map=sched_map,
+            station_map=station_map,
+        )
+        for item in ordered
+    ]
 
 
 @router.delete("/me", response_model=MessageResponse)

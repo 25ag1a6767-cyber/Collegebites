@@ -98,7 +98,9 @@ def run_scheduled_maintenance(
     overdue_cleaning_notified = 0
     for canteen in db.scalars(select(Canteen).where(Canteen.is_active.is_(True))).all():
         res_clean = food_safety_service.notify_overdue_cleaning_tasks(db, canteen.id)
-        overdue_cleaning_notified += int(res_clean.get("notified_overdue_tasks", 0))
+        overdue_cleaning_notified += int(
+            res_clean.get("reminders_dispatched", res_clean.get("notified_overdue_tasks", 0))
+        )
 
     reconcil_stats = reconciliation_service.run_auto_reconciliation(
         db,

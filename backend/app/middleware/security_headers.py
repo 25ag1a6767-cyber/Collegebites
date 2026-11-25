@@ -32,11 +32,26 @@ class SecurityHeadersMiddleware:
         if request_id is None:
             request_id = uuid4().hex[:16].encode("ascii")
 
+        path = scope.get("path") or ""
+        is_api_path = path.startswith("/api/")
+
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers") or [])
-                if not any(k.lower() == b"x-request-id" for k, _ in headers):
+                has_rid = False
+                has_cc = False
+                for k, _ in headers:
+                    kl = k.lower()
+                    if kl == b"x-request-id":
+                        has_rid = True
+                    elif kl == b"cache-control":
+                        has_cc = True
+                if not has_rid:
                     headers.append((b"x-request-id", request_id))
+                # Safe default: never allow Vercel Edge or intermediate proxies to publicly cache API
+                # responses unless a public route explicitly opts in with its own Cache-Control header.
+                if is_api_path and not has_cc:
+                    headers.append((b"cache-control", b"private, no-store"))
                 headers.extend(self._STATIC_HEADERS)
                 message = {**message, "headers": headers}
             await send(message)

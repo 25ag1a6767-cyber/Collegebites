@@ -3,9 +3,10 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.cache import NS_COMMAND_CENTER, cache_manager
 from app.core.permissions import ROLE_CANTEEN_MANAGER, ROLE_COLLEGE_ADMIN, ROLE_SUPER_ADMIN
 from app.models.campus_ops import (
     AutomationExecution,
@@ -149,10 +150,11 @@ def get_or_create_governance_state(db: Session) -> AutomationGovernanceState:
 
 def get_governance_overview(db: Session) -> dict[str, Any]:
     state = get_or_create_governance_state(db)
-    pending_count = len(
-        db.scalars(
-            select(AutomationExecution.id).where(AutomationExecution.status == "pending_approval")
-        ).all()
+    pending_count = int(
+        db.scalar(
+            select(func.count(AutomationExecution.id)).where(AutomationExecution.status == "pending_approval")
+        )
+        or 0
     )
     return {
         "global_automation_enabled": state.global_automation_enabled,
@@ -203,6 +205,11 @@ def toggle_emergency_automation(
 
 
 def ensure_default_workflows(db: Session) -> list[AutomationWorkflow]:
+    hit, seeded = cache_manager.get_json(NS_COMMAND_CENTER, "wf_seeded", l1_ttl=60.0)
+    if hit and seeded:
+        rows = list(db.scalars(select(AutomationWorkflow).order_by(AutomationWorkflow.name.asc())).all())
+        if len(rows) >= len(DEFAULT_WORKFLOWS):
+            return rows
     existing_keys = set(db.scalars(select(AutomationWorkflow.workflow_key)).all())
     added = False
     for spec in DEFAULT_WORKFLOWS:
@@ -211,6 +218,7 @@ def ensure_default_workflows(db: Session) -> list[AutomationWorkflow]:
             added = True
     if added:
         db.commit()
+    cache_manager.set_json(NS_COMMAND_CENTER, "wf_seeded", True, ttl_seconds=300, l1_ttl=60.0)
     return list(db.scalars(select(AutomationWorkflow).order_by(AutomationWorkflow.name.asc())).all())
 
 
@@ -358,7 +366,7 @@ def _run_safe_action(
     if act == "emit_queue_warnings":
         from app.services import campus_intelligence_service
 
-        crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7)
+        crowd = campus_intelligence_service.get_live_crowd_intelligence(db, days=7, include_history=False)
         warned = 0
         for c in crowd["counters"]:
             if c["workload_percent"] >= 65:
@@ -555,11 +563,14 @@ def decide_execution_approval(
     return _serialize_execution(ex, wf.name if wf else None)
 
 
-def list_executions(db: Session, *, status_filter: Optional[str] = None, limit: int = 80) -> list[dict[str, Any]]:
+def list_executions(
+    db: Session, *, status_filter: Optional[str] = None, limit: int = 80, offset: int = 0
+) -> list[dict[str, Any]]:
     stmt = (
         select(AutomationExecution, AutomationWorkflow.name)
         .join(AutomationWorkflow, AutomationWorkflow.id == AutomationExecution.workflow_id)
         .order_by(AutomationExecution.created_at.desc())
+        .offset(max(0, offset))
         .limit(max(1, min(limit, 200)))
     )
     if status_filter:

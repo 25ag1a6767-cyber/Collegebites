@@ -2,12 +2,14 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.core.cache import invalidate_announcements
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.http_cache import apply_etag_and_check_304, set_public_cache
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_COLLEGE_ADMIN,
@@ -209,7 +211,8 @@ def mark_all_read(
 
 
 @router.get("/web-push/public-key")
-def get_vapid_public_key():
+def get_vapid_public_key(response: Response):
+    set_public_cache(response, s_maxage=86400, swr=86400, max_age=3600)
     return {
         "public_key": settings.VAPID_PUBLIC_KEY or None,
         "supported": bool(settings.VAPID_PUBLIC_KEY),
@@ -273,8 +276,17 @@ def register_push_token(
 
 
 @router.get("/announcements")
-def list_announcements(canteen_id: Optional[UUID] = Query(default=None), db: Session = Depends(get_db)):
-    return notification_service.list_active_announcements(db, canteen_id=canteen_id)
+def list_announcements(
+    request: Request,
+    response: Response,
+    canteen_id: Optional[UUID] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    data = notification_service.list_active_announcements(db, canteen_id=canteen_id)
+    not_mod = apply_etag_and_check_304(request, response, data, s_maxage=60, swr=120)
+    if not_mod is not None:
+        return not_mod
+    return data
 
 
 @router.post("/announcements", status_code=status.HTTP_201_CREATED)
@@ -309,4 +321,5 @@ def deactivate_announcement(
         details={"title": ann.title},
     )
     db.commit()
+    invalidate_announcements()
     return {"status": "deactivated", "id": str(announcement_id)}

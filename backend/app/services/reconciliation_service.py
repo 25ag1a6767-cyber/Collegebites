@@ -41,12 +41,14 @@ def _upsert_reconciliation(
     gateway_settlement_id: Optional[str] = None,
     notes: Optional[str] = None,
     actor_user_id: Optional[UUID] = None,
+    existing_rec: Optional[PaymentReconciliation] = None,
+    existing_loaded: bool = False,
 ) -> PaymentReconciliation:
     now = datetime.now(timezone.utc)
     expected = (order.total_amount if payment.status == "CONFIRMED" else payment.amount).quantize(Decimal("0.01"))
     discrepancy = (expected - settled_amount).quantize(Decimal("0.01")) if status in ("matched", "discrepancy") else Decimal("0.00")
 
-    rec = db.scalar(select(PaymentReconciliation).where(PaymentReconciliation.payment_id == payment.id))
+    rec = existing_rec if existing_loaded else db.scalar(select(PaymentReconciliation).where(PaymentReconciliation.payment_id == payment.id))
     if rec:
         # Never auto-overwrite manually resolved matches unless amount changed
         rec.batch_id = batch_id
@@ -140,6 +142,18 @@ def run_auto_reconciliation(
     for tx in tx_rows:
         tx_by_payment.setdefault(tx.payment_id, []).append(tx)
 
+    # Batch-load all existing PaymentReconciliation rows in 1 query (eliminates up to 1,000 N+1 SELECTs)
+    existing_recs_by_pid: dict[UUID, PaymentReconciliation] = (
+        {
+            r.payment_id: r
+            for r in db.scalars(
+                select(PaymentReconciliation).where(PaymentReconciliation.payment_id.in_(payment_ids))
+            ).all()
+        }
+        if payment_ids
+        else {}
+    )
+
     matched = 0
     discrepancy = 0
     pending = 0
@@ -148,6 +162,7 @@ def run_auto_reconciliation(
     flagged_discrepancies: list[dict[str, Any]] = []
 
     for payment, order in rows:
+        existing_rec = existing_recs_by_pid.get(payment.id)
         txs = tx_by_payment.get(payment.id, [])
         fee = Decimal("0.00")
         tax = Decimal("0.00")
@@ -156,6 +171,22 @@ def run_auto_reconciliation(
 
         disc_txs = [t for t in txs if t.status == "DISCREPANCY"]
         late_conflicts = [t for t in txs if t.status == "CONFLICT" or t.transaction_type == "late_capture_conflict"]
+
+        # Fast-path: skip redundant DB writes for already-matched, finalized COMPLETED orders when not re-fetching gateway
+        if (
+            not fetch_gateway
+            and existing_rec is not None
+            and existing_rec.status == "matched"
+            and payment.status == "CONFIRMED"
+            and order.status == "COMPLETED"
+            and not disc_txs
+            and not late_conflicts
+            and existing_rec.expected_amount == order.total_amount.quantize(Decimal("0.01"))
+            and existing_rec.settled_amount == existing_rec.expected_amount
+        ):
+            matched += 1
+            verified_total += existing_rec.settled_amount
+            continue
 
         # 1. Explicit transaction discrepancy (e.g., underpaid webhook or currency mismatch)
         if disc_txs:
@@ -171,6 +202,8 @@ def run_auto_reconciliation(
                 discrepancy_type="amount_mismatch",
                 notes=f"Gateway discrepancy logged: paid ₹{settled_val} vs order ₹{order.total_amount}",
                 actor_user_id=actor_user_id,
+                existing_rec=existing_rec,
+                existing_loaded=True,
             )
             flagged_discrepancies.append({"order_number": order.order_number, "type": "amount_mismatch"})
             continue
@@ -188,6 +221,8 @@ def run_auto_reconciliation(
                 discrepancy_type="missing_payment",
                 notes="Order marked confirmed but payment record is not CONFIRMED",
                 actor_user_id=actor_user_id,
+                existing_rec=existing_rec,
+                existing_loaded=True,
             )
             flagged_discrepancies.append({"order_number": order.order_number, "type": "missing_payment"})
             continue
@@ -195,6 +230,8 @@ def run_auto_reconciliation(
         # 3. Failed payment
         if payment.status == "FAILED":
             failed += 1
+            if existing_rec is not None and existing_rec.status == "failed" and not fetch_gateway:
+                continue
             _upsert_reconciliation(
                 db,
                 payment=payment,
@@ -205,6 +242,8 @@ def run_auto_reconciliation(
                 discrepancy_type="failed",
                 notes=payment.failure_reason or "Payment failed at gateway",
                 actor_user_id=actor_user_id,
+                existing_rec=existing_rec,
+                existing_loaded=True,
             )
             continue
 
@@ -223,6 +262,8 @@ def run_auto_reconciliation(
                 discrepancy_type="pending_stale" if is_stale else "none",
                 notes="Awaiting gateway confirmation (>30m stale)" if is_stale else "Pending live checkout",
                 actor_user_id=actor_user_id,
+                existing_rec=existing_rec,
+                existing_loaded=True,
             )
             continue
 
@@ -254,6 +295,8 @@ def run_auto_reconciliation(
                 gateway_settlement_id=settlement_id,
                 notes=f"Settled ₹{settled_amount} vs Order ₹{order.total_amount}",
                 actor_user_id=actor_user_id,
+                existing_rec=existing_rec,
+                existing_loaded=True,
             )
             flagged_discrepancies.append({"order_number": order.order_number, "type": "amount_mismatch"})
             security_service.create_security_alert(
@@ -281,6 +324,8 @@ def run_auto_reconciliation(
                 gateway_settlement_id=settlement_id,
                 notes=f"Confirmed capture on {order.status} order (retained per no-refund policy)",
                 actor_user_id=actor_user_id,
+                existing_rec=existing_rec,
+                existing_loaded=True,
             )
             flagged_discrepancies.append({"order_number": order.order_number, "type": "duplicate_callback"})
         else:
@@ -299,6 +344,8 @@ def run_auto_reconciliation(
                 gateway_settlement_id=settlement_id,
                 notes="Auto-verified against gateway & order ledger",
                 actor_user_id=actor_user_id,
+                existing_rec=existing_rec,
+                existing_loaded=True,
             )
 
     # Check orphan webhook capture callbacks (where no Payment row matched any provider_order_id)

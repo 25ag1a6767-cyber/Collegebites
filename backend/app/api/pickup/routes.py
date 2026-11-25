@@ -1,10 +1,11 @@
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.http_cache import apply_etag_and_check_304, set_private_no_store
 from app.core.permissions import (
     ROLE_CANTEEN_MANAGER,
     ROLE_CASHIER,
@@ -69,22 +70,27 @@ def confirm_handover(
 
 @router.get("/board", response_model=DigitalBoardResponse)
 def get_digital_board_all_or_filtered(
+    request: Request,
     response: Response,
     canteen_id: Optional[UUID] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    return pickup_service.get_digital_token_board(db, canteen_id)
+    snap = pickup_service.get_digital_token_board(db, canteen_id)
+    seed = snap.version or snap.model_dump(mode="json")
+    not_mod = apply_etag_and_check_304(request, response, seed, s_maxage=2, swr=4)
+    if not_mod is not None:
+        return not_mod
+    return snap
 
 
 @router.get("/board/{canteen_id}", response_model=DigitalBoardResponse)
-def get_digital_board(canteen_id: UUID, response: Response, db: Session = Depends(get_db)):
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-    return pickup_service.get_digital_token_board(db, canteen_id)
+def get_digital_board(canteen_id: UUID, request: Request, response: Response, db: Session = Depends(get_db)):
+    snap = pickup_service.get_digital_token_board(db, canteen_id)
+    seed = snap.version or snap.model_dump(mode="json")
+    not_mod = apply_etag_and_check_304(request, response, seed, s_maxage=2, swr=4)
+    if not_mod is not None:
+        return not_mod
+    return snap
 
 
 @router.get("/token-board", response_model=OperationalTokenBoardResponse)
@@ -94,8 +100,6 @@ def get_operational_token_board(
     principal: AuthenticatedPrincipal = Depends(require_roles(*TOKEN_BOARD_STAFF_ROLES)),
     db: Session = Depends(get_db),
 ):
-    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
+    set_private_no_store(response)
     scoped_canteen = scoped_canteen_for_principal(principal, canteen_id)
     return pickup_service.get_operational_token_board(db, scoped_canteen)

@@ -27,7 +27,13 @@ def campus_rate_limit_key(request: Request) -> str:
         raw_token = auth_header[7:].strip()
         if raw_token:
             try:
-                payload = decode_token(raw_token)
+                state = request.scope.setdefault("state", {})
+                if state.get("jwt_raw") == raw_token and isinstance(state.get("jwt_payload"), dict):
+                    payload = state["jwt_payload"]
+                else:
+                    payload = decode_token(raw_token)
+                    state["jwt_raw"] = raw_token
+                    state["jwt_payload"] = payload
                 sub = payload.get("sub")
                 if sub and payload.get("type") == "access":
                     return f"user:{sub}"
@@ -91,6 +97,20 @@ class PureASGIRateLimitMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
+        self._uses_external_redis = _resolve_storage_uri().startswith(("redis://", "rediss://"))
+        self._handler_cache: dict[tuple[str, str], object] = {}
+
+    def _resolve_handler(self, fastapi_app, scope: Scope):
+        method = scope.get("method") or "GET"
+        path = scope.get("path") or ""
+        cache_key = (method, path)
+        cached = self._handler_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        handler = _find_route_handler(fastapi_app.routes, scope)
+        if handler is not None and len(self._handler_cache) < 512:
+            self._handler_cache[cache_key] = handler
+        return handler
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -108,7 +128,7 @@ class PureASGIRateLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        handler = _find_route_handler(fastapi_app.routes, scope)
+        handler = self._resolve_handler(fastapi_app, scope)
         if _should_exempt(app_limiter, handler):
             await self.app(scope, receive, send)
             return
@@ -116,7 +136,8 @@ class PureASGIRateLimitMiddleware:
         request = Request(scope)
         from app.core.cache import cache_manager
 
-        active_limiter = _fallback_limiter if cache_manager._redis_circuit_open() else app_limiter
+        use_memory_inline = (not self._uses_external_redis) or cache_manager._redis_circuit_open()
+        active_limiter = _fallback_limiter if use_memory_inline else app_limiter
 
         def _check() -> RateLimitExceeded | None:
             try:
@@ -139,7 +160,7 @@ class PureASGIRateLimitMiddleware:
                     return None
                 raise
 
-        exceeded = await anyio.to_thread.run_sync(_check)
+        exceeded = _check() if use_memory_inline else await anyio.to_thread.run_sync(_check)
         if exceeded is not None:
             resp = JSONResponse(
                 status_code=429,

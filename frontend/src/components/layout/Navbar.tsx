@@ -110,16 +110,21 @@ const NavbarContent: React.FC = () => {
   });
 
   const activeCanteen = canteens.find((c) => c.id === selectedCanteenId) || canteens[0];
+  const isStaffOrAuthRoute = /^\/(admin|command-center|kitchen|inventory|pickup|food-safety|assistant|staff|token-board|cashier|login|register|reset-password)/.test(
+    location.pathname
+  );
 
   const { data: cart } = useQuery<CartSummary>({
     queryKey: ["cart", activeCanteen?.id],
-    enabled: Boolean(activeCanteen?.id),
+    enabled: Boolean(activeCanteen?.id) && !isStaffOrAuthRoute,
+    staleTime: 15_000,
     queryFn: async () => (await api.get(`/carts?canteen_id=${activeCanteen!.id}`)).data,
   });
 
   const { data: notifications = [] } = useQuery<any[]>({
     queryKey: ["notifications-my"],
     enabled: Boolean(user),
+    staleTime: 30_000,
     queryFn: async () => {
       const list = (await api.get("/notifications/my")).data;
       handleIncomingNotifications(list);
@@ -129,8 +134,9 @@ const NavbarContent: React.FC = () => {
       typeof navigator !== "undefined" && navigator.onLine === false
         ? false
         : notifSyncStatus === "live"
-        ? 60_000
-        : 20_000,
+        ? 180_000
+        : 60_000,
+    refetchIntervalInBackground: false,
   });
 
   const unreadCount = notifications.filter((n) => !n.is_read).length;

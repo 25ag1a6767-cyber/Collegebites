@@ -1,4 +1,4 @@
-const CACHE_NAME = "collegebites-shell-v5";
+const CACHE_NAME = "collegebites-shell-v6";
 const PRECACHE_URLS = [
   "/",
   "/index.html",
@@ -64,13 +64,29 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Content-hashed Vite bundles under /assets/ are immutable -> strict Cache-First (zero redundant fetches)
+  if (url.pathname.startsWith("/assets/")) {
+    event.respondWith(
+      caches.match(request).then((cached) => {
+        if (cached) return cached;
+        return fetch(request).then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        });
+      })
+    );
+    return;
+  }
+
   if (
-    url.pathname.startsWith("/assets/") ||
     url.pathname.startsWith("/icons/") ||
     url.pathname.startsWith("/branding/") ||
     url.pathname.startsWith("/favicon") ||
     url.pathname === "/manifest.webmanifest" ||
-    /\.(js|css|woff2?|png|jpg|jpeg|svg|webp)$/i.test(url.pathname)
+    /\.(woff2?|png|jpg|jpeg|svg|webp)$/i.test(url.pathname)
   ) {
     event.respondWith(
       caches.match(request).then((cached) => {
